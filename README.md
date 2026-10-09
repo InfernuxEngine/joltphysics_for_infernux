@@ -1,3 +1,14 @@
+## Infernux maintenance
+
+This fork is maintained by [Infernux Libraries](https://github.com/InfernuxEngine)
+for the [Infernux engine](https://github.com/ChenlizheMe/Infernux).
+`infernux-support` is the sole maintained Infernux mainline and the default
+branch. Other upstream branches and tags are reference snapshots, not
+additional Infernux release lines. Upstream documentation and attribution
+are retained below.
+
+---
+
 [![CLA assistant](https://cla-assistant.io/readme/badge/jrouwe/JoltPhysics)](https://cla-assistant.io/jrouwe/JoltPhysics)
 [![Build Status](https://github.com/jrouwe/JoltPhysics/actions/workflows/build.yml/badge.svg)](https://github.com/jrouwe/JoltPhysics/actions/)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=jrouwe_JoltPhysics&metric=alert_status)](https://sonarcloud.io/dashboard?id=jrouwe_JoltPhysics)
