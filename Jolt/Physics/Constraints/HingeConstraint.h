@@ -54,6 +54,8 @@ public:
 	float						mMaxFrictionTorque = 0.0f;
 	/// Passive viscous coefficient (N m s / rad), outside the motor torque limit.
 	float						mViscousDamping = 0.0f;
+	/// Reflected motor inertia at the joint, kg m^2.
+	float						mArmature = 0.0f;
 
 	/// In case the constraint is powered, this determines the motor settings around the hinge axis
 	MotorSettings				mMotorSettings;
@@ -66,6 +68,7 @@ protected:
 /// A hinge constraint constrains 2 bodies on a single point and allows only a single axis of rotation
 class JPH_EXPORT HingeConstraint final : public TwoBodyConstraint
 {
+	friend class JointVelocitySolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE
 
@@ -119,6 +122,13 @@ public:
 	MotorSettings &				GetMotorSettings()										{ return mMotorSettings; }
 	const MotorSettings &		GetMotorSettings() const								{ return mMotorSettings; }
 
+	/// Reflected joint inertia and its physical velocity state.
+	void SetArmature(float inArmature) { JPH_ASSERT(inArmature >= 0.0f); mArmature = inArmature; ResetRotorState(); ResetWarmStart(); }
+	float GetArmature() const { return mArmature; }
+	void ResetRotorState();
+	double GetRotorSpeed() const { return mRotorSpeed; }
+	void SetRotorSpeed(double inSpeed) { mRotorSpeed = inSpeed; }
+
 	// Motor controls
 	void						SetMotorState(EMotorState inState)						{ JPH_ASSERT(inState == EMotorState::Off || mMotorSettings.IsValid()); mMotorState = inState; }
 	EMotorState					GetMotorState() const									{ return mMotorState; }
@@ -154,8 +164,8 @@ private:
 	void						CalculateA1AndTheta();
 	void						CalculateRotationLimitsConstraintProperties(float inDeltaTime);
 	void						CalculateMotorConstraintProperties(float inDeltaTime);
-	inline float				GetSmallestAngleToLimit() const;
-	inline bool					IsMinLimitClosest() const;
+	float						GetSmallestAngleToLimit() const;
+	bool						IsMinLimitClosest() const;
 
 	// CONFIGURATION PROPERTIES FOLLOW
 
@@ -185,6 +195,8 @@ private:
 	// Friction
 	float						mMaxFrictionTorque;
 	float						mViscousDamping;
+	float						mArmature;
+	double						mRotorSpeed = 0.0;
 
 	// Motor controls
 	MotorSettings				mMotorSettings;

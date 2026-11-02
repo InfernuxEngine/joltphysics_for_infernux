@@ -32,6 +32,7 @@ JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(HingeConstraintSettings)
 	JPH_ADD_ATTRIBUTE(HingeConstraintSettings, mLimitsSpringSettings)
 	JPH_ADD_ATTRIBUTE(HingeConstraintSettings, mMaxFrictionTorque)
 	JPH_ADD_ATTRIBUTE(HingeConstraintSettings, mViscousDamping)
+	JPH_ADD_ATTRIBUTE(HingeConstraintSettings, mArmature)
 	JPH_ADD_ATTRIBUTE(HingeConstraintSettings, mMotorSettings)
 }
 
@@ -50,6 +51,7 @@ void HingeConstraintSettings::SaveBinaryState(StreamOut &inStream) const
 	inStream.Write(mLimitsMax);
 	inStream.Write(mMaxFrictionTorque);
 	inStream.Write(mViscousDamping);
+	inStream.Write(mArmature);
 	mLimitsSpringSettings.SaveBinaryState(inStream);
 	mMotorSettings.SaveBinaryState(inStream);
 }
@@ -69,6 +71,7 @@ void HingeConstraintSettings::RestoreBinaryState(StreamIn &inStream)
 	inStream.Read(mLimitsMax);
 	inStream.Read(mMaxFrictionTorque);
 	inStream.Read(mViscousDamping);
+	inStream.Read(mArmature);
 	mLimitsSpringSettings.RestoreBinaryState(inStream);
 	mMotorSettings.RestoreBinaryState(inStream);}
 
@@ -81,6 +84,7 @@ HingeConstraint::HingeConstraint(Body &inBody1, Body &inBody2, const HingeConstr
 	TwoBodyConstraint(inBody1, inBody2, inSettings),
 	mMaxFrictionTorque(inSettings.mMaxFrictionTorque),
 	mViscousDamping(inSettings.mViscousDamping),
+	mArmature(inSettings.mArmature),
 	mMotorSettings(inSettings.mMotorSettings)
 {
 	// Store limits
@@ -120,6 +124,13 @@ HingeConstraint::HingeConstraint(Body &inBody1, Body &inBody2, const HingeConstr
 
 	// Store spring settings
 	SetLimitsSpringSettings(inSettings.mLimitsSpringSettings);
+	ResetRotorState();
+}
+
+void HingeConstraint::ResetRotorState()
+{
+	const Vec3 axis = mBody1->GetRotation() * mLocalSpaceHingeAxis1;
+	mRotorSpeed = axis.Dot(mBody2->GetAngularVelocity() - mBody1->GetAngularVelocity());
 }
 
 void HingeConstraint::NotifyShapeChanged(const BodyID &inBodyID, Vec3Arg inDeltaCOM)
@@ -168,7 +179,7 @@ void HingeConstraint::SetLimits(float inLimitsMin, float inLimitsMax)
 
 void HingeConstraint::CalculateA1AndTheta()
 {
-	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f || mViscousDamping > 0.0f)
+	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f || mViscousDamping > 0.0f || mArmature > 0.0f)
 	{
 		Quat rotation1 = mBody1->GetRotation();
 
@@ -394,6 +405,7 @@ void HingeConstraint::SaveState(StateRecorder &inStream) const
 
 	mMotorConstraintPart.SaveState(inStream);
 	inStream.Write(mPassiveLambda);
+	inStream.Write(mRotorSpeed);
 	mRotationConstraintPart.SaveState(inStream);
 	mPointConstraintPart.SaveState(inStream);
 	mRotationLimitsConstraintPart.SaveState(inStream);
@@ -409,6 +421,7 @@ void HingeConstraint::RestoreState(StateRecorder &inStream)
 
 	mMotorConstraintPart.RestoreState(inStream);
 	inStream.Read(mPassiveLambda);
+	inStream.Read(mRotorSpeed);
 	mRotationConstraintPart.RestoreState(inStream);
 	mPointConstraintPart.RestoreState(inStream);
 	mRotationLimitsConstraintPart.RestoreState(inStream);
@@ -435,6 +448,7 @@ Ref<ConstraintSettings> HingeConstraint::GetConstraintSettings() const
 	settings->mLimitsSpringSettings = mLimitsSpringSettings;
 	settings->mMaxFrictionTorque = mMaxFrictionTorque;
 	settings->mViscousDamping = mViscousDamping;
+	settings->mArmature = mArmature;
 	settings->mMotorSettings = mMotorSettings;
 	return settings;
 }

@@ -42,6 +42,7 @@ JPH_NAMESPACE_BEGIN
 **/
 class HingeRotationConstraintPart
 {
+	friend class JointVelocitySolver;
 public:
 	using Vec2 = Vector<2>;
 	using Mat22 = Matrix<2, 2>;

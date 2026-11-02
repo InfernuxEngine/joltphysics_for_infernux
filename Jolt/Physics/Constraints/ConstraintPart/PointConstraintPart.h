@@ -39,6 +39,7 @@ JPH_NAMESPACE_BEGIN
 /// E = identity matrix.
 class PointConstraintPart
 {
+	friend class JointVelocitySolver;
 	JPH_INLINE bool				ApplyVelocityStep(Body &ioBody1, Body &ioBody2, Vec3Arg inLambda) const
 	{
 		// Apply impulse if delta is not zero

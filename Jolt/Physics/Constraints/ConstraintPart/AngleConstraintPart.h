@@ -8,6 +8,7 @@
 #include <Jolt/Physics/Constraints/ConstraintPart/SpringPart.h>
 #include <Jolt/Physics/Constraints/SpringSettings.h>
 #include <Jolt/Physics/StateRecorder.h>
+#include <Jolt/Physics/Constraints/ConstraintPart/DriveImpulse.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -35,6 +36,7 @@ JPH_NAMESPACE_BEGIN
 /// \f$\beta\f$ = baumgarte constant.
 class AngleConstraintPart
 {
+	friend class JointVelocitySolver;
 	/// Internal helper function to update velocities of bodies after Lagrange multiplier is calculated
 	JPH_INLINE bool				ApplyVelocityStep(Body &ioBody1, Body &ioBody2, float inLambda) const
 	{
@@ -222,31 +224,9 @@ public:
 		const float k = inAxis.Dot(mInvI1_Axis + mInvI2_Axis);
 		const float old_total = mTotalLambda + ioPassiveLambda;
 		const float free_velocity = inAxis.Dot(ioBody2.GetAngularVelocity() - ioBody1.GetAngularVelocity()) - k * old_total;
-		const float gamma = mSpringPart.GetSoftness();
-		const float bias = mSpringPart.GetBias(0.0f);
-		float motor;
-		if (gamma > 0.0f)
-			motor = Clamp(-bias / gamma, inMinMotor, inMaxMotor);
-		else if (bias < 0.0f)
-			motor = inMaxMotor;
-		else if (bias > 0.0f)
-			motor = inMinMotor;
-		else
-			motor = Clamp(-free_velocity / k, inMinMotor, inMaxMotor);
-
-		// At rest, dry friction can take any impulse in [-h*f, h*f].
-		const float at_rest = free_velocity + k * motor;
-		float passive;
-		if (abs(at_rest) <= k * inFrictionImpulse)
-			passive = -free_velocity / k - motor;
-		else
-		{
-			const float friction = at_rest > 0.0f? inFrictionImpulse : -inFrictionImpulse;
-			const float b = 1.0f + k * inDampingImpulse;
-			motor = Clamp(-(free_velocity - k * friction + b * bias) / (b * gamma + k), inMinMotor, inMaxMotor);
-			const float velocity = (free_velocity + k * motor - k * friction) / b;
-			passive = -inDampingImpulse * velocity - friction;
-		}
+		const auto solved = SolveDriveImpulse(free_velocity, k, mSpringPart.GetSoftness(), mSpringPart.GetBias(0.0f),
+			inMinMotor, inMaxMotor, inDampingImpulse, inFrictionImpulse);
+		const float motor = solved.mMotor, passive = solved.mPassive;
 		const float delta = (motor - mTotalLambda) + (passive - ioPassiveLambda);
 		mTotalLambda = motor;
 		ioPassiveLambda = passive;

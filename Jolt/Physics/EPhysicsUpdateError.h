@@ -9,6 +9,7 @@ JPH_NAMESPACE_BEGIN
 /// Enum used by PhysicsSystem to report error conditions during the PhysicsSystem::Update call. This is a bit field, multiple errors can trigger in the same update.
 enum class EPhysicsUpdateError : uint32
 {
+	ConstraintResponseFailed = 1 << 3, ///< Mechanical island response is invalid or uses an unsupported constraint law.
 	None					= 0,			///< No errors
 	ManifoldCacheFull		= 1 << 0,		///< The manifold cache is full, this means that the total number of contacts between bodies is too high. Some contacts were ignored. Increase inMaxContactConstraints in PhysicsSystem::Init.
 	BodyPairCacheFull		= 1 << 1,		///< The body pair cache is full, this means that too many bodies contacted. Some contacts were ignored. Increase inMaxBodyPairs in PhysicsSystem::Init.

@@ -33,6 +33,7 @@ class PhysicsUpdateContext;
 /// WARNING: This class is an internal part of PhysicsSystem, it has no functions that can be called by users of the library.
 class JPH_EXPORT ContactConstraintManager : public NonCopyable
 {
+	friend class JointVelocitySolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE
 

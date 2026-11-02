@@ -22,6 +22,8 @@
 #include <Jolt/Physics/Collision/SimShapeFilterWrapper.h>
 #include <Jolt/Physics/Collision/InternalEdgeRemovingCollector.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
+#include <Jolt/Physics/Constraints/JointVelocitySolver.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.h>
 #include <Jolt/Physics/DeterminismLog.h>
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
@@ -659,6 +661,24 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 
 	// Clear the contact manager
 	mContactManager.FinishConstraintBuffer();
+
+	// Sleeping retires body momentum in the ordinary body manager. Retire the
+	// reflected joint momentum at the same completed-update boundary, after
+	// all sleep jobs have actually cleared their bodies' velocities.
+	{
+#ifdef JPH_ENABLE_ASSERTS
+		BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::Read);
+#endif
+		const uint32 count = context.mSteps.back().mNumActiveConstraints.load(memory_order_relaxed);
+		for (uint32 i = 0; i < count; ++i)
+			if (context.mActiveConstraints[i]->GetSubType() == EConstraintSubType::Hinge)
+			{
+				auto &hinge = static_cast<HingeConstraint &>(*context.mActiveConstraints[i]);
+				const Body &a = *hinge.GetBody1(), &b = *hinge.GetBody2();
+				if (hinge.GetArmature() > 0 && ((a.IsDynamic() && !a.IsActive()) || (b.IsDynamic() && !b.IsActive())))
+					hinge.ResetRotorState();
+			}
+	}
 
 	// Free active constraints
 	inTempAllocator->Free(context.mActiveConstraints, mConstraintManager.GetNumConstraints() * sizeof(Constraint *));
@@ -1515,6 +1535,22 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 
 				// Sort contacts to give a deterministic simulation
 				mContactManager.SortContacts(contacts_begin, contacts_end);
+			}
+
+			// A mechanical response propagates impulses beyond the two endpoints.
+			// The original endpoint-only batch splitter cannot schedule this island.
+			if (JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end))
+			{
+				JointVelocitySolver solver;
+				CalculateSolverSteps steps(mPhysicsSettings);
+				const bool solved = solver.Solve(active_constraints, constraints_begin, constraints_end,
+					mContactManager, contacts_begin, contacts_end, delta_time, warm_start_impulse_ratio, steps);
+				mIslandBuilder.SetNumPositionSteps(island_idx, steps.GetNumPositionSteps());
+				if (!solved)
+					ioContext->mErrors.fetch_or(uint32(EPhysicsUpdateError::ConstraintResponseFailed), memory_order_relaxed);
+				else
+					mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+				continue;
 			}
 
 			// Split up large islands
