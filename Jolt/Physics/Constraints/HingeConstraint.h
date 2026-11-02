@@ -50,8 +50,10 @@ public:
 	/// When enabled, this makes the limits soft. When the constraint exceeds the limits, a spring force will pull it back.
 	SpringSettings				mLimitsSpringSettings;
 
-	/// Maximum amount of torque (N m) to apply as friction when the constraint is not powered by a motor
+	/// Load-independent dry friction torque (N m), also present when the motor is powered.
 	float						mMaxFrictionTorque = 0.0f;
+	/// Passive viscous coefficient (N m s / rad), outside the motor torque limit.
+	float						mViscousDamping = 0.0f;
 
 	/// In case the constraint is powered, this determines the motor settings around the hinge axis
 	MotorSettings				mMotorSettings;
@@ -110,6 +112,8 @@ public:
 	// Friction control
 	void						SetMaxFrictionTorque(float inFrictionTorque)			{ mMaxFrictionTorque = inFrictionTorque; }
 	float						GetMaxFrictionTorque() const							{ return mMaxFrictionTorque; }
+	void SetViscousDamping(float inDamping) { mViscousDamping = inDamping; }
+	float GetViscousDamping() const { return mViscousDamping; }
 
 	// Motor settings
 	MotorSettings &				GetMotorSettings()										{ return mMotorSettings; }
@@ -180,6 +184,7 @@ private:
 
 	// Friction
 	float						mMaxFrictionTorque;
+	float						mViscousDamping;
 
 	// Motor controls
 	MotorSettings				mMotorSettings;
@@ -200,6 +205,7 @@ private:
 	HingeRotationConstraintPart mRotationConstraintPart;
 	AngleConstraintPart			mRotationLimitsConstraintPart;
 	AngleConstraintPart			mMotorConstraintPart;
+	float						mPassiveLambda = 0.0f;
 };
 
 JPH_NAMESPACE_END

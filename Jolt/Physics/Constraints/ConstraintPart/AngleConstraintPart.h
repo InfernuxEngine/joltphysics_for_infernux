@@ -212,6 +212,55 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
 	}
 
+	/// Solve a capped motor, viscous damping and load-independent dry friction
+	/// together on this axis. Separate co-linear rows otherwise undo one another
+	/// on light links. Only the motor impulse is subject to its torque limits.
+	inline bool SolveVelocityConstraintWithPassive(Body &ioBody1, Body &ioBody2, Vec3Arg inAxis,
+		float inMinMotor, float inMaxMotor, float inDampingImpulse, float inFrictionImpulse,
+		float &ioPassiveLambda)
+	{
+		const float k = inAxis.Dot(mInvI1_Axis + mInvI2_Axis);
+		const float old_total = mTotalLambda + ioPassiveLambda;
+		const float free_velocity = inAxis.Dot(ioBody2.GetAngularVelocity() - ioBody1.GetAngularVelocity()) - k * old_total;
+		const float gamma = mSpringPart.GetSoftness();
+		const float bias = mSpringPart.GetBias(0.0f);
+		float motor;
+		if (gamma > 0.0f)
+			motor = Clamp(-bias / gamma, inMinMotor, inMaxMotor);
+		else if (bias < 0.0f)
+			motor = inMaxMotor;
+		else if (bias > 0.0f)
+			motor = inMinMotor;
+		else
+			motor = Clamp(-free_velocity / k, inMinMotor, inMaxMotor);
+
+		// At rest, dry friction can take any impulse in [-h*f, h*f].
+		const float at_rest = free_velocity + k * motor;
+		float passive;
+		if (abs(at_rest) <= k * inFrictionImpulse)
+			passive = -free_velocity / k - motor;
+		else
+		{
+			const float friction = at_rest > 0.0f? inFrictionImpulse : -inFrictionImpulse;
+			const float b = 1.0f + k * inDampingImpulse;
+			motor = Clamp(-(free_velocity - k * friction + b * bias) / (b * gamma + k), inMinMotor, inMaxMotor);
+			const float velocity = (free_velocity + k * motor - k * friction) / b;
+			passive = -inDampingImpulse * velocity - friction;
+		}
+		const float delta = (motor - mTotalLambda) + (passive - ioPassiveLambda);
+		mTotalLambda = motor;
+		ioPassiveLambda = passive;
+		return ApplyVelocityStep(ioBody1, ioBody2, delta);
+	}
+
+	/// Warm start the combined axis without applying large cancelling impulses separately.
+	inline void WarmStartWithPassive(Body &ioBody1, Body &ioBody2, float inRatio, float &ioPassiveLambda)
+	{
+		mTotalLambda *= inRatio;
+		ioPassiveLambda *= inRatio;
+		ApplyVelocityStep(ioBody1, ioBody2, mTotalLambda + ioPassiveLambda);
+	}
+
 	/// Return lagrange multiplier
 	float						GetTotalLambda() const
 	{

@@ -149,6 +149,9 @@ public:
 		return mSoftness != 0.0f;
 	}
 
+	/// Impulse-space compliance, used when eliminating co-linear passive forces.
+	JPH_INLINE float			GetSoftness() const { return mSoftness; }
+
 	/// Get total bias b, including supplied bias and bias for spring: lambda = J v + b
 	JPH_INLINE float			GetBias(float inTotalLambda) const
 	{
