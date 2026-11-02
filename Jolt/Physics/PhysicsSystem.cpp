@@ -70,6 +70,13 @@ static const Color cColorSoftBodyCollide = Color::sGetDistinctColor(21);
 static const Color cColorSoftBodySimulate = Color::sGetDistinctColor(22);
 static const Color cColorSoftBodyFinalize = Color::sGetDistinctColor(23);
 
+void PhysicsSystem::ForgetBodyContacts(const BodyID *inBodies, int inNumber)
+{
+	for (int i = 0; i < inNumber; ++i)
+		GetBodyInterface().InvalidateContactCache(inBodies[i]);
+	mContactManager.ForgetBodyContacts(inBodies, inNumber);
+}
+
 PhysicsSystem::~PhysicsSystem()
 {
 	// Remove broadphase

@@ -16,6 +16,7 @@
 #include <Jolt/Physics/StateRecorder.h>
 #include <Jolt/Core/HashCombine.h>
 #include <Jolt/Core/NonCopyable.h>
+#include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/Math/Vector.h>
 
 JPH_SUPPRESS_WARNINGS_STD_BEGIN
@@ -57,6 +58,10 @@ public:
 		Float3 impulse;
 	};
 	void GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses) const;
+
+	/// Forget previous-step manifold identity and impulses for an episode reset.
+	/// Called only between PhysicsSystem::Update calls.
+	void ForgetBodyContacts(const BodyID *inBodies, int inNumber);
 
 	/// Listener that is notified whenever a contact point between two bodies is added/updated/removed
 	void						SetContactListener(ContactListener *inListener)						{ mContactListener = inListener; }
@@ -324,6 +329,7 @@ private:
 		/// Flags for this cached manifold
 		enum class EFlags : uint16
 		{
+			Discarded = 4, ///< An explicit reset retired this contact without an Exit callback.
 			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
 			CCDContact			= 2																	///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
 		};
@@ -405,6 +411,7 @@ private:
 		void					GetAllManifoldsSorted(const CachedBodyPair &inBodyPair, Array<const MKeyValue *> &outAll) const;
 		void					GetAllCCDManifoldsSorted(Array<const MKeyValue *> &outAll) const;
 		void					ContactPointRemovedCallbacks(ContactListener *inListener);
+		void ForgetBodyContacts(const UnorderedSet<uint32> &inBodies);
 
 #ifdef JPH_ENABLE_ASSERTS
 		/// Get the amount of manifolds in the cache

@@ -66,6 +66,8 @@ public:
 	/// You can't change contact listener during PhysicsSystem::Update but it can be changed at any other time.
 	void SetRecordAppliedContactImpulses(bool inEnabled) { mContactManager.SetRecordAppliedContactImpulses(inEnabled); }
 	const Array<ContactConstraintManager::AppliedContactImpulse> &GetAppliedContactImpulses() const { return mAppliedContactImpulses; }
+	/// Retire contact identity/impulses without Removed events. Outside Update only.
+	void ForgetBodyContacts(const BodyID *inBodies, int inNumber);
 	void						SetContactListener(ContactListener *inListener)				{ mContactManager.SetContactListener(inListener); }
 	ContactListener *			GetContactListener() const									{ return mContactManager.GetContactListener(); }
 

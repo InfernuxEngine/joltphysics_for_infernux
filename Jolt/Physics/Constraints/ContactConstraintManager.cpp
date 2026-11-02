@@ -333,7 +333,8 @@ void ContactConstraintManager::ManifoldCache::Prepare(uint inExpectedNumBodyPair
 const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const
 {
 	JPH_ASSERT(mIsFinalized);
-	return mCachedManifolds.Find(inKey, inKeyHash);
+	const MKeyValue *kv = mCachedManifolds.Find(inKey, inKeyHash);
+	return kv != nullptr && (kv->GetValue().mFlags & uint16(CachedManifold::EFlags::Discarded)) != 0 ? nullptr : kv;
 }
 
 ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints)
@@ -378,7 +379,31 @@ ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Fr
 const ContactConstraintManager::BPKeyValue *ContactConstraintManager::ManifoldCache::Find(const BodyPair &inKey, uint64 inKeyHash) const
 {
 	JPH_ASSERT(mIsFinalized);
-	return mCachedBodyPairs.Find(inKey, inKeyHash);
+	const BPKeyValue *kv = mCachedBodyPairs.Find(inKey, inKeyHash);
+	if (kv != nullptr && kv->GetValue().mFirstCachedManifold != ManifoldMap::cInvalidHandle
+		&& (FromHandle(kv->GetValue().mFirstCachedManifold)->GetValue().mFlags & uint16(CachedManifold::EFlags::Discarded)) != 0)
+		return nullptr;
+	return kv;
+}
+
+void ContactConstraintManager::ManifoldCache::ForgetBodyContacts(const UnorderedSet<uint32> &inBodies)
+{
+	JPH_ASSERT(mIsFinalized);
+	for (MKeyValue &kv : mCachedManifolds)
+		if (inBodies.find(kv.GetKey().GetBody1ID().GetIndexAndSequenceNumber()) != inBodies.end()
+			|| inBodies.find(kv.GetKey().GetBody2ID().GetIndexAndSequenceNumber()) != inBodies.end())
+			kv.GetValue().mFlags |= uint16(CachedManifold::EFlags::Discarded);
+}
+
+void ContactConstraintManager::ForgetBodyContacts(const BodyID *inBodies, int inNumber)
+{
+	if (inNumber == 0)
+		return;
+	UnorderedSet<uint32> ids;
+	ids.reserve(inNumber);
+	for (int i = 0; i < inNumber; ++i)
+		ids.insert(inBodies[i].GetIndexAndSequenceNumber());
+	mCache[mCacheWriteIdx ^ 1].ForgetBodyContacts(ids);
 }
 
 ContactConstraintManager::BPKeyValue *ContactConstraintManager::ManifoldCache::Create(ContactAllocator &ioContactAllocator, const BodyPair &inKey, uint64 inKeyHash)
@@ -413,7 +438,8 @@ void ContactConstraintManager::ManifoldCache::GetAllManifoldsSorted(const Cached
 	for (uint32 handle = inBodyPair.mFirstCachedManifold; handle != ManifoldMap::cInvalidHandle; handle = FromHandle(handle)->GetValue().mNextWithSameBodyPair)
 	{
 		const MKeyValue *kv = mCachedManifolds.FromHandle(handle);
-		outAll.push_back(kv);
+		if ((kv->GetValue().mFlags & uint16(CachedManifold::EFlags::Discarded)) == 0)
+			outAll.push_back(kv);
 	}
 
 	// Sort by key
@@ -427,7 +453,8 @@ void ContactConstraintManager::ManifoldCache::GetAllCCDManifoldsSorted(Array<con
 	mCachedManifolds.GetAllKeyValues(outAll);
 
 	for (int i = (int)outAll.size() - 1; i >= 0; --i)
-		if ((outAll[i]->GetValue().mFlags & (uint16)CachedManifold::EFlags::CCDContact) == 0)
+		if ((outAll[i]->GetValue().mFlags & (uint16)CachedManifold::EFlags::CCDContact) == 0
+			|| (outAll[i]->GetValue().mFlags & uint16(CachedManifold::EFlags::Discarded)) != 0)
 		{
 			outAll[i] = outAll.back();
 			outAll.pop_back();
@@ -444,7 +471,7 @@ void ContactConstraintManager::ManifoldCache::ContactPointRemovedCallbacks(Conta
 	JPH_PROFILE_FUNCTION();
 
 	for (MKeyValue &kv : mCachedManifolds)
-		if ((kv.GetValue().mFlags & uint16(CachedManifold::EFlags::ContactPersisted)) == 0)
+		if ((kv.GetValue().mFlags & (uint16(CachedManifold::EFlags::ContactPersisted) | uint16(CachedManifold::EFlags::Discarded))) == 0)
 			inListener->OnContactRemoved(kv.GetKey());
 }
 
