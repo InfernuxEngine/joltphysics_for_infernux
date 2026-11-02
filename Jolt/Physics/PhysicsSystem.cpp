@@ -1391,7 +1391,7 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 
 	// Prepare the large island splitter
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
-		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
+		mLargeIslandSplitter.Prepare(mIslandBuilder, ioContext->mActiveConstraints, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
 }
 
 void PhysicsSystem::JobBodySetIslandIndex()
@@ -2696,7 +2696,8 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here
 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
-				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold)
+				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold
+				&& !JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end))
 				continue;
 
 		#ifdef JPH_TRACK_SIMULATION_STATS
