@@ -341,6 +341,7 @@ set(JOLT_PHYSICS_SRC_FILES
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/GearConstraint.h
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/HingeConstraint.cpp
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/HingeConstraint.h
+	${JOLT_PHYSICS_ROOT}/Physics/Constraints/MechanicalResponse.h
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/MotorSettings.cpp
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/MotorSettings.h
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/PathConstraint.cpp
