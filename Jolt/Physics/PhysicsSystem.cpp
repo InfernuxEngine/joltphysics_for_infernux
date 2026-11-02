@@ -23,6 +23,7 @@
 #include <Jolt/Physics/Collision/InternalEdgeRemovingCollector.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/Constraints/JointVelocitySolver.h>
+#include <Jolt/Physics/Constraints/JointPositionSolver.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.h>
 #include <Jolt/Physics/DeterminismLog.h>
@@ -2695,9 +2696,9 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 
 			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here
 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
+			const bool mechanical = JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
-				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold
-				&& !JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end))
+				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold && !mechanical)
 				continue;
 
 		#ifdef JPH_TRACK_SIMULATION_STATS
@@ -2711,10 +2712,20 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 				uint num_position_steps = mIslandBuilder.GetNumPositionSteps(island_idx);
 				for (uint position_step = 0; position_step < num_position_steps; ++position_step)
 				{
-					bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
-					applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
-					if (!applied_impulse)
-						break;
+					if (mechanical)
+					{
+						const auto result = JointPositionSolver::Solve(active_constraints, constraints_begin, constraints_end,
+							mContactManager, contacts_begin, contacts_end, mPhysicsSettings);
+						if (result == JointPositionSolver::EResult::Invalid)
+							ioContext->mErrors.fetch_or(uint32(EPhysicsUpdateError::ConstraintResponseFailed), memory_order_relaxed);
+						if (result != JointPositionSolver::EResult::Applied) break;
+					}
+					else
+					{
+						bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
+						applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+						if (!applied_impulse) break;
+					}
 				}
 			}
 

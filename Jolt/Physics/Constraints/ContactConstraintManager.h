@@ -34,6 +34,7 @@ class PhysicsUpdateContext;
 class JPH_EXPORT ContactConstraintManager : public NonCopyable
 {
 	friend class JointVelocitySolver;
+	friend class JointPositionSolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE
 
@@ -402,8 +403,8 @@ private:
 		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
 		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
 		uint32					ToHandle(const MKeyValue *inKeyValue) const;
-		const MKeyValue *		FromHandle(uint32 inHandle) const;
-		MKeyValue *				FromHandle(uint32 inHandle);
+		const MKeyValue *		FromHandle(uint32 inHandle) const { return mCachedManifolds.FromHandle(inHandle); }
+		MKeyValue *				FromHandle(uint32 inHandle) { return mCachedManifolds.FromHandle(inHandle); }
 
 		/// Find / create entry for BodyPair -> CachedBodyPair
 		const BPKeyValue *		Find(const BodyPair &inKey, uint64 inKeyHash) const;
@@ -468,6 +469,9 @@ private:
 
 		/// Distance between the friction center and this contact point
 		float					mDistanceToFrictionCenter;
+
+		/// Frozen velocity-solver midpoint, before integration / position correction.
+		Float3					mWorldSpacePosition;
 	};
 
 	class ContactConstraintBase
@@ -566,7 +570,7 @@ private:
 	static void					sStoreAppliedImpulses(ContactConstraintBase &ioConstraint, ManifoldCache &inManifoldCache);
 
 	template <EMotionType Type1, EMotionType Type2>
-	static void					sAppendAppliedContactImpulses(const ContactConstraintBase &inConstraint, const ManifoldCache &inManifoldCache, Array<AppliedContactImpulse> &outImpulses);
+	static void					sAppendAppliedContactImpulses(const ContactConstraintBase &inConstraint, Array<AppliedContactImpulse> &outImpulses);
 
 	/// Internal helper function to solve a single position constraint. Templated to the motion type to reduce the amount of branches and calculations.
 	template <EMotionType Type1, EMotionType Type2>

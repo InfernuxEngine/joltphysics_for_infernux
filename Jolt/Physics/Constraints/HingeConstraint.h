@@ -68,6 +68,7 @@ protected:
 /// A hinge constraint constrains 2 bodies on a single point and allows only a single axis of rotation
 class JPH_EXPORT HingeConstraint final : public TwoBodyConstraint
 {
+	friend class JointPositionSolver;
 	friend class JointVelocitySolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE

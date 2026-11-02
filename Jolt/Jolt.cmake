@@ -342,6 +342,10 @@ set(JOLT_PHYSICS_SRC_FILES
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/HingeConstraint.cpp
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/HingeConstraint.h
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/MechanicalResponse.h
+	${JOLT_PHYSICS_ROOT}/Physics/Constraints/MechanicalAssembly.h
+	${JOLT_PHYSICS_ROOT}/Physics/Constraints/JointGeometry.h
+	${JOLT_PHYSICS_ROOT}/Physics/Constraints/JointPositionSolver.h
+	${JOLT_PHYSICS_ROOT}/Physics/Constraints/JointPositionSolver.cpp
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/JointVelocitySolver.cpp
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/JointVelocitySolver.h
 	${JOLT_PHYSICS_ROOT}/Physics/Constraints/ConstraintPart/DriveImpulse.h

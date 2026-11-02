@@ -16,44 +16,6 @@ bool JointVelocitySolver::NeedsResponse(Constraint **inConstraints, const uint32
 	return false;
 }
 
-size_t JointVelocitySolver::AddBody(Body &ioBody)
-{
-	const auto found = std::find(mBodies.begin(), mBodies.end(), &ioBody);
-	if (found != mBodies.end()) return size_t(found - mBodies.begin());
-	MechanicalResponse::BodyState state;
-	state.mDynamic = ioBody.IsDynamic();
-	const Vec3 v = ioBody.GetLinearVelocity(), w = ioBody.GetAngularVelocity();
-	for (uint a = 0; a < 3; ++a) { state.mVelocity[a] = v[a]; state.mVelocity[a + 3] = w[a]; }
-	if (state.mDynamic) {
-		const auto *mp = ioBody.GetMotionProperties();
-		const Vec3 mask = mp->LockTranslation(Vec3::sReplicate(1.0f));
-		const Mat44 inertia = mp->GetInverseInertiaForRotation(Mat44::sRotation(ioBody.GetRotation()));
-		for (uint a = 0; a < 3; ++a) {
-			state.mInverseMass[a * 6 + a] = mp->GetInverseMass() * mask[a];
-			for (uint b = 0; b < 3; ++b) state.mInverseMass[(a + 3) * 6 + b + 3] = inertia(a, b);
-		}
-	}
-	mBodies.push_back(&ioBody);
-	return mResponse.AddBody(state);
-}
-
-JointVelocitySolver::Jacobian JointVelocitySolver::Angular(Body &ioBody1, Body &ioBody2, Vec3Arg inAxis)
-{
-	Jacobian j{{AddBody(ioBody1), {}}, {AddBody(ioBody2), {}}};
-	for (uint a = 0; a < 3; ++a) { j.mFirst.mJacobian[a + 3] = -inAxis[a]; j.mSecond.mJacobian[a + 3] = inAxis[a]; }
-	return j;
-}
-
-JointVelocitySolver::Jacobian JointVelocitySolver::Linear(Body &ioBody1, Body &ioBody2, Vec3Arg inAxis, Vec3Arg inLever1, Vec3Arg inLever2)
-{
-	auto j = Angular(ioBody1, ioBody2, Vec3::sZero());
-	for (uint a = 0; a < 3; ++a) {
-		j.mFirst.mJacobian[a] = -inAxis[a]; j.mSecond.mJacobian[a] = inAxis[a];
-		j.mFirst.mJacobian[a + 3] = -inLever1[a]; j.mSecond.mJacobian[a + 3] = inLever2[a];
-	}
-	return j;
-}
-
 JointVelocitySolver::Row JointVelocitySolver::MakeRow(const Jacobian &inJacobian, float &ioLambda, bool inActive)
 {
 	Row row;
@@ -104,7 +66,7 @@ void JointVelocitySolver::AddSlider(SliderConstraint &s, float dt)
 }
 
 template <EMotionType T1, EMotionType T2>
-JointVelocitySolver::Row JointVelocitySolver::ContactRow(Body &a, Body &b, Vec3Arg axis, ContactConstraintPart<T1, T2> &part)
+JointVelocitySolver::Row JointVelocitySolver::ContactRow(Body &a, Body &b, Vec3Arg axis, ContactConstraintPart<T1, T2> &part, bool prepare)
 {
 	if (!part.IsActive()) return MakeRow(Angular(a, b, Vec3::sZero()), part.mTotalLambda, false);
 	Vec3 r1 = Vec3::sZero(), r2 = Vec3::sZero();
@@ -112,7 +74,7 @@ JointVelocitySolver::Row JointVelocitySolver::ContactRow(Body &a, Body &b, Vec3A
 	if constexpr (T2 != EMotionType::Static) r2 = Vec3::sLoadFloat3Unsafe(part.mR2xAxis);
 	auto row = MakeRow(Linear(a, b, axis, r1, r2), part.mTotalLambda, part.IsActive());
 	row.mBias = part.IsActive()? part.mBias : 0.0;
-	row.mResponse = mResponse.Prepare(row.mJacobian);
+	if (prepare) row.mResponse = mResponse.Prepare(row.mJacobian);
 	return row;
 }
 
@@ -128,8 +90,12 @@ bool JointVelocitySolver::AddContact(ContactConstraintManager::ContactConstraint
 	Contact contact;
 	contact.mFriction = c.mCombinedFriction;
 	Vec3 t1, t2; c.GetTangents(t1, t2);
-	contact.mTangents[0] = ContactRow(a, b, t1, c.mFrictionConstraint1);
-	contact.mTangents[1] = ContactRow(a, b, t2, c.mFrictionConstraint2);
+	contact.mTangents[0] = ContactRow(a, b, t1, c.mFrictionConstraint1, false);
+	contact.mTangents[1] = ContactRow(a, b, t2, c.mFrictionConstraint2, false);
+	auto tangents = mResponse.PreparePair(contact.mTangents[0].mJacobian,contact.mTangents[1].mJacobian);
+	contact.mPlane = tangents.mPlane;
+	contact.mTangents[0].mResponse = std::move(tangents.mFirst);
+	contact.mTangents[1].mResponse = std::move(tangents.mSecond);
 	contact.mAngular = MakeRow(Angular(a, b, c.GetWorldSpaceNormal()), c.mAngularFrictionConstraint.mTotalLambda, c.mAngularFrictionConstraint.IsActive());
 	contact.mAngular.mBias = c.mAngularFrictionConstraint.IsActive()? c.mAngularFrictionConstraint.mBias : 0.0;
 	contact.mAngular.mResponse = mResponse.Prepare(contact.mAngular.mJacobian);
@@ -288,10 +254,17 @@ bool JointVelocitySolver::Solve(Constraint **constraints, const uint32 *begin, c
 			double normal = 0, angular = 0;
 			for (size_t i = 0; i < c.mNormals.size(); ++i) { normal += c.mNormals[i].mLambda; angular += c.mDistances[i] * c.mNormals[i].mLambda; }
 			const double limit = c.mFriction * normal;
-			double x = Candidate(c.mTangents[0]), y = Candidate(c.mTangents[1]);
-			const double length = std::hypot(x, y);
-			if (length > limit) { x *= limit / length; y *= limit / length; }
-			changed |= Apply(c.mTangents[0], x); changed |= Apply(c.mTangents[1], y);
+			const auto &t0 = c.mTangents[0], &t1 = c.mTangents[1];
+			// Remove the complete old tangent impulse before solving this
+			// two-dimensional maximum-dissipation problem. The response of
+			// an articulated mechanism generally couples both directions.
+			const double q0 = mResponse.Velocity(t0.mJacobian)+t0.mBias
+				-t0.mResponse.mInverseEffectiveMass*t0.mLambda-c.mPlane.mCross*t1.mLambda;
+			const double q1 = mResponse.Velocity(t1.mJacobian)+t1.mBias
+				-c.mPlane.mCross*t0.mLambda-t1.mResponse.mInverseEffectiveMass*t1.mLambda;
+			std::array<double,2> lambda;
+			if (!c.mPlane.SolveDisk(q0,q1,limit,lambda)) return false;
+			changed |= Apply(c.mTangents[0], lambda[0]); changed |= Apply(c.mTangents[1], lambda[1]);
 			c.mAngular.mMin = -c.mFriction * angular; c.mAngular.mMax = -c.mAngular.mMin;
 			changed |= SolveRow(c.mAngular);
 			for (auto &row : c.mNormals) changed |= SolveRow(row);

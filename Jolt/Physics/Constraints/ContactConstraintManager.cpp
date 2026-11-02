@@ -44,6 +44,7 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 
 	// Calculate collision points relative to body
 	RVec3 p = 0.5_r * (inWorldSpacePosition1 + inWorldSpacePosition2);
+	Vec3(p).StoreFloat3(&mWorldSpacePosition);
 	Vec3 r1 = Vec3(p - inBody1.GetCenterOfMassPosition());
 	Vec3 r2 = Vec3(p - inBody2.GetCenterOfMassPosition());
 
@@ -364,16 +365,6 @@ uint32 ContactConstraintManager::ManifoldCache::ToHandle(const MKeyValue *inKeyV
 {
 	JPH_ASSERT(!mIsFinalized);
 	return mCachedManifolds.ToHandle(inKeyValue);
-}
-
-const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::FromHandle(uint32 inHandle) const
-{
-	return mCachedManifolds.FromHandle(inHandle);
-}
-
-ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::FromHandle(uint32 inHandle)
-{
-	return mCachedManifolds.FromHandle(inHandle);
 }
 
 const ContactConstraintManager::BPKeyValue *ContactConstraintManager::ManifoldCache::Find(const BodyPair &inKey, uint64 inKeyHash) const
@@ -1907,29 +1898,29 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOf
 }
 
 template <EMotionType Type1, EMotionType Type2>
-void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstraintBase &inConstraint, const ManifoldCache &inManifoldCache, Array<AppliedContactImpulse> &outImpulses)
+void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstraintBase &inConstraint, Array<AppliedContactImpulse> &outImpulses)
 {
 	const ContactConstraint<Type1, Type2> &constraint = static_cast<const ContactConstraint<Type1, Type2> &>(inConstraint);
-	const CachedManifold &cached_manifold = inManifoldCache.FromHandle(constraint.mCachedManifoldHandle)->GetValue();
 	Vec3 normal = constraint.GetWorldSpaceNormal();
 	Vec3 tangent1, tangent2;
 	constraint.GetTangents(tangent1, tangent2);
+	const Vec3 friction_share = (tangent1 * constraint.mFrictionConstraint1.GetTotalLambda()
+		+ tangent2 * constraint.mFrictionConstraint2.GetTotalLambda()) / float(constraint.mNumContactPoints);
 
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		const WorldContactPoint<Type1, Type2> &contact = constraint.mContactPoints[i];
-		const CachedContactPoint &cached = cached_manifold.mContactPoints[i];
 		Vec3 impulse = normal * contact.mNonPenetrationConstraint.GetTotalLambda();
-		impulse += tangent1 * constraint.mFrictionConstraint1.GetTotalLambda();
-		impulse += tangent2 * constraint.mFrictionConstraint2.GetTotalLambda();
-		RVec3 world_point = constraint.mBody1->GetCenterOfMassTransform() * Vec3::sLoadFloat3Unsafe(cached.mPosition1);
+		// Tangential friction acts once, at the average midpoint. Uniform
+		// shares preserve both its net impulse and its moment about any origin.
+		impulse += friction_share;
 
 		AppliedContactImpulse record;
 		record.body1ID = constraint.mBody1->GetID().GetIndexAndSequenceNumber();
 		record.body2ID = constraint.mBody2->GetID().GetIndexAndSequenceNumber();
 		record.subShapeID1 = constraint.mSubShapeID1;
 		record.subShapeID2 = constraint.mSubShapeID2;
-		Vec3(float(world_point.GetX()), float(world_point.GetY()), float(world_point.GetZ())).StoreFloat3(&record.contactPoint);
+		record.contactPoint = contact.mWorldSpacePosition;
 		normal.StoreFloat3(&record.normal);
 		impulse.StoreFloat3(&record.impulse);
 		outImpulses.push_back(record);
@@ -1939,10 +1930,10 @@ void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstr
 void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses) const
 {
 	outImpulses.clear();
-	if (!mRecordAppliedContactImpulses || mConstraints == nullptr || mWriteCache == nullptr)
+	if (!mRecordAppliedContactImpulses || mConstraints == nullptr)
 		return;
 
-	using DispatchFunc = void (*)(const ContactConstraintBase &, const ManifoldCache &, Array<AppliedContactImpulse> &);
+	using DispatchFunc = void (*)(const ContactConstraintBase &, Array<AppliedContactImpulse> &);
 	static const DispatchFunc table[3][3] = {
 		{
 			nullptr,
@@ -1966,7 +1957,7 @@ void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImp
 		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + mConstraintIdxToOffset[constraint_index]);
 		DispatchFunc dispatch = table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()];
 		if (dispatch != nullptr)
-			dispatch(constraint, *mWriteCache, outImpulses);
+			dispatch(constraint, outImpulses);
 	}
 }
 

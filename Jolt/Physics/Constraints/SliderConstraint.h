@@ -66,6 +66,7 @@ protected:
 /// A slider constraint allows movement in only 1 axis (and no rotation). Also known as a prismatic constraint.
 class JPH_EXPORT SliderConstraint final : public TwoBodyConstraint
 {
+	friend class JointPositionSolver;
 	friend class JointVelocitySolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE

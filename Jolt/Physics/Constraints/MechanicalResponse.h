@@ -54,6 +54,58 @@ public:
 		double mInverseEffectiveMass = 0.0;
 	};
 
+	/// A two-row PSD response, represented in principal coordinates. The
+	/// eigenvalues are factor norms, including a genuinely singular plane.
+	struct Plane
+	{
+		double mCross = 0, mCos = 1, mSin = 0;
+		double mEigen[2]{};
+
+		/// Maximum-dissipation Coulomb disk: min .5*l*K*l + q*l.
+		bool SolveDisk(double inQ1, double inQ2, double inRadius, std::array<double,2> &outLambda) const
+		{
+			if (inRadius <= 0) { outLambda = {}; return true; }
+			const double q[2] = {mCos*inQ1+mSin*inQ2,-mSin*inQ1+mCos*inQ2};
+			double value[2]{};
+			bool free = true;
+			for (size_t i = 0; i < 2; ++i) {
+				if (mEigen[i] > 0) value[i] = -q[i]/mEigen[i];
+				else if (q[i] != 0) free = false;
+			}
+			if (!free || std::hypot(value[0],value[1]) > inRadius) {
+				// The secular equation is decreasing and convex. Newton from
+				// this necessary lower bound approaches its root from below,
+				// including planes whose two physical scales differ greatly.
+				const double scaled[2] = {q[0]/inRadius,q[1]/inRadius};
+				double shift = std::max({0.0,std::abs(scaled[0])-mEigen[0],std::abs(scaled[1])-mEigen[1]});
+				bool converged = false;
+				for (uint iteration = 0; iteration < 64; ++iteration) {
+					double ratio[2]{};
+					for (size_t i = 0; i < 2; ++i)
+						if (scaled[i] != 0) ratio[i] = scaled[i]/(mEigen[i]+shift);
+					const double length = std::hypot(ratio[0],ratio[1]);
+					if (std::abs(length-1) <= 8*std::numeric_limits<double>::epsilon()) { converged = true; break; }
+					double scale = std::numeric_limits<double>::max();
+					for (size_t i = 0; i < 2; ++i)
+						if (scaled[i] != 0) scale = std::min(scale,mEigen[i]+shift);
+					double slope = 0;
+					for (size_t i = 0; i < 2; ++i)
+						if (ratio[i] != 0) slope += (ratio[i]/length)*ratio[i]*(scale/(mEigen[i]+shift));
+					const double next = shift + scale*((length-1)/slope);
+					if (next == shift) break;
+					shift = next;
+				}
+				// Failure stays on the owner's existing error path;
+				// it must not hang a physics worker or change the physical model.
+				if (!converged) return false;
+				for (size_t i = 0; i < 2; ++i) value[i] = q[i] == 0? 0 : -q[i]/(mEigen[i]+shift);
+			}
+			outLambda = {mCos*value[0]-mSin*value[1],mSin*value[0]+mCos*value[1]};
+			return true;
+		}
+	};
+	struct ImpulsePair { Impulse mFirst, mSecond; Plane mPlane; };
+
 	size_t AddBody(const BodyState &inBody)
 	{
 		mBodies.push_back(inBody);
@@ -77,7 +129,15 @@ public:
 	/// Returns false if the responsive physical mass cannot be factored. The owner
 	/// also checks the original hard-equation residual before publishing state.
 	/// No candidate body velocity has been written to the physics world here.
-	[[nodiscard]] bool Build()
+	[[nodiscard]] bool Build() { return BuildInternal(false); }
+
+	/// Position projection uses the reachable least-squares target for geometric
+	/// rows. Nonlinear closed loops may have an inconsistent linearized RHS.
+	/// Original equations remain available for residual diagnostics.
+	[[nodiscard]] bool BuildPosition() { return BuildInternal(true); }
+
+private:
+	bool BuildInternal(bool inProjectHardTargets)
 	{
 		const size_t count = mBodies.size();
 		std::vector<size_t> parent(count);
@@ -117,11 +177,12 @@ public:
 				mBlocks[block].mEquations.push_back(row);
 		}
 		for (auto &block : mBlocks)
-			if (!BuildBlock(block))
+			if (!BuildBlock(block, inProjectHardTargets))
 				return false;
 		return true;
 	}
 
+public:
 	double Velocity(const Jacobian &inJacobian) const
 	{
 		double result = 0.0;
@@ -131,7 +192,44 @@ public:
 		return result;
 	}
 
-	Impulse Prepare(const Jacobian &inJacobian) const
+	Impulse Prepare(const Jacobian &inJacobian) const { return PrepareInternal(inJacobian,nullptr); }
+
+	ImpulsePair PreparePair(const Jacobian &inFirst, const Jacobian &inSecond) const
+	{
+		std::vector<FactorCoordinates> first, second;
+		ImpulsePair result;
+		result.mFirst = PrepareInternal(inFirst,&first);
+		result.mSecond = PrepareInternal(inSecond,&second);
+		auto &plane = result.mPlane;
+		for (const auto &a : first)
+			for (const auto &b : second)
+				if (a.mBlock == b.mBlock) plane.mCross += Dot(a.mValues,b.mValues);
+		if (plane.mCross != 0) {
+			const double angle = .5*std::atan2(2*plane.mCross,result.mFirst.mInverseEffectiveMass-result.mSecond.mInverseEffectiveMass);
+			plane.mCos = std::cos(angle); plane.mSin = std::sin(angle);
+		}
+		std::vector<size_t> blocks;
+		for (const auto *set : {&first,&second})
+			for (const auto &entry : *set)
+				if (std::find(blocks.begin(),blocks.end(),entry.mBlock) == blocks.end()) blocks.push_back(entry.mBlock);
+		for (size_t block : blocks) {
+			const std::vector<double> *a = nullptr, *b = nullptr;
+			for (const auto &entry : first) if (entry.mBlock == block) a = &entry.mValues;
+			for (const auto &entry : second) if (entry.mBlock == block) b = &entry.mValues;
+			const size_t size = a? a->size() : b->size();
+			for (size_t i = 0; i < size; ++i) {
+				const double x = a? (*a)[i] : 0, y = b? (*b)[i] : 0;
+				const double u = plane.mCos*x+plane.mSin*y, v = -plane.mSin*x+plane.mCos*y;
+				plane.mEigen[0] += u*u;
+				plane.mEigen[1] += v*v;
+			}
+		}
+		return result;
+	}
+
+private:
+	struct FactorCoordinates { size_t mBlock; std::vector<double> mValues; };
+	Impulse PrepareInternal(const Jacobian &inJacobian, std::vector<FactorCoordinates> *outCoordinates) const
 	{
 		Impulse result;
 		for (const auto *term : {&inJacobian.mFirst, &inJacobian.mSecond}) {
@@ -153,7 +251,9 @@ public:
 				for (size_t col = 0; col < block.mDimension; ++col)
 					reduced[col] += block.mBasis[a * block.mDimension + col] * j[a];
 			double mobility = 0.0;
-			const auto solved = block.mMass.Solve(reduced, &mobility);
+			FactorCoordinates factor{index,{}};
+			const auto solved = block.mMass.Solve(reduced, &mobility, outCoordinates? &factor.mValues : nullptr);
+			if (outCoordinates) outCoordinates->push_back(std::move(factor));
 			Impulse::Contribution contribution{index, std::vector<double>(n, 0.0)};
 			for (size_t a = 0; a < n; ++a)
 				for (size_t col = 0; col < block.mDimension; ++col)
@@ -166,6 +266,7 @@ public:
 		return result;
 	}
 
+public:
 	void Apply(const Impulse &inImpulse, double inLambda)
 	{
 		for (const auto &entry : inImpulse.mContributions) {
@@ -207,7 +308,7 @@ private:
 			return true;
 		}
 
-		std::vector<double> Solve(const std::vector<double> &inRhs, double *outQuadratic = nullptr) const
+		std::vector<double> Solve(const std::vector<double> &inRhs, double *outQuadratic = nullptr, std::vector<double> *outForward = nullptr) const
 		{
 			std::vector<double> values(mSize), result(mSize);
 			double quadratic = 0.0;
@@ -220,6 +321,7 @@ private:
 			}
 			if (outQuadratic)
 				*outQuadratic = quadratic;
+			if (outForward) *outForward = values;
 			for (size_t a = mSize; a-- > 0;) {
 				for (size_t b = a + 1; b < mSize; ++b)
 					values[a] -= mLower[b * mSize + a] * values[b];
@@ -250,12 +352,16 @@ private:
 	/// Pivoted twice-orthogonalized row QR, including the affine right hand
 	/// side. A dependent hard row remains a hard equation and is checked after
 	/// the baseline solve. This never deletes a finite inertia contribution.
-	static std::vector<std::vector<double>> HardBasis(std::vector<std::vector<double>> rows,
-		std::vector<double> rhs, size_t inSize, std::vector<double> &outParticular)
+	static bool HardBasis(std::vector<std::vector<double>> rows,
+		std::vector<double> rhs, size_t inSize, bool inProjectTargets,
+		std::vector<std::vector<double>> &q, std::vector<double> &outParticular)
 	{
-		std::vector<std::vector<double>> q;
 		std::vector<double> targets;
 		outParticular.assign(inSize, 0.0);
+		// Row normalization conditions the rank calculation only. Position
+		// targets minimize the original geometric residual used by acceptance.
+		const auto originalRows = inProjectTargets? rows : std::vector<std::vector<double>>{};
+		const auto originalRhs = inProjectTargets? rhs : std::vector<double>{};
 		for (size_t row = 0; row < rows.size(); ++row) {
 			const double norm = std::sqrt(Dot(rows[row], rows[row]));
 			if (norm > 0.0) {
@@ -288,9 +394,35 @@ private:
 					rhs[row] -= coefficient * targets.back();
 				}
 		}
+		if (inProjectTargets && !q.empty()) {
+			// A*Q^T has full column rank. Factor its columns directly rather
+			// than squaring its condition number with normal equations.
+			const size_t m = originalRows.size(), rank = q.size();
+			std::vector<std::vector<double>> columns(rank, std::vector<double>(m));
+			std::vector<double> upper(rank * rank, 0.0), projected(rank);
+			for (size_t col = 0; col < rank; ++col) {
+				for (size_t row = 0; row < m; ++row)
+					columns[col][row] = Dot(originalRows[row], q[col]);
+				for (size_t pass = 0; pass < 2; ++pass)
+					for (size_t previous = 0; previous < col; ++previous) {
+						const double coefficient = Dot(columns[col], columns[previous]);
+						upper[previous * rank + col] += coefficient;
+						for (size_t row = 0; row < m; ++row) columns[col][row] -= coefficient * columns[previous][row];
+					}
+				const double norm = std::sqrt(Dot(columns[col], columns[col]));
+				if (!(norm > 0.0) || !std::isfinite(norm)) return false;
+				upper[col * rank + col] = norm;
+				for (double &value : columns[col]) value /= norm;
+				projected[col] = Dot(columns[col], originalRhs);
+			}
+			for (size_t col = rank; col-- > 0;) {
+				for (size_t later = col + 1; later < rank; ++later) projected[col] -= upper[col * rank + later] * targets[later];
+				targets[col] = projected[col] / upper[col * rank + col];
+			}
+		}
 		for (size_t row = 0; row < q.size(); ++row)
 			for (size_t axis = 0; axis < inSize; ++axis) outParticular[axis] += q[row][axis] * targets[row];
-		return q;
+		return true;
 	}
 
 	static std::vector<std::vector<double>> NullBasis(const std::vector<std::vector<double>> &inHard, size_t inSize)
@@ -329,7 +461,7 @@ private:
 		return basis;
 	}
 
-	bool BuildBlock(Block &ioBlock)
+	bool BuildBlock(Block &ioBlock, bool inProjectHardTargets)
 	{
 		const size_t n = 6 * ioBlock.mBodies.size();
 		std::vector<double> mass(n * n, 0.0);
@@ -376,7 +508,8 @@ private:
 			}
 		}
 		std::vector<double> localParticular;
-		const auto hardBasis = HardBasis(std::move(hard), std::move(hardRhs), d, localParticular);
+		std::vector<std::vector<double>> hardBasis;
+		if (!HardBasis(std::move(hard), std::move(hardRhs), d, inProjectHardTargets, hardBasis, localParticular)) return false;
 		const auto nullBasis = NullBasis(hardBasis, d);
 		const size_t k = ioBlock.mDimension = nullBasis.size();
 		std::vector<double> particular(n, 0.0);
