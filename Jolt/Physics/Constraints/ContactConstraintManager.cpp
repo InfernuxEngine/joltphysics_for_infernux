@@ -1051,21 +1051,31 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 	// Get old position delta
 	Vec3 old_delta_position = Vec3::sLoadFloat3Unsafe(input_cbp.mDeltaPosition);
 
-	// Check if bodies are still roughly in the same relative position
-	if ((delta_position - old_delta_position).LengthSq() > mPhysicsSettings.mBodyPairCacheMaxDeltaPositionSq)
-		return;
-
 	// Determine relative orientation
 	Quat delta_rotation = inv_r1 * body2->GetRotation();
 
 	// Reconstruct old quaternion delta
 	Quat old_delta_rotation = Quat::sLoadFloat3Unsafe(input_cbp.mDeltaRotation);
-
-	// Check if bodies are still roughly in the same relative orientation
-	// The delta between 2 quaternions p and q is: p q^* = [rotation_axis * sin(angle / 2), cos(angle / 2)]
-	// From the W component we can extract the angle: cos(angle / 2) = px * qx + py * qy + pz * qz + pw * qw = p . q
-	// Since we want to abort if the rotation is smaller than -angle or bigger than angle, we can write the comparison as |p . q| < cos(angle / 2)
 	if (abs(delta_rotation.Dot(old_delta_rotation)) < mPhysicsSettings.mBodyPairCacheCosMaxDeltaRotationDiv2)
+		return;
+
+	// A small COM translation or angle alone does not bound a new support
+	// feature's motion. Rotation by theta can move a point at radius R by
+	// 2 R sin(theta/2), allowing deep penetration before a cached manifold
+	// refreshes. Bound the whole shape in either body's frame; taking the
+	// smaller of these two valid bounds also handles large static floors.
+	const float allowed_motion = min(mPhysicsSettings.mBodyPairCacheMaxPointMotion,
+		body1->IsSensor() || body2->IsSensor()? cDefaultCollisionTolerance
+			: min(mPhysicsSettings.mPenetrationSlop,mPhysicsSettings.mSpeculativeContactDistance));
+	const auto radius = [](const Body &body) {
+		const AABox bounds = body.GetShape()->GetLocalBounds();
+		return Vec3::sMax(bounds.mMin.Abs(),bounds.mMax.Abs()).Length();
+	};
+	const float rotation_motion = 2.0f * (delta_rotation * old_delta_rotation.Conjugated()).GetXYZ().Length();
+	const float motion_in_1 = (delta_position-old_delta_position).Length() + radius(*body2)*rotation_motion;
+	const float motion_in_2 = (delta_rotation.Conjugated()*delta_position-old_delta_rotation.Conjugated()*old_delta_position).Length()
+		+ radius(*body1)*rotation_motion;
+	if (min(motion_in_1,motion_in_2) > allowed_motion)
 		return;
 
 	// The cache is valid, return that we've handled this body pair

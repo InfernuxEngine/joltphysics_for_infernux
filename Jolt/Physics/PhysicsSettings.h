@@ -64,10 +64,13 @@ struct PhysicsSettings
 	/// Maximum distance to correct in a single iteration when solving position constraints (unit: meters)
 	float		mMaxPenetrationDistance = 0.2f;
 
-	/// Maximum relative delta position for body pairs to be able to reuse collision results from last frame (units: meter^2)
-	float		mBodyPairCacheMaxDeltaPositionSq = Square(0.001f); ///< 1 mm
+	/// Maximum point motion permitted when reusing a body-pair collision result
+	/// (meters). Translation and rotation share this budget; contact slop and
+	/// speculative distance further limit it. Body sensors use collision tolerance.
+	float		mBodyPairCacheMaxPointMotion = 0.001f;
 
-	/// Maximum relative delta orientation for body pairs to be able to reuse collision results from last frame, stored as cos(max angle / 2)
+	/// Limit the cached normal's relative orientation as well as point motion.
+	/// Tiny shapes may rotate substantially within the position-error budget.
 	float		mBodyPairCacheCosMaxDeltaRotationDiv2 = 0.99984769515639123915701155881391f; ///< cos(2 degrees / 2)
 
 	/// Maximum angle between normals that allows manifolds between different sub shapes of the same body pair to be combined
