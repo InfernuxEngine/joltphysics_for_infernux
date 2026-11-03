@@ -68,8 +68,6 @@ protected:
 /// A hinge constraint constrains 2 bodies on a single point and allows only a single axis of rotation
 class JPH_EXPORT HingeConstraint final : public TwoBodyConstraint
 {
-	friend class JointPositionSolver;
-	friend class JointVelocitySolver;
 public:
 	JPH_OVERRIDE_NEW_DELETE
 
@@ -127,8 +125,8 @@ public:
 	void SetArmature(float inArmature) { JPH_ASSERT(inArmature >= 0.0f); mArmature = inArmature; ResetRotorState(); ResetWarmStart(); }
 	float GetArmature() const { return mArmature; }
 	void ResetRotorState();
-	double GetRotorSpeed() const { return mRotorSpeed; }
-	void SetRotorSpeed(double inSpeed) { mRotorSpeed = inSpeed; }
+	double GetRotorSpeed() const { return mArmature > 0? mRotorSpeed-mRotorLambda/double(mArmature) : mRotorSpeed; }
+	void SetRotorSpeed(double inSpeed) { ResetWarmStart(); mRotorSpeed = inSpeed; }
 
 	// Motor controls
 	void						SetMotorState(EMotorState inState)						{ JPH_ASSERT(inState == EMotorState::Off || mMotorSettings.IsValid()); mMotorState = inState; }
@@ -198,6 +196,8 @@ private:
 	float						mViscousDamping;
 	float						mArmature;
 	double						mRotorSpeed = 0.0;
+	double						mTotalAxisLambda = 0.0, mRotorLambda = 0.0;
+	double						mWarmStartRotorLambda = 0.0;
 
 	// Motor controls
 	MotorSettings				mMotorSettings;

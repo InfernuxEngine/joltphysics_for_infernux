@@ -12,7 +12,6 @@ JPH_NAMESPACE_BEGIN
 template <EMotionType Type1>
 class ContactConstraintPart1
 {
-	friend class JointVelocitySolver;
 public:
 	/// Deactivate this constraint
 	inline void					Deactivate()
@@ -48,7 +47,6 @@ protected:
 template <>
 class ContactConstraintPart1<EMotionType::Kinematic> : public ContactConstraintPart1<EMotionType::Static>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mR1PlusUxAxis;
@@ -57,7 +55,6 @@ protected:
 template <>
 class ContactConstraintPart1<EMotionType::Dynamic> : public ContactConstraintPart1<EMotionType::Kinematic>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mInvI1_R1PlusUxAxis;
@@ -66,13 +63,11 @@ protected:
 template <EMotionType Type2>
 class ContactConstraintPart2
 {
-	friend class JointVelocitySolver;
 };
 
 template <>
 class ContactConstraintPart2<EMotionType::Kinematic> : public ContactConstraintPart2<EMotionType::Static>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mR2xAxis;
@@ -81,7 +76,6 @@ protected:
 template <>
 class ContactConstraintPart2<EMotionType::Dynamic> : public ContactConstraintPart2<EMotionType::Kinematic>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mInvI2_R2xAxis;
@@ -91,7 +85,6 @@ protected:
 template <EMotionType Type1, EMotionType Type2>
 class ContactConstraintPart : public ContactConstraintPart1<Type1>, public ContactConstraintPart2<Type2>
 {
-	friend class JointVelocitySolver;
 private:
 	/// See AxisConstraintPart::ApplyVelocityStep
 	JPH_INLINE bool				ApplyVelocityStep(Vec3 &ioLinearVelocity1, Vec3 &ioAngularVelocity1, Vec3 &ioLinearVelocity2, Vec3 &ioAngularVelocity2, float inInvMass1, float inInvMass2, Vec3Arg inWorldSpaceAxis, float inLambda) const

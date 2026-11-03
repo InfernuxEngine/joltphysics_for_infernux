@@ -7,7 +7,6 @@
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/Constraints/Constraint.h>
-#include <Jolt/Physics/Constraints/JointVelocitySolver.h>
 #include <Jolt/Physics/Constraints/ContactConstraintManager.h>
 #include <Jolt/Physics/Body/BodyManager.h>
 #include <Jolt/Core/Profiler.h>
@@ -184,7 +183,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
 	JPH_ASSERT(mSplitIslands == nullptr);
 }
 
-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, Constraint **inActiveConstraints, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
+void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -206,11 +205,6 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, Constrai
 		uint island_size = num_contacts_in_island + num_constraints_in_island;
 		if (island_size >= cLargeIslandTreshold)
 		{
-			// Whole-mechanism responses run in their original island job.
-			// Reserving a split slot would leave FetchNextBatch waiting for
-			// a SplitIsland call that will never be made.
-			if (JointVelocitySolver::NeedsResponse(inActiveConstraints, constraints_start, constraints_end))
-				continue;
 			mNumSplitIslands++;
 			mContactAndConstraintsSize += island_size;
 		}

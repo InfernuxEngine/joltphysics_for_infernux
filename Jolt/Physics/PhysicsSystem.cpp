@@ -22,8 +22,6 @@
 #include <Jolt/Physics/Collision/SimShapeFilterWrapper.h>
 #include <Jolt/Physics/Collision/InternalEdgeRemovingCollector.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
-#include <Jolt/Physics/Constraints/JointVelocitySolver.h>
-#include <Jolt/Physics/Constraints/JointPositionSolver.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.h>
 #include <Jolt/Physics/DeterminismLog.h>
@@ -1392,7 +1390,7 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 
 	// Prepare the large island splitter
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
-		mLargeIslandSplitter.Prepare(mIslandBuilder, ioContext->mActiveConstraints, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
+		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
 }
 
 void PhysicsSystem::JobBodySetIslandIndex()
@@ -1536,22 +1534,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 
 				// Sort contacts to give a deterministic simulation
 				mContactManager.SortContacts(contacts_begin, contacts_end);
-			}
-
-			// A mechanical response propagates impulses beyond the two endpoints.
-			// The original endpoint-only batch splitter cannot schedule this island.
-			if (JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end))
-			{
-				JointVelocitySolver solver;
-				CalculateSolverSteps steps(mPhysicsSettings);
-				const bool solved = solver.Solve(active_constraints, constraints_begin, constraints_end,
-					mContactManager, contacts_begin, contacts_end, delta_time, warm_start_impulse_ratio, steps);
-				mIslandBuilder.SetNumPositionSteps(island_idx, steps.GetNumPositionSteps());
-				if (!solved)
-					ioContext->mErrors.fetch_or(uint32(EPhysicsUpdateError::ConstraintResponseFailed), memory_order_relaxed);
-				else
-					mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
-				continue;
 			}
 
 			// Split up large islands
@@ -2696,9 +2678,8 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 
 			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here
 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
-			const bool mechanical = JointVelocitySolver::NeedsResponse(active_constraints, constraints_begin, constraints_end);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
-				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold && !mechanical)
+				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold)
 				continue;
 
 		#ifdef JPH_TRACK_SIMULATION_STATS
@@ -2712,20 +2693,10 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 				uint num_position_steps = mIslandBuilder.GetNumPositionSteps(island_idx);
 				for (uint position_step = 0; position_step < num_position_steps; ++position_step)
 				{
-					if (mechanical)
-					{
-						const auto result = JointPositionSolver::Solve(active_constraints, constraints_begin, constraints_end,
-							mContactManager, contacts_begin, contacts_end, mPhysicsSettings);
-						if (result == JointPositionSolver::EResult::Invalid)
-							ioContext->mErrors.fetch_or(uint32(EPhysicsUpdateError::ConstraintResponseFailed), memory_order_relaxed);
-						if (result != JointPositionSolver::EResult::Applied) break;
-					}
-					else
-					{
-						bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
-						applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
-						if (!applied_impulse) break;
-					}
+					bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
+					applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+					if (!applied_impulse)
+						break;
 				}
 			}
 

@@ -12,13 +12,11 @@ JPH_NAMESPACE_BEGIN
 template <EMotionType Type1>
 class AngularFrictionConstraintPart1 : public ContactConstraintPart1<EMotionType::Static>
 {
-	friend class JointVelocitySolver;
 };
 
 template <>
 class AngularFrictionConstraintPart1<EMotionType::Dynamic> : public AngularFrictionConstraintPart1<EMotionType::Static>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mInvI1_Axis;
@@ -27,13 +25,11 @@ protected:
 template <EMotionType Type2>
 class AngularFrictionConstraintPart2
 {
-	friend class JointVelocitySolver;
 };
 
 template <>
 class AngularFrictionConstraintPart2<EMotionType::Dynamic> : public AngularFrictionConstraintPart2<EMotionType::Static>
 {
-	friend class JointVelocitySolver;
 protected:
 	// Note: Constructor will not be called
 	Float3						mInvI2_Axis;
@@ -43,7 +39,6 @@ protected:
 template <EMotionType Type1, EMotionType Type2>
 class AngularFrictionConstraintPart : public AngularFrictionConstraintPart1<Type1>, public AngularFrictionConstraintPart2<Type2>
 {
-	friend class JointVelocitySolver;
 	/// Internal helper function to update velocities of bodies after Lagrange multiplier is calculated
 	JPH_INLINE bool				ApplyVelocityStep(Vec3 &ioAngularVelocity1, Vec3 &ioAngularVelocity2, float inLambda) const
 	{

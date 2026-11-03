@@ -40,7 +40,6 @@ JPH_NAMESPACE_BEGIN
 /// \f$\beta\f$ = baumgarte constant.
 class AxisConstraintPart
 {
-	friend class JointVelocitySolver;
 	/// Internal helper function to update velocities of bodies after Lagrange multiplier is calculated
 	JPH_INLINE bool				ApplyVelocityStep(Body &ioBody1, Body &ioBody2, Vec3Arg inWorldSpaceAxis, float inLambda) const
 	{

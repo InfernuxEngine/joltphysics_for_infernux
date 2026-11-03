@@ -131,6 +131,9 @@ void HingeConstraint::ResetRotorState()
 {
 	const Vec3 axis = mBody1->GetRotation() * mLocalSpaceHingeAxis1;
 	mRotorSpeed = axis.Dot(mBody2->GetAngularVelocity() - mBody1->GetAngularVelocity());
+	mTotalAxisLambda = mRotorLambda = mWarmStartRotorLambda = 0.0;
+	mPassiveLambda = 0.0f;
+	mMotorConstraintPart.Deactivate();
 }
 
 void HingeConstraint::NotifyShapeChanged(const BodyID &inBodyID, Vec3Arg inDeltaCOM)
@@ -247,6 +250,11 @@ void HingeConstraint::CalculateMotorConstraintProperties(float inDeltaTime)
 
 void HingeConstraint::SetupVelocityConstraint(float inDeltaTime)
 {
+	// Freeze the preceding physical rotor velocity for the whole substep.
+	// Total impulse remains the previous step's warm-start guess until WarmStart.
+	mRotorSpeed = GetRotorSpeed();
+	mWarmStartRotorLambda = mRotorLambda;
+	mRotorLambda = 0.0;
 	// Cache constraint values that are valid until the bodies move
 	Mat44 rotation1 = Mat44::sRotation(mBody1->GetRotation());
 	Mat44 rotation2 = Mat44::sRotation(mBody2->GetRotation());
@@ -254,16 +262,21 @@ void HingeConstraint::SetupVelocityConstraint(float inDeltaTime)
 	mRotationConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, rotation1.Multiply3x3(mLocalSpaceHingeAxis1), *mBody2, rotation2, rotation2.Multiply3x3(mLocalSpaceHingeAxis2));
 	CalculateA1AndTheta();
 	CalculateRotationLimitsConstraintProperties(inDeltaTime);
-	if (mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f || mViscousDamping > 0.0f)
+	if (mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f || mViscousDamping > 0.0f || mArmature > 0.0f)
 		CalculateMotorConstraintProperties(inDeltaTime);
 	else
 		mMotorConstraintPart.Deactivate();
-	if (!mMotorConstraintPart.IsActive())
+	if (!mMotorConstraintPart.IsActive()) {
 		mPassiveLambda = 0.0f;
+		mTotalAxisLambda = mRotorLambda = mWarmStartRotorLambda = 0.0;
+		mRotorSpeed = mArmature > 0? mA1.Dot(mBody2->GetAngularVelocity()-mBody1->GetAngularVelocity()) : 0.0;
+	}
 }
 
 void HingeConstraint::ResetWarmStart()
 {
+	mRotorSpeed = GetRotorSpeed();
+	mTotalAxisLambda = mRotorLambda = mWarmStartRotorLambda = 0.0;
 	mPassiveLambda = 0.0f;
 	mMotorConstraintPart.Deactivate();
 	mPointConstraintPart.Deactivate();
@@ -274,7 +287,8 @@ void HingeConstraint::ResetWarmStart()
 void HingeConstraint::WarmStartVelocityConstraint(float inWarmStartImpulseRatio)
 {
 	// Warm starting: Apply previous frame impulse
-	mMotorConstraintPart.WarmStartWithPassive(*mBody1, *mBody2, inWarmStartImpulseRatio, mPassiveLambda);
+	mRotorLambda = mWarmStartRotorLambda;
+	mMotorConstraintPart.WarmStartWithPassive(*mBody1, *mBody2, inWarmStartImpulseRatio, mPassiveLambda, mTotalAxisLambda, mRotorLambda);
 	mPointConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
 	mRotationConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
 	mRotationLimitsConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
@@ -305,7 +319,8 @@ bool HingeConstraint::SolveVelocityConstraint(float inDeltaTime)
 		motor = mMotorConstraintPart.SolveVelocityConstraintWithPassive(*mBody1, *mBody2, mA1,
 			driven? inDeltaTime * mMotorSettings.mMinTorqueLimit : 0.0f,
 			driven? inDeltaTime * mMotorSettings.mMaxTorqueLimit : 0.0f,
-			inDeltaTime * mViscousDamping, inDeltaTime * mMaxFrictionTorque, mPassiveLambda);
+			inDeltaTime * mViscousDamping, inDeltaTime * mMaxFrictionTorque, mPassiveLambda,
+			double(mArmature), mRotorSpeed, mTotalAxisLambda, mRotorLambda);
 	}
 
 	// Solve point constraint
@@ -406,6 +421,8 @@ void HingeConstraint::SaveState(StateRecorder &inStream) const
 	mMotorConstraintPart.SaveState(inStream);
 	inStream.Write(mPassiveLambda);
 	inStream.Write(mRotorSpeed);
+	inStream.Write(mTotalAxisLambda);
+	inStream.Write(mRotorLambda);
 	mRotationConstraintPart.SaveState(inStream);
 	mPointConstraintPart.SaveState(inStream);
 	mRotationLimitsConstraintPart.SaveState(inStream);
@@ -422,6 +439,8 @@ void HingeConstraint::RestoreState(StateRecorder &inStream)
 	mMotorConstraintPart.RestoreState(inStream);
 	inStream.Read(mPassiveLambda);
 	inStream.Read(mRotorSpeed);
+	inStream.Read(mTotalAxisLambda);
+	inStream.Read(mRotorLambda);
 	mRotationConstraintPart.RestoreState(inStream);
 	mPointConstraintPart.RestoreState(inStream);
 	mRotationLimitsConstraintPart.RestoreState(inStream);

@@ -36,7 +36,6 @@ JPH_NAMESPACE_BEGIN
 /// \f$\beta\f$ = baumgarte constant.
 class AngleConstraintPart
 {
-	friend class JointVelocitySolver;
 	/// Internal helper function to update velocities of bodies after Lagrange multiplier is calculated
 	JPH_INLINE bool				ApplyVelocityStep(Body &ioBody1, Body &ioBody2, float inLambda) const
 	{
@@ -219,26 +218,29 @@ public:
 	/// on light links. Only the motor impulse is subject to its torque limits.
 	inline bool SolveVelocityConstraintWithPassive(Body &ioBody1, Body &ioBody2, Vec3Arg inAxis,
 		float inMinMotor, float inMaxMotor, float inDampingImpulse, float inFrictionImpulse,
-		float &ioPassiveLambda)
+		float &ioPassiveLambda, double inArmature, double inOldRotorSpeed,
+		double &ioTotalAxisLambda, double &ioRotorLambda)
 	{
-		const float k = inAxis.Dot(mInvI1_Axis + mInvI2_Axis);
-		const float old_total = mTotalLambda + ioPassiveLambda;
-		const float free_velocity = inAxis.Dot(ioBody2.GetAngularVelocity() - ioBody1.GetAngularVelocity()) - k * old_total;
-		const auto solved = SolveDriveImpulse(free_velocity, k, mSpringPart.GetSoftness(), mSpringPart.GetBias(0.0f),
-			inMinMotor, inMaxMotor, inDampingImpulse, inFrictionImpulse);
-		const float motor = solved.mMotor, passive = solved.mPassive;
-		const float delta = (motor - mTotalLambda) + (passive - ioPassiveLambda);
-		mTotalLambda = motor;
-		ioPassiveLambda = passive;
-		return ApplyVelocityStep(ioBody1, ioBody2, delta);
+		const double k = inAxis.Dot(mInvI1_Axis + mInvI2_Axis);
+		const double free_velocity = double(inAxis.Dot(ioBody2.GetAngularVelocity() - ioBody1.GetAngularVelocity())) - k * ioTotalAxisLambda;
+		const auto solved = SolveDriveImpulse(free_velocity,k,double(mSpringPart.GetSoftness()),double(mSpringPart.GetBias(0.0f)),
+			double(inMinMotor),double(inMaxMotor),double(inDampingImpulse),double(inFrictionImpulse),inArmature,inOldRotorSpeed);
+		const double delta = solved.mTotal-ioTotalAxisLambda;
+		mTotalLambda = float(solved.mMotor);
+		ioPassiveLambda = float(solved.mPassive);
+		ioTotalAxisLambda = solved.mTotal;
+		ioRotorLambda = solved.mRotor;
+		return ApplyVelocityStep(ioBody1,ioBody2,float(delta));
 	}
 
 	/// Warm start the combined axis without applying large cancelling impulses separately.
-	inline void WarmStartWithPassive(Body &ioBody1, Body &ioBody2, float inRatio, float &ioPassiveLambda)
+	inline void WarmStartWithPassive(Body &ioBody1, Body &ioBody2, float inRatio, float &ioPassiveLambda, double &ioTotalAxisLambda, double &ioRotorLambda)
 	{
 		mTotalLambda *= inRatio;
 		ioPassiveLambda *= inRatio;
-		ApplyVelocityStep(ioBody1, ioBody2, mTotalLambda + ioPassiveLambda);
+		ioTotalAxisLambda *= inRatio;
+		ioRotorLambda *= inRatio;
+		ApplyVelocityStep(ioBody1,ioBody2,float(ioTotalAxisLambda));
 	}
 
 	/// Return lagrange multiplier
