@@ -61,6 +61,11 @@ public:
 	/// @return Newly created ragdoll or null when out of bodies
 	Ragdoll *							CreateRagdoll(CollisionGroup::GroupID inCollisionGroup, uint64 inUserData, PhysicsSystem *inSystem) const;
 
+	/// Group existing bodies and constraints without creating, registering or owning them.
+	/// Arrays follow the same part/constraint order as these settings. The caller
+	/// must release this view before destroying or replacing any referenced object.
+	Ragdoll *							CreateRagdollView(const Array<BodyID> &inBodies, const Array<Ref<TwoBodyConstraint>> &inConstraints, PhysicsSystem *inSystem) const;
+
 	/// Access to the skeleton of this ragdoll
 	const Skeleton *					GetSkeleton() const												{ return mSkeleton; }
 	Skeleton *							GetSkeleton()													{ return mSkeleton; }
@@ -246,6 +251,7 @@ private:
 
 	/// Cached physics system
 	PhysicsSystem *						mSystem;
+	bool								mOwnsBodies = true;
 };
 
 JPH_NAMESPACE_END

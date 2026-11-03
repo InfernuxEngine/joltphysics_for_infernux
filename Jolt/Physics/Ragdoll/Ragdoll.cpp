@@ -454,6 +454,18 @@ Ragdoll *RagdollSettings::CreateRagdoll(CollisionGroup::GroupID inCollisionGroup
 	return r;
 }
 
+Ragdoll *RagdollSettings::CreateRagdollView(const Array<BodyID> &inBodies, const Array<Ref<TwoBodyConstraint>> &inConstraints, PhysicsSystem *inSystem) const
+{
+	JPH_ASSERT(inBodies.size() == mParts.size());
+	JPH_ASSERT(inConstraints.size() == mConstraintIndexToBodyIdxPair.size());
+	Ragdoll *r = new Ragdoll(inSystem);
+	r->mRagdollSettings = this;
+	r->mBodyIDs = inBodies;
+	r->mConstraints = inConstraints;
+	r->mOwnsBodies = false;
+	return r;
+}
+
 void RagdollSettings::CalculateBodyIndexToConstraintIndex()
 {
 	mBodyIndexToConstraintIndex.clear();
@@ -495,11 +507,13 @@ void RagdollSettings::CalculateConstraintIndexToBodyIdxPair()
 Ragdoll::~Ragdoll()
 {
 	// Destroy all bodies
-	mSystem->GetBodyInterface().DestroyBodies(mBodyIDs.data(), (int)mBodyIDs.size());
+	if (mOwnsBodies)
+		mSystem->GetBodyInterface().DestroyBodies(mBodyIDs.data(), (int)mBodyIDs.size());
 }
 
 void Ragdoll::AddToPhysicsSystem(EActivation inActivationMode, bool inLockBodies)
 {
+	JPH_ASSERT(mOwnsBodies, "A ragdoll view does not own physics registration");
 	// Scope for JPH_STACK_ALLOC
 	{
 		// Create copy of body ids since they will be shuffled
@@ -519,6 +533,7 @@ void Ragdoll::AddToPhysicsSystem(EActivation inActivationMode, bool inLockBodies
 
 void Ragdoll::RemoveFromPhysicsSystem(bool inLockBodies)
 {
+	JPH_ASSERT(mOwnsBodies, "A ragdoll view does not own physics registration");
 	// Remove all constraints before removing the bodies
 	mSystem->RemoveConstraints((Constraint **)mConstraints.data(), (int)mConstraints.size());
 
