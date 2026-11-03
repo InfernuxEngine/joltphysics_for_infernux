@@ -914,6 +914,8 @@ Ref<ConstraintSettings> SixDOFConstraint::GetConstraintSettings() const
 	memcpy(settings->mLimitMin, mLimitMin, sizeof(mLimitMin));
 	memcpy(settings->mLimitMax, mLimitMax, sizeof(mLimitMax));
 	memcpy(settings->mMaxFriction, mMaxFriction, sizeof(mMaxFriction));
+	for (int i = 0; i < EAxis::NumTranslation; ++i)
+		settings->mLimitsSpringSettings[i] = mLimitsSpringSettings[i];
 	for (int i = 0; i < EAxis::Num; ++i)
 		settings->mMotorSettings[i] = mMotorSettings[i];
 	return settings;
