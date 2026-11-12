@@ -44,6 +44,8 @@ JPH_GPU_CONSTANT(MaterialCombineMultiply, 2);
 JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
 // Correctness bootstrap bound, not a permanent limit on user physics worlds.
 JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
+// Fixed point records per ordered body pair; no contact compaction or overflow.
+JPH_GPU_CONSTANT(MaxContactPointsPerPair, 4);
 // Sentinel for a render hierarchy node without a physical ancestor.
 JPH_GPU_CONSTANT(PoseNoParent, 0xffffffffu);
 // FIFO body commands. These values match Infernux ForceMode.
@@ -116,8 +118,9 @@ struct JPH_GPU_ALIGN BodyForces
 
 struct JPH_GPU_ALIGN WorldRange
 {
-    // Body begin/count, contact begin/count. Contact count = body count squared.
-    // Each ordered local pair has one slot; only i < j may become active.
+    // Body begin/count, contact begin/count. Each ordered local pair owns
+    // MaxContactPointsPerPair point records; only i < j may become active.
+    // Contact count = body count squared * MaxContactPointsPerPair.
     JPH_GPU_UINT4 range;
 };
 
@@ -133,10 +136,14 @@ struct JPH_GPU_ALIGN Contact
     JPH_GPU_UINT4 meta;
     // Normal points from A towards B; positive depth means penetration.
     JPH_GPU_FLOAT4 normalDepth;
-    JPH_GPU_FLOAT4 localAnchorA; // Body COM frame xyz; w padding.
+    // Body COM frame xyz. In the first record of a pair, w stores the
+    // accumulated manifold angular-friction impulse; other records keep w=0.
+    JPH_GPU_FLOAT4 localAnchorA;
     JPH_GPU_FLOAT4 localAnchorB; // Body COM frame xyz; w padding.
-    // Accumulated normal/tangent1/tangent2 impulses, fixed normal velocity bias.
-    // The bootstrap resets these every substep; it does not implement warmstart.
+    // x is this point's normal impulse; w is its fixed normal velocity bias.
+    // yz in the first pair record are the manifold's two linear-friction
+    // impulses; other records keep yz=0. Collision/setup reset all impulse
+    // scratch every substep; the bootstrap does not implement warmstart.
     JPH_GPU_FLOAT4 impulse;
 };
 

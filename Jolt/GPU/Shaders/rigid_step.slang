@@ -112,7 +112,7 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     uint count = world.range.y;
     if (tid.x >= count || tid.y >= count)
         return;
-    uint slot = world.range.z + tid.x * count + tid.y;
+    uint slot = world.range.z + (tid.x * count + tid.y) * MaxContactPointsPerPair;
     uint a = world.range.x + tid.x;
     uint b = world.range.x + tid.y;
     Contact result;
@@ -121,7 +121,10 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     result.localAnchorA = float4(0.0f);
     result.localAnchorB = float4(0.0f);
     result.impulse = float4(0.0f);
-    contacts[slot] = result;
+    // Every ordered pair owns four records, including inactive/lower-triangle
+    // pairs. This remains a complete writer without atomics or compaction.
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        contacts[slot + point] = result;
     if (tid.x >= tid.y)
         return;
 
@@ -150,21 +153,32 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     float3 cb = jph_leaf_position(shape_b, sb);
     float4 qa = jph_leaf_rotation(shape_a, sa);
     float4 qb = jph_leaf_rotation(shape_b, sb);
+    if (ma.meta.y == ShapeBox && mb.meta.y == ShapeBox)
+    {
+        JphBoxManifold manifold = jph_box_box(ca, qa, ga, cb, qb, gb, step_params.contact.x);
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+            if (point < manifold.count)
+            {
+                JphBoxPoint contact = manifold.points[point];
+                result.meta = uint4(a, b, 1u, contact.feature);
+                result.normalDepth = float4(manifold.normal, contact.depth);
+                result.localAnchorA = float4(jph_inverse_rotate(sa.rotation, contact.pointA - sa.positionCOM.xyz), 0.0f);
+                result.localAnchorB = float4(jph_inverse_rotate(sb.rotation, contact.pointB - sb.positionCOM.xyz), 0.0f);
+                contacts[slot + point] = result;
+            }
+        return;
+    }
+
     float3 normal, pa, pb;
     float penetration;
     uint feature = 0u;
     if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeSphere)
         jph_sphere_sphere(ca, ga.w, cb, gb.w, normal, penetration, pa, pb);
     else if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeBox)
-        jph_sphere_box(ca, ga.w, cb, qb, gb,
-                       normal, penetration, pa, pb, feature);
+        jph_sphere_box(ca, ga.w, cb, qb, gb, normal, penetration, pa, pb, feature);
     else
     {
-        // After Empty is skipped, admitted geometry is Sphere or STATIC Box; the only
-        // remaining active type combination is static Box / dynamic Sphere.
-        // Unsupported shape/motion combinations must be rejected at preparation.
-        jph_sphere_box(cb, gb.w, ca, qa, ga,
-                       normal, penetration, pb, pa, feature);
+        jph_sphere_box(cb, gb.w, ca, qa, ga, normal, penetration, pb, pa, feature);
         normal = -normal;
     }
     if (penetration < -step_params.contact.x)
@@ -212,6 +226,7 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
         bias = restitution * (normal_velocity - force_delta_velocity);
     }
     contact.impulse = float4(0.0f, 0.0f, 0.0f, bias);
+    contact.localAnchorA.w = 0.0f;
     contacts[slot] = contact;
 }
 
@@ -226,9 +241,10 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
     // One lane owns a whole small world, so contacts sharing a dynamic body
     // never race. This dispatch is ONE PGS iteration; the engine repeats it.
     // Preparation proves body count <= MaxBodiesPerWorld (currently 32).
-    for (uint local = 0u; local < world.range.w; ++local)
+    for (uint local = 0u; local < world.range.w; local += MaxContactPointsPerPair)
     {
         uint slot = world.range.z + local;
+        // collide_pairs packs active points from the first record of a pair.
         Contact contact = contacts[slot];
         if (contact.meta.z == 0u)
             continue;
@@ -238,12 +254,93 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
         BodyModel mb = body_models[b];
         BodyState sa = body_states[a];
         BodyState sb = body_states[b];
-        jph_solve_velocity(ma, sa, mb, sb, contact);
-        if (jph_dynamic(ma))
-            body_states[a] = sa;
-        if (jph_dynamic(mb))
-            body_states[b] = sb;
+        // ContactConstraintManager uses one linear-friction center per patch,
+        // plus normal-axis angular friction for multiple contact points. Both
+        // precede all non-penetration constraints in this PGS iteration.
+        float3 normal = contact.normalDepth.xyz;
+        float3 center = float3(0.0f);
+        float normal_impulse = 0.0f;
+        uint point_count = 0u;
+        float3 ja[4];
+        float3 jb[4];
+        float4 old_normal_impulse = float4(0.0f);
+        float4 normal_bias = float4(0.0f);
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        {
+            Contact current = contacts[slot + point];
+            if (current.meta.z == 0u)
+                continue;
+            float3 pa, pb, ra, rb;
+            jph_contact_points(current, sa, sb, pa, pb, ra, rb);
+            ja[point] = cross(ra, normal);
+            jb[point] = cross(rb, normal);
+            old_normal_impulse[point] = current.impulse.x;
+            normal_bias[point] = current.impulse.w;
+            center += 0.5f * (pa + pb);
+            normal_impulse += current.impulse.x;
+            ++point_count;
+        }
+        center /= float(point_count);
+        float friction = jph_combine_material(ma.mass.y, ma.surface.z, mb.mass.y, mb.surface.z);
+        float2 linear_impulse = contact.impulse.yz;
+        jph_solve_friction(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
+                           normal, friction * normal_impulse, linear_impulse);
+        contact.impulse.yz = linear_impulse;
+
+        float angular_impulse = 0.0f;
+        if (point_count > 1u)
+        {
+            // Read the four point records again instead of holding a private
+            // Contact array. Radius is measured only in the contact plane.
+            float weighted_radius = 0.0f;
+            for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+            {
+                Contact current = contacts[slot + point];
+                if (current.meta.z == 0u)
+                    continue;
+                float3 pa, pb, ra, rb;
+                jph_contact_points(current, sa, sb, pa, pb, ra, rb);
+                float3 delta = 0.5f * (pa + pb) - center;
+                delta -= normal * dot(delta, normal);
+                weighted_radius += length(delta) * current.impulse.x;
+            }
+            angular_impulse = contact.localAnchorA.w;
+            jph_solve_angular_friction(ma, sa, mb, sb, normal, friction * weighted_radius, angular_impulse);
+        }
+        contact.localAnchorA.w = angular_impulse;
         contacts[slot] = contact;
+
+        // Solve the pair's unilateral normal QP as one block. Coupled normal
+        // impulses must not leave the last scalar point's rocking residual.
+        float4 next_normal_impulse = jph_solve_normal_block(ma, sa, mb, sb, normal, ja, jb,
+                                                            old_normal_impulse, normal_bias, point_count);
+        float delta_linear = 0.0f;
+        float3 delta_angular_a = float3(0.0f);
+        float3 delta_angular_b = float3(0.0f);
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        {
+            Contact current = contacts[slot + point];
+            if (current.meta.z == 0u)
+                continue;
+            float delta = next_normal_impulse[point] - old_normal_impulse[point];
+            delta_linear += delta;
+            delta_angular_a += ja[point] * delta;
+            delta_angular_b += jb[point] * delta;
+            current.impulse.x = next_normal_impulse[point];
+            contacts[slot + point] = current;
+        }
+        if (jph_dynamic(ma))
+        {
+            sa.linearVelocity.xyz -= ma.mass.x * delta_linear * normal;
+            sa.angularVelocity.xyz -= jph_inverse_inertia(ma, sa, delta_angular_a);
+            body_states[a] = sa;
+        }
+        if (jph_dynamic(mb))
+        {
+            sb.linearVelocity.xyz += mb.mass.x * delta_linear * normal;
+            sb.angularVelocity.xyz += jph_inverse_inertia(mb, sb, delta_angular_b);
+            body_states[b] = sb;
+        }
     }
 }
 

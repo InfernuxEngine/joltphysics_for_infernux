@@ -80,7 +80,7 @@ inline constexpr StageDefinition Stages[] = {
 // solve.x times. Each solve dispatch performs ONE iteration. The logical-tick
 // owner appends ClearForces once after all substeps; direct recipe consumers
 // choose that boundary themselves. No warmstart,
-// sleeping, CCD, dynamic boxes, multiple-primitive bodies, pair-ignore filters, joints, locked DOFs or
+// sleeping, CCD, multiple-primitive bodies, pair-ignore filters, joints, locked DOFs or
 // kinematic motion are implemented by this bootstrap. A
 // host must reject these unsupported options. Each body has one primitive leaf or Empty;
 // its local pose may differ from the body's COM frame, including an explicit
@@ -90,7 +90,8 @@ inline constexpr StageDefinition Stages[] = {
 // zero shape local-position padding, positive dimensions, layer indices < 32,
 // material combine modes in [MaterialCombineAverage, MaterialCombineMaximum],
 // nonnegative material/damping/speed bounds, convex radius <= min half extent,
-// disjoint complete world ranges, matching body.meta.w and at most 32 bodies per
+// disjoint complete world ranges with four point records per ordered pair,
+// matching body.meta.w and at most 32 bodies per
 // world. This is a bounded, serial-per-world correctness baseline, not a parallel
 // contact solver or a published performance result.
 

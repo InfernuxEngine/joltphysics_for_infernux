@@ -218,6 +218,506 @@ void jph_sphere_box(float3 sphere_center, float sphere_radius,
     point_box = box_center + jph_rotate(box_rotation, box_point_local);
 }
 
+
+// Rounded boxes are their reduced OBB cores plus a spherical convex radius.
+// All work below is bounded: 15 SAT axes and 16 vertex/OBB + 144 edge/edge
+// candidates. SAT separation alone is not a rounded-box distance query.
+struct JphCoreBox
+{
+    float3 center;
+    float3 axis[3];
+    float3 halfExtent;
+    float radius;
+};
+
+struct JphBoxPoint
+{
+    float3 pointA;
+    float3 pointB;
+    float depth;
+    uint feature;
+};
+
+struct JphBoxManifold
+{
+    float3 normal;
+    uint count;
+    JphBoxPoint points[MaxContactPointsPerPair];
+};
+
+JphCoreBox jph_core_box(float3 center, float4 rotation, float4 geometry)
+{
+    JphCoreBox box;
+    box.center = center;
+    box.axis[0] = jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f));
+    box.axis[1] = jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f));
+    box.axis[2] = jph_rotate(rotation, float3(0.0f, 0.0f, 1.0f));
+    box.halfExtent = max(geometry.xyz - geometry.w, float3(0.0f));
+    box.radius = geometry.w;
+    return box;
+}
+
+float3 jph_core_vertex(JphCoreBox box, uint index)
+{
+    return box.center
+        + box.axis[0] * ((index & 1u) != 0u ? box.halfExtent.x : -box.halfExtent.x)
+        + box.axis[1] * ((index & 2u) != 0u ? box.halfExtent.y : -box.halfExtent.y)
+        + box.axis[2] * ((index & 4u) != 0u ? box.halfExtent.z : -box.halfExtent.z);
+}
+
+float3 jph_core_closest(JphCoreBox box, float3 point)
+{
+    float3 delta = point - box.center;
+    float3 local = float3(dot(delta, box.axis[0]), dot(delta, box.axis[1]), dot(delta, box.axis[2]));
+    local = clamp(local, -box.halfExtent, box.halfExtent);
+    return box.center + box.axis[0] * local.x + box.axis[1] * local.y + box.axis[2] * local.z;
+}
+
+void jph_core_edge(JphCoreBox box, uint index, out float3 begin, out float3 end)
+{
+    uint axis = index / 4u;
+    uint side = index % 4u;
+    uint u = (axis + 1u) % 3u;
+    uint v = (axis + 2u) % 3u;
+    float3 center = box.center
+        + box.axis[u] * ((side & 1u) != 0u ? box.halfExtent[u] : -box.halfExtent[u])
+        + box.axis[v] * ((side & 2u) != 0u ? box.halfExtent[v] : -box.halfExtent[v]);
+    begin = center - box.axis[axis] * box.halfExtent[axis];
+    end = center + box.axis[axis] * box.halfExtent[axis];
+}
+
+void jph_segment_closest(float3 a0, float3 a1, float3 b0, float3 b1,
+                          out float3 pointA, out float3 pointB)
+{
+    float3 da = a1 - a0;
+    float3 db = b1 - b0;
+    float3 delta = a0 - b0;
+    float aa = dot(da, da);
+    float bb = dot(db, db);
+    float s = 0.0f;
+    float t = 0.0f;
+    if (aa <= 1e-20f)
+    {
+        if (bb > 1e-20f)
+            t = clamp(dot(db, delta) / bb, 0.0f, 1.0f);
+    }
+    else
+    {
+        float ad = dot(da, delta);
+        if (bb <= 1e-20f)
+            s = clamp(-ad / aa, 0.0f, 1.0f);
+        else
+        {
+            float ab = dot(da, db);
+            float bd = dot(db, delta);
+            // Cross products avoid subtracting almost equal aa*bb and ab*ab.
+            float3 cross_ab = cross(da, db);
+            float denominator = dot(cross_ab, cross_ab);
+            if (denominator > 1e-20f * aa * bb)
+                s = clamp(dot(cross(db, delta), cross_ab) / denominator, 0.0f, 1.0f);
+            t = (ab * s + bd) / bb;
+            if (t < 0.0f)
+            {
+                t = 0.0f;
+                s = clamp(-ad / aa, 0.0f, 1.0f);
+            }
+            else if (t > 1.0f)
+            {
+                t = 1.0f;
+                s = clamp((ab - ad) / aa, 0.0f, 1.0f);
+            }
+        }
+    }
+    pointA = a0 + s * da;
+    pointB = b0 + t * db;
+}
+
+void jph_closest_candidate(float3 a, float3 b, uint id, inout float best,
+                            inout float3 pointA, inout float3 pointB, inout uint feature)
+{
+    float3 delta = b - a;
+    float distance_squared = dot(delta, delta);
+    if (distance_squared < best)
+    {
+        best = distance_squared;
+        pointA = a;
+        pointB = b;
+        feature = id;
+    }
+}
+
+void jph_core_distance(JphCoreBox a, JphCoreBox b, out float3 pointA, out float3 pointB,
+                        out float distance_squared, out uint feature)
+{
+    distance_squared = 3.402823466e+38f;
+    pointA = a.center;
+    pointB = b.center;
+    feature = 0u;
+    for (uint vertex = 0u; vertex < 8u; ++vertex)
+    {
+        float3 va = jph_core_vertex(a, vertex);
+        float3 vb = jph_core_vertex(b, vertex);
+        jph_closest_candidate(va, jph_core_closest(b, va), vertex,
+                              distance_squared, pointA, pointB, feature);
+        jph_closest_candidate(jph_core_closest(a, vb), vb, 8u + vertex,
+                              distance_squared, pointA, pointB, feature);
+    }
+    for (uint edgeA = 0u; edgeA < 12u; ++edgeA)
+    {
+        float3 a0, a1;
+        jph_core_edge(a, edgeA, a0, a1);
+        for (uint edgeB = 0u; edgeB < 12u; ++edgeB)
+        {
+            float3 b0, b1, pa, pb;
+            jph_core_edge(b, edgeB, b0, b1);
+            jph_segment_closest(a0, a1, b0, b1, pa, pb);
+            jph_closest_candidate(pa, pb, 16u + edgeA * 12u + edgeB,
+                                  distance_squared, pointA, pointB, feature);
+        }
+    }
+}
+
+bool jph_core_sat(JphCoreBox a, JphCoreBox b, out float3 normal, out float depth, out uint feature)
+{
+    float3 delta = b.center - a.center;
+    depth = 3.402823466e+38f;
+    normal = a.axis[0];
+    feature = 0u;
+    bool overlapping = true;
+    for (uint axis = 0u; axis < 15u; ++axis)
+    {
+        float3 n;
+        if (axis < 3u)
+            n = a.axis[axis];
+        else if (axis < 6u)
+            n = b.axis[axis - 3u];
+        else
+            n = cross(a.axis[(axis - 6u) / 3u], b.axis[(axis - 6u) % 3u]);
+        float length_squared = dot(n, n);
+        if (length_squared <= 1e-20f)
+            continue; // Parallel edges do not define a separating axis.
+        n /= sqrt(length_squared);
+        float radiusA = abs(dot(a.axis[0], n)) * a.halfExtent.x
+                      + abs(dot(a.axis[1], n)) * a.halfExtent.y
+                      + abs(dot(a.axis[2], n)) * a.halfExtent.z;
+        float radiusB = abs(dot(b.axis[0], n)) * b.halfExtent.x
+                      + abs(dot(b.axis[1], n)) * b.halfExtent.y
+                      + abs(dot(b.axis[2], n)) * b.halfExtent.z;
+        float center_distance = dot(delta, n);
+        float penetration = radiusA + radiusB - abs(center_distance);
+        overlapping = overlapping && penetration >= 0.0f;
+        // Face axes precede edge axes; exact ties retain that stable order.
+        if (penetration < depth)
+        {
+            depth = penetration;
+            normal = center_distance >= 0.0f ? n : -n;
+            feature = axis;
+        }
+    }
+    return overlapping;
+}
+
+uint jph_clip_box_face(float3 input_vertices[8], uint count, float3 normal, float limit,
+                        out float3 output_vertices[8])
+{
+    // The caller supplies a nonempty polygon. Only the returned vertex range
+    // is initialized; unused array tails are not geometry.
+    uint output_count = 0u;
+    float3 previous = input_vertices[count - 1u];
+    float previous_distance = limit - dot(normal, previous);
+    for (uint index = 0u; index < 8u; ++index)
+    {
+        if (index >= count)
+            break;
+        float3 current = input_vertices[index];
+        float current_distance = limit - dot(normal, current);
+        bool current_inside = current_distance >= 0.0f;
+        // A boundary endpoint is emitted by the vertex branch exactly once.
+        // Only a strict sign crossing creates a new polygon vertex.
+        if ((previous_distance < 0.0f && current_distance > 0.0f)
+            || (previous_distance > 0.0f && current_distance < 0.0f))
+        {
+            float fraction = previous_distance / (previous_distance - current_distance);
+            output_vertices[output_count++] = previous + fraction * (current - previous);
+        }
+        if (current_inside)
+            output_vertices[output_count++] = current;
+        previous = current;
+        previous_distance = current_distance;
+    }
+    return output_count;
+}
+
+uint jph_box_face_points(JphCoreBox a, JphCoreBox b, float3 normal, float speculative_distance,
+                          inout JphBoxPoint points[9], uint count)
+{
+    // Extra contacts use real flat patches of the rounded shapes. Their plane
+    // is at outer half extent, but their tangent extents belong to the CORE.
+    // Full outer-box face quads would turn rounded corners into sharp corners.
+    uint reference_shape = 0u;
+    uint reference_axis = 0u;
+    float alignment = 3.402823466e+38f;
+    for (uint shape = 0u; shape < 2u; ++shape)
+        for (uint axis = 0u; axis < 3u; ++axis)
+        {
+            float3 direction = shape == 0u ? a.axis[axis] : b.axis[axis];
+            float3 perpendicular = cross(direction, normal);
+            float error = dot(perpendicular, perpendicular);
+            if (error < alignment)
+            {
+                alignment = error;
+                reference_shape = shape;
+                reference_axis = axis;
+            }
+        }
+    JphCoreBox reference = a;
+    JphCoreBox incident = b;
+    if (reference_shape != 0u)
+    {
+        reference = b;
+        incident = a;
+    }
+    float3 outward = reference_shape == 0u ? normal : -normal;
+    float3 reference_normal = dot(reference.axis[reference_axis], outward) >= 0.0f
+        ? reference.axis[reference_axis] : -reference.axis[reference_axis];
+    float3 plane_origin = reference.center
+        + reference_normal * (reference.halfExtent[reference_axis] + reference.radius);
+    uint u = (reference_axis + 1u) % 3u;
+    uint v = (reference_axis + 2u) % 3u;
+    uint incident_axis = 0u;
+    if (abs(dot(incident.axis[1], outward)) > abs(dot(incident.axis[incident_axis], outward)))
+        incident_axis = 1u;
+    if (abs(dot(incident.axis[2], outward)) > abs(dot(incident.axis[incident_axis], outward)))
+        incident_axis = 2u;
+    float3 incident_normal = dot(incident.axis[incident_axis], outward) >= 0.0f
+        ? -incident.axis[incident_axis] : incident.axis[incident_axis];
+    float3 face_origin = incident.center
+        + incident_normal * (incident.halfExtent[incident_axis] + incident.radius);
+    uint iu = (incident_axis + 1u) % 3u;
+    uint iv = (incident_axis + 2u) % 3u;
+    float3 du = incident.axis[iu] * incident.halfExtent[iu];
+    float3 dv = incident.axis[iv] * incident.halfExtent[iv];
+    float3 polygon[8];
+    polygon[0] = face_origin - du - dv;
+    polygon[1] = face_origin + du - dv;
+    polygon[2] = face_origin + du + dv;
+    polygon[3] = face_origin - du + dv;
+    // Map the actual incident flat patch onto the reference plane along the
+    // common contact direction BEFORE clipping. A slightly tilted normal must
+    // not collapse a resting patch to one point, nor move a clipped endpoint
+    // outside the reference patch. The most aligned reference/incident axes
+    // guarantee nonzero plane denominators (absolute dot >= 1/sqrt(3)).
+    float reference_denominator = dot(reference_normal, outward);
+    for (uint vertex = 0u; vertex < 4u; ++vertex)
+    {
+        float distance = dot(plane_origin - polygon[vertex], reference_normal) / reference_denominator;
+        polygon[vertex] += distance * outward;
+    }
+    uint polygon_count = 4u;
+    // A quad clipped by four rectangle planes has at most eight vertices.
+    for (uint side = 0u; side < 4u; ++side)
+    {
+        if (polygon_count == 0u)
+            break;
+        uint tangent = side < 2u ? u : v;
+        float3 side_normal = (side & 1u) == 0u ? reference.axis[tangent] : -reference.axis[tangent];
+        float limit = dot(side_normal, reference.center) + reference.halfExtent[tangent];
+        float3 clipped[8];
+        polygon_count = jph_clip_box_face(polygon, polygon_count, side_normal, limit, clipped);
+        for (uint vertex = 0u; vertex < 8u; ++vertex)
+            if (vertex < polygon_count)
+                polygon[vertex] = clipped[vertex];
+    }
+    float incident_denominator = dot(incident_normal, outward);
+    for (uint vertex = 0u; vertex < 8u; ++vertex)
+    {
+        if (vertex >= polygon_count)
+            break;
+        float3 reference_point = polygon[vertex];
+        // Invert the projection to recover a point on the ORIGINAL incident
+        // flat patch. Clipping in the reference plane preserves both finite
+        // patch domains because this plane-to-plane map is affine/invertible.
+        float distance = dot(face_origin - reference_point, incident_normal) / incident_denominator;
+        float penetration = -distance;
+        if (penetration < -speculative_distance)
+            continue;
+        float3 incident_point = reference_point + distance * outward;
+        JphBoxPoint point;
+        point.pointA = reference_shape == 0u ? reference_point : incident_point;
+        point.pointB = reference_shape == 0u ? incident_point : reference_point;
+        point.depth = penetration;
+        point.feature = 1024u + reference_shape * 24u + reference_axis * 8u + vertex;
+        points[count++] = point;
+    }
+    return count;
+}
+
+JphBoxManifold jph_box_box(float3 centerA, float4 rotationA, float4 geometryA,
+                            float3 centerB, float4 rotationB, float4 geometryB, float speculative_distance)
+{
+    // Pair-relative coordinates keep the narrow phase independent of a large
+    // shared world translation. Anchors are converted to world only at output.
+    JphCoreBox a = jph_core_box(float3(0.0f), rotationA, geometryA);
+    JphCoreBox b = jph_core_box(centerB - centerA, rotationB, geometryB);
+    float3 normal;
+    float core_depth;
+    uint axis_feature;
+    bool core_overlap = jph_core_sat(a, b, normal, core_depth, axis_feature);
+    float3 pa, pb;
+    float distance_squared;
+    uint distance_feature;
+    float penetration;
+    if (core_overlap)
+    {
+        // At the minimum translation, the two core boundaries touch. Their
+        // exact closest feature pair supplies matching support witnesses,
+        // including partial face overlap, edge/edge and contained boxes.
+        JphCoreBox translated = b;
+        translated.center += core_depth * normal;
+        jph_core_distance(a, translated, pa, pb, distance_squared, distance_feature);
+        pb -= core_depth * normal;
+        penetration = core_depth + a.radius + b.radius;
+    }
+    else
+    {
+        jph_core_distance(a, b, pa, pb, distance_squared, distance_feature);
+        float distance = sqrt(distance_squared);
+        if (distance_squared > 1e-20f)
+            normal = (pb - pa) / distance;
+        penetration = a.radius + b.radius - distance;
+    }
+
+    JphBoxManifold manifold;
+    manifold.normal = normal;
+    manifold.count = 0u;
+    if (penetration < -speculative_distance)
+        return manifold;
+    JphBoxPoint candidates[9];
+    candidates[0].pointA = pa + a.radius * normal;
+    candidates[0].pointB = pb - b.radius * normal;
+    candidates[0].depth = dot(candidates[0].pointA - candidates[0].pointB, normal);
+    candidates[0].feature = core_overlap ? 64u + axis_feature : 128u + distance_feature;
+    uint count = jph_box_face_points(a, b, normal, speculative_distance, candidates, 1u);
+
+    // Remove duplicate boundary points before selecting a support polygon.
+    float extent = max(1.0f, max(max(geometryA.x, geometryA.y), max(geometryA.z,
+                              max(max(geometryB.x, geometryB.y), geometryB.z))));
+    float tolerance_squared = 1e-12f * extent * extent;
+    uint unique_count = 0u;
+    for (uint point = 0u; point < 9u; ++point)
+    {
+        if (point >= count)
+            break;
+        bool duplicate = false;
+        for (uint other = 0u; other < 9u; ++other)
+        {
+            if (other >= unique_count)
+                break;
+            float3 da = candidates[point].pointA - candidates[other].pointA;
+            float3 db = candidates[point].pointB - candidates[other].pointB;
+            if (dot(da, da) + dot(db, db) <= tolerance_squared)
+            {
+                if (candidates[point].depth > candidates[other].depth)
+                    candidates[other] = candidates[point];
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            candidates[unique_count++] = candidates[point];
+    }
+
+    // Depth first; equal-depth contacts prefer distance from the patch center.
+    // Then retain the longest segment and its extreme points on both sides,
+    // following Jolt's tangent-plane area reduction to at most four points.
+    float3 center = float3(0.0f);
+    for (uint point = 0u; point < 9u; ++point)
+        if (point < unique_count)
+            center += 0.5f * (candidates[point].pointA + candidates[point].pointB);
+    center /= float(unique_count);
+    uint first = 0u;
+    float first_distance = -1.0f;
+    float depth_tolerance = 1e-6f * extent;
+    for (uint point = 0u; point < 9u; ++point)
+    {
+        if (point >= unique_count)
+            break;
+        float3 delta = 0.5f * (candidates[point].pointA + candidates[point].pointB) - center;
+        delta -= normal * dot(delta, normal);
+        float distance = dot(delta, delta);
+        if (candidates[point].depth > candidates[first].depth + depth_tolerance ||
+            (abs(candidates[point].depth - candidates[first].depth) <= depth_tolerance && distance > first_distance))
+        {
+            first = point;
+            first_distance = distance;
+        }
+    }
+    uint selected[4];
+    selected[0] = first;
+    uint selected_count = 1u;
+    if (unique_count > 1u)
+    {
+        uint second = first;
+        float longest = -1.0f;
+        float3 p1 = 0.5f * (candidates[first].pointA + candidates[first].pointB);
+        for (uint point = 0u; point < 9u; ++point)
+        {
+            if (point >= unique_count)
+                break;
+            if (point == first)
+                continue;
+            float3 delta = 0.5f * (candidates[point].pointA + candidates[point].pointB) - p1;
+            delta -= normal * dot(delta, normal);
+            float distance = dot(delta, delta);
+            if (distance > longest)
+            {
+                longest = distance;
+                second = point;
+            }
+        }
+        selected[selected_count++] = second;
+        float3 segment = 0.5f * (candidates[second].pointA + candidates[second].pointB) - p1;
+        float3 perpendicular = cross(segment, normal);
+        float minimum = 0.0f;
+        float maximum = 0.0f;
+        uint negative = 0xffffffffu;
+        uint positive = 0xffffffffu;
+        for (uint point = 0u; point < 9u; ++point)
+        {
+            if (point >= unique_count)
+                break;
+            if (point == first || point == second)
+                continue;
+            float3 delta = 0.5f * (candidates[point].pointA + candidates[point].pointB) - p1;
+            float side = dot(perpendicular, delta);
+            if (side < minimum)
+            {
+                minimum = side;
+                negative = point;
+            }
+            else if (side > maximum)
+            {
+                maximum = side;
+                positive = point;
+            }
+        }
+        if (negative != 0xffffffffu)
+            selected[selected_count++] = negative;
+        if (positive != 0xffffffffu)
+            selected[selected_count++] = positive;
+    }
+    manifold.count = selected_count;
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        if (point < selected_count)
+        {
+            JphBoxPoint contact = candidates[selected[point]];
+            contact.pointA += centerA;
+            contact.pointB += centerA;
+            manifold.points[point] = contact;
+        }
+    return manifold;
+}
+
 float jph_combine_material(float value_a, uint mode_a, float value_b, uint mode_b)
 {
     // The immutable model boundary validates the four supported modes.
@@ -231,40 +731,183 @@ float jph_combine_material(float value_a, uint mode_a, float value_b, uint mode_
     return max(value_a, value_b);
 }
 
-void jph_solve_velocity(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
-                        inout Contact contact)
+void jph_solve_friction(BodyModel ma, inout BodyState sa, float3 ra,
+                        BodyModel mb, inout BodyState sb, float3 rb,
+                        float3 normal, float maximum_impulse, inout float2 impulse)
 {
-    float3 normal = contact.normalDepth.xyz;
-    float3 pa, pb, ra, rb;
-    jph_contact_points(contact, sa, sb, pa, pb, ra, rb);
     float3 tangent1, tangent2;
     jph_tangents(normal, tangent1, tangent2);
-    float friction = jph_combine_material(ma.mass.y, ma.surface.z, mb.mass.y, mb.surface.z);
 
-    // Match Jolt's friction-first / normal-last ordering. The friction bound
-    // uses the normal impulse from the PREVIOUS velocity iteration.
-    float max_friction = friction * contact.impulse.x;
-    float lambda1 = contact.impulse.y
+    // ContactConstraintManager solves linear friction at the average contact
+    // midpoint, with a circular bound from the previous iteration's SUM of
+    // normal impulses. The manifold owns this pair of accumulated lambdas.
+    float lambda1 = impulse.x
         + jph_effective_mass(ma, sa, ra, mb, sb, rb, tangent1) * jph_jv(ma, sa, ra, mb, sb, rb, tangent1);
-    float lambda2 = contact.impulse.z
+    float lambda2 = impulse.y
         + jph_effective_mass(ma, sa, ra, mb, sb, rb, tangent2) * jph_jv(ma, sa, ra, mb, sb, rb, tangent2);
     float friction_sq = lambda1 * lambda1 + lambda2 * lambda2;
-    if (friction_sq > max_friction * max_friction)
+    if (friction_sq > maximum_impulse * maximum_impulse)
     {
-        float scale = max_friction / sqrt(friction_sq);
+        float scale = maximum_impulse / sqrt(friction_sq);
         lambda1 *= scale;
         lambda2 *= scale;
     }
-    jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent1, lambda1 - contact.impulse.y);
-    jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent2, lambda2 - contact.impulse.z);
-    contact.impulse.y = lambda1;
-    contact.impulse.z = lambda2;
+    jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent1, lambda1 - impulse.x);
+    jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent2, lambda2 - impulse.y);
+    impulse = float2(lambda1, lambda2);
+}
 
-    float lambda_n = max(0.0f, contact.impulse.x
-        + jph_effective_mass(ma, sa, ra, mb, sb, rb, normal)
-            * (jph_jv(ma, sa, ra, mb, sb, rb, normal) - contact.impulse.w));
-    jph_apply_impulse(ma, sa, ra, mb, sb, rb, normal, lambda_n - contact.impulse.x);
-    contact.impulse.x = lambda_n;
+void jph_solve_angular_friction(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
+                                float3 normal, float maximum_impulse, inout float impulse)
+{
+    float3 inverse_axis_a = jph_inverse_inertia(ma, sa, normal);
+    float3 inverse_axis_b = jph_inverse_inertia(mb, sb, normal);
+    float inverse_effective_mass = dot(normal, inverse_axis_a + inverse_axis_b);
+    float effective_mass = inverse_effective_mass > 0.0f ? 1.0f / inverse_effective_mass : 0.0f;
+    float3 angular_a = jph_dynamic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
+    float3 angular_b = jph_dynamic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
+    float lambda = clamp(impulse + effective_mass * dot(normal, angular_a - angular_b),
+                         -maximum_impulse, maximum_impulse);
+    float delta = lambda - impulse;
+    if (jph_dynamic(ma))
+        sa.angularVelocity.xyz -= delta * inverse_axis_a;
+    if (jph_dynamic(mb))
+        sb.angularVelocity.xyz += delta * inverse_axis_b;
+    impulse = lambda;
+}
+
+float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyState sb,
+                               float3 normal, float3 ja[4], float3 jb[4],
+                               float4 old_impulse, float4 bias, uint count)
+{
+    // All points share n; their midpoint offsets vary in only two tangent
+    // coordinates. Thus J, and this pair-local PSD K, have rank at most three.
+    // The unilateral QP has a minimizer on an independent active basis of
+    // size <= 3, even if a four-point force distribution is non-unique.
+    float4 k[4];
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        k[point] = float4(0.0f);
+    float inverse_mass = jph_inverse_mass(ma) + jph_inverse_mass(mb);
+    for (uint column = 0u; column < MaxContactPointsPerPair; ++column)
+    {
+        if (column >= count)
+            break;
+        float3 inverse_a = jph_inverse_inertia(ma, sa, ja[column]);
+        float3 inverse_b = jph_inverse_inertia(mb, sb, jb[column]);
+        for (uint row = 0u; row < MaxContactPointsPerPair; ++row)
+        {
+            if (row > column)
+                break;
+            float value = inverse_mass + dot(ja[row], inverse_a) + dot(jb[row], inverse_b);
+            k[row][column] = value;
+            k[column][row] = value;
+        }
+    }
+
+    float3 linear_a = jph_dynamic(ma) ? sa.linearVelocity.xyz : float3(0.0f);
+    float3 linear_b = jph_dynamic(mb) ? sb.linearVelocity.xyz : float3(0.0f);
+    float3 angular_a = jph_dynamic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
+    float3 angular_b = jph_dynamic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
+    float linear_jv = dot(normal, linear_a - linear_b);
+    float4 q = float4(0.0f);
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        if (point < count)
+            q[point] = linear_jv + dot(ja[point], angular_a) - dot(jb[point], angular_b)
+                - bias[point] + dot(k[point], old_impulse);
+
+    // Equilibrate only AFTER reconstructing q with physical K and old lambda.
+    // Dii=sqrt(Kii), C=D^-1 K D^-1, r=D^-1 q and y=D lambda.
+    // Reuse k for C. Its unit diagonal makes rank tests independent of the
+    // different mass/inertia scales of otherwise independent contact rows.
+    float4 inverse_scale = float4(0.0f);
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+        if (point < count)
+            inverse_scale[point] = 1.0f / sqrt(k[point][point]);
+    for (uint column = 0u; column < MaxContactPointsPerPair; ++column)
+    {
+        if (column >= count)
+            break;
+        for (uint row = 0u; row < MaxContactPointsPerPair; ++row)
+        {
+            if (row > column)
+                break;
+            float value = k[row][column] * inverse_scale[row] * inverse_scale[column];
+            k[row][column] = value;
+            k[column][row] = value;
+        }
+        k[column][column] = 1.0f;
+    }
+    float4 scaled_q = q * inverse_scale;
+
+    // Empty set plus 4 singleton, 6 pair and 4 triple bases: at most fifteen
+    // candidates. Zero is a normal feasible QP candidate, not a PGS fallback.
+    float4 best = float4(0.0f);
+    for (uint mask = 1u; mask < 16u; ++mask)
+    {
+        if (mask >= (1u << count))
+            break;
+        uint size = (mask & 1u) + ((mask >> 1u) & 1u) + ((mask >> 2u) & 1u) + ((mask >> 3u) & 1u);
+        if (size > 3u)
+            continue;
+        uint indices[3];
+        uint next = 0u;
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+            if ((mask & (1u << point)) != 0u)
+                indices[next++] = point;
+
+        uint i = indices[0];
+        // Relative to C's unit diagonal, LDL pivots identify duplicate or
+        // collinear rows without treating a differently scaled row as null.
+        float rank_threshold = 1e-6f;
+        float d0 = k[i][i];
+        if (d0 <= rank_threshold)
+            continue;
+        float y0 = scaled_q[i];
+        float z0 = y0 / d0;
+        float3 solution = float3(z0, 0.0f, 0.0f);
+        if (size > 1u)
+        {
+            uint j = indices[1];
+            float l10 = k[j][i] / d0;
+            float d1 = k[j][j] - l10 * k[j][i];
+            if (d1 <= rank_threshold)
+                continue;
+            float y1 = scaled_q[j] - l10 * y0;
+            float z1 = y1 / d1;
+            solution.y = z1;
+            solution.x = z0 - l10 * solution.y;
+            if (size > 2u)
+            {
+                uint third = indices[2];
+                float l20 = k[third][i] / d0;
+                float l21 = (k[third][j] - l20 * k[j][i]) / d1;
+                float d2 = k[third][third] - l20 * k[third][i] - l21 * l21 * d1;
+                if (d2 <= rank_threshold)
+                    continue;
+                float y2 = scaled_q[third] - l20 * y0 - l21 * y1;
+                solution.z = y2 / d2;
+                solution.y = z1 - l21 * solution.z;
+                solution.x = z0 - l10 * solution.y - l20 * solution.z;
+            }
+        }
+        if (any(solution < float3(0.0f)))
+            continue;
+        float4 candidate = float4(0.0f);
+        candidate[indices[0]] = solution.x;
+        if (size > 1u)
+            candidate[indices[1]] = solution.y;
+        if (size > 2u)
+            candidate[indices[2]] = solution.z;
+        // E(y)=.5*y^T*C*y-r^T*y equals the physical impulse objective.
+        // Compare E(candidate)-E(best) directly: subtracting two large total
+        // energies can erase a real improvement on a smaller-scale row.
+        float4 sum = candidate + best;
+        float4 response = float4(dot(k[0], sum), dot(k[1], sum), dot(k[2], sum), dot(k[3], sum));
+        float energy_delta = dot(candidate - best, 0.5f * response - scaled_q);
+        if (energy_delta < 0.0f)
+            best = candidate;
+    }
+    return best * inverse_scale;
 }
 
 void jph_solve_position(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
