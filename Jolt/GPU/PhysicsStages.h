@@ -33,6 +33,7 @@ enum class Stage : std::uint32_t
     SolveVelocity,
     Integrate,
     SolvePosition,
+    ClearForces,
 };
 
 enum class Domain : std::uint32_t { Bodies, WorldPairs, Contacts, Worlds };
@@ -70,11 +71,15 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::SolvePosition, "solve_position", Domain::Worlds, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::Contacts)
             | Mask(Resource::BodyStates), Mask(Resource::BodyStates)},
+    {Stage::ClearForces, "clear_forces", Domain::Bodies, 64, 1, 1,
+        Mask(Resource::StepParams), Mask(Resource::BodyForces)},
 };
 
 // One substep: ApplyForces, BuildBounds, CollidePairs, SetupContacts,
 // SolveVelocity repeated counts.w times, Integrate, SolvePosition repeated
-// solve.x times. Each solve dispatch performs ONE iteration. No warmstart,
+// solve.x times. Each solve dispatch performs ONE iteration. The logical-tick
+// owner appends ClearForces once after all substeps; direct recipe consumers
+// choose that boundary themselves. No warmstart,
 // sleeping, CCD, dynamic boxes, multiple-primitive bodies, pair-ignore filters, joints, locked DOFs or
 // kinematic motion are implemented by this bootstrap. A
 // host must reject these unsupported options. Each body has one primitive leaf or Empty;

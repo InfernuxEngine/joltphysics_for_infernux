@@ -9,7 +9,7 @@ ConstantBuffer<StepParams> step_params;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
 StructuredBuffer<WorldRange> worlds;
-StructuredBuffer<BodyForces> body_forces;
+RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
@@ -48,6 +48,19 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
     state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
     body_states[index] = state;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void clear_forces(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= step_params.counts.x)
+        return;
+    BodyForces cleared;
+    cleared.force = float4(0.0f);
+    cleared.torque = float4(0.0f);
+    body_forces[index] = cleared;
 }
 
 [shader("compute")]

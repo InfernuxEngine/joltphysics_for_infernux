@@ -84,6 +84,9 @@ struct JPH_GPU_ALIGN BodyState
 
 struct JPH_GPU_ALIGN BodyForces
 {
+    // Accumulator for one logical tick, shared by all of its substeps. The
+    // tick owner clears it after the last substep. Continuous controllers
+    // submit their contribution for each logical tick.
     JPH_GPU_FLOAT4 force;   // World space xyz; w padding.
     JPH_GPU_FLOAT4 torque;  // World space xyz; w padding.
 };
