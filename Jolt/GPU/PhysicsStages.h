@@ -75,10 +75,14 @@ inline constexpr StageDefinition Stages[] = {
 // One substep: ApplyForces, BuildBounds, CollidePairs, SetupContacts,
 // SolveVelocity repeated counts.w times, Integrate, SolvePosition repeated
 // solve.x times. Each solve dispatch performs ONE iteration. No warmstart,
-// sleeping, CCD, dynamic boxes, compounds, filters, joints, locked DOFs,
-// gyroscopic forces or COM offsets are implemented by this bootstrap. A host
-// must reject these unsupported options.
-// It must also validate finite inputs, normalized rotations, positive dimensions,
+// sleeping, CCD, dynamic boxes, multiple-primitive bodies, filters, joints, locked DOFs,
+// gyroscopic forces or kinematic motion are implemented by this bootstrap. A
+// host must reject these unsupported options. Each body has one primitive leaf;
+// its local pose may differ from the body's COM frame, including an explicit
+// center-of-mass offset. Authoring containers with one leaf may be flattened;
+// multiple-leaf compound collision and mass/response are not implemented here.
+// It must also validate finite inputs, normalized body/shape/inertia rotations,
+// zero shape local-position padding, positive dimensions,
 // nonnegative material/damping/speed bounds, convex radius <= min half extent,
 // disjoint complete world ranges, matching body.meta.w and at most 32 bodies per
 // world. This is a bounded, serial-per-world correctness baseline, not a parallel

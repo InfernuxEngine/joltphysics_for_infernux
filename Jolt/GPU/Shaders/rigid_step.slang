@@ -14,6 +14,18 @@ RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
 
+// Only the primitive geometry uses this local pose. Body state, principal
+// inertia and contact anchors remain in the original body COM frame.
+float3 jph_leaf_position(ShapeModel shape, BodyState state)
+{
+    return state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz);
+}
+
+float4 jph_leaf_rotation(ShapeModel shape, BodyState state)
+{
+    return jph_quat_mul(state.rotation, shape.localRotation);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void apply_forces(uint3 tid : SV_DispatchThreadID)
@@ -45,20 +57,23 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
         return;
     BodyModel model = body_models[index];
     BodyState state = body_states[index];
-    float4 geometry = shape_models[model.meta.x].geometry;
+    ShapeModel shape = shape_models[model.meta.x];
+    float4 geometry = shape.geometry;
+    float3 center = jph_leaf_position(shape, state);
+    float4 rotation = jph_leaf_rotation(shape, state);
     float3 extent;
     if (model.meta.y == ShapeSphere)
         extent = float3(geometry.w);
     else
-        extent = abs(jph_rotate(state.rotation, float3(1.0f, 0.0f, 0.0f))) * geometry.x
-               + abs(jph_rotate(state.rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y
-               + abs(jph_rotate(state.rotation, float3(0.0f, 0.0f, 1.0f))) * geometry.z;
+        extent = abs(jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f))) * geometry.x
+               + abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y
+               + abs(jph_rotate(rotation, float3(0.0f, 0.0f, 1.0f))) * geometry.z;
     // Expand each body by half the contact band, so the pair band is exactly
     // the configured speculative distance, not twice that distance.
     extent += 0.5f * step_params.contact.x;
     Aabb result;
-    result.minimum = float4(state.positionCOM.xyz - extent, 0.0f);
-    result.maximum = float4(state.positionCOM.xyz + extent, 0.0f);
+    result.minimum = float4(center - extent, 0.0f);
+    result.maximum = float4(center + extent, 0.0f);
     bounds[index] = result;
 }
 
@@ -96,22 +111,28 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
 
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
-    float4 ga = shape_models[ma.meta.x].geometry;
-    float4 gb = shape_models[mb.meta.x].geometry;
+    ShapeModel shape_a = shape_models[ma.meta.x];
+    ShapeModel shape_b = shape_models[mb.meta.x];
+    float4 ga = shape_a.geometry;
+    float4 gb = shape_b.geometry;
+    float3 ca = jph_leaf_position(shape_a, sa);
+    float3 cb = jph_leaf_position(shape_b, sb);
+    float4 qa = jph_leaf_rotation(shape_a, sa);
+    float4 qb = jph_leaf_rotation(shape_b, sb);
     float3 normal, pa, pb;
     float penetration;
     uint feature = 0u;
     if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeSphere)
-        jph_sphere_sphere(sa.positionCOM.xyz, ga.w, sb.positionCOM.xyz, gb.w, normal, penetration, pa, pb);
+        jph_sphere_sphere(ca, ga.w, cb, gb.w, normal, penetration, pa, pb);
     else if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeBox)
-        jph_sphere_box(sa.positionCOM.xyz, ga.w, sb.positionCOM.xyz, sb.rotation, gb,
+        jph_sphere_box(ca, ga.w, cb, qb, gb,
                        normal, penetration, pa, pb, feature);
     else
     {
         // The host contract admits only Sphere or STATIC Box, so the only
         // remaining active type combination is static Box / dynamic Sphere.
         // Unsupported shape/motion combinations must be rejected at preparation.
-        jph_sphere_box(sb.positionCOM.xyz, gb.w, sa.positionCOM.xyz, sa.rotation, ga,
+        jph_sphere_box(cb, gb.w, ca, qa, ga,
                        normal, penetration, pb, pa, feature);
         normal = -normal;
     }

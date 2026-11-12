@@ -7,7 +7,8 @@
 
 // Shared, pointer-free C++ / Slang storage contract. This header intentionally
 // does not include Jolt.h, Body, PhysicsSystem, a graphics API or an allocator.
-// All positions are centers of mass; the bootstrap primitives are COM centered.
+// Body positions are centers of mass. The bootstrap has one primitive leaf per
+// body; its local pose is expressed relative to the body's center of mass.
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +38,8 @@ JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
 
 struct JPH_GPU_ALIGN BodyModel
 {
-    // shape index, shape type, motion type, world index.
+    // Shape instance index, shape type, motion type, world index. Each body has
+    // one primitive leaf; a shared index must have an identical local pose.
     JPH_GPU_UINT4 meta;
     // Inverse mass, friction, restitution, gravity factor.
     JPH_GPU_FLOAT4 mass;
@@ -54,6 +56,12 @@ struct JPH_GPU_ALIGN ShapeModel
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
+    // Primitive center in the body COM frame, xyz; w is zero padding. A collider
+    // center already included in the body's COM must not be added a second time.
+    JPH_GPU_FLOAT4 localPositionCOM;
+    // Primitive frame relative to the body frame, normalized quaternion xyzw.
+    // This does not rotate the body's principal inertia frame.
+    JPH_GPU_FLOAT4 localRotation;
 };
 
 struct JPH_GPU_ALIGN BodyState
@@ -139,7 +147,7 @@ static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
     static_assert(sizeof(type) == bytes && alignof(type) == 16); \
     static_assert(std::is_standard_layout_v<type> && std::is_trivially_copyable_v<type>)
 JPH_GPU_CHECK_TYPE(BodyModel, 80);
-JPH_GPU_CHECK_TYPE(ShapeModel, 16);
+JPH_GPU_CHECK_TYPE(ShapeModel, 48);
 JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(WorldRange, 16);
@@ -149,6 +157,8 @@ JPH_GPU_CHECK_TYPE(StepParams, 80);
 JPH_GPU_CHECK_TYPE(PoseBinding, 112);
 JPH_GPU_CHECK_TYPE(PoseParams, 16);
 static_assert(offsetof(BodyModel, mass) == 16 && offsetof(BodyModel, damping) == 64);
+static_assert(offsetof(ShapeModel, geometry) == 0 && offsetof(ShapeModel, localPositionCOM) == 16
+    && offsetof(ShapeModel, localRotation) == 32);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);
 static_assert(offsetof(Contact, normalDepth) == 16 && offsetof(Contact, impulse) == 64);
 static_assert(offsetof(StepParams, gravityDt) == 32 && offsetof(StepParams, restitution) == 64);
