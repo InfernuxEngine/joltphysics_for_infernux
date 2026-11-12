@@ -7,8 +7,8 @@
 
 // Shared, pointer-free C++ / Slang storage contract. This header intentionally
 // does not include Jolt.h, Body, PhysicsSystem, a graphics API or an allocator.
-// Body positions are centers of mass. The bootstrap has one primitive leaf per
-// body; its local pose is expressed relative to the body's center of mass.
+// Body positions are centers of mass. A body has one primitive leaf or Empty;
+// the primitive's local pose is relative to the body's center of mass.
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdint>
@@ -31,15 +31,21 @@ struct alignas(16) UInt4 { std::uint32_t x, y, z, w; };
 
 JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
+JPH_GPU_CONSTANT(ShapeEmpty, 2);
 JPH_GPU_CONSTANT(MotionStatic, 0);
 JPH_GPU_CONSTANT(MotionDynamic, 2);
+// Infernux PhysicsMaterialCombine values and priority (higher mode wins).
+JPH_GPU_CONSTANT(MaterialCombineAverage, 0);
+JPH_GPU_CONSTANT(MaterialCombineMinimum, 1);
+JPH_GPU_CONSTANT(MaterialCombineMultiply, 2);
+JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
 // Correctness bootstrap bound, not a permanent limit on user physics worlds.
 JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
 
 struct JPH_GPU_ALIGN BodyModel
 {
     // Shape instance index, shape type, motion type, world index. Each body has
-    // one primitive leaf; a shared index must have an identical local pose.
+    // one primitive leaf or Empty; a shared index has an identical local pose.
     JPH_GPU_UINT4 meta;
     // Inverse mass, friction, restitution, gravity factor.
     JPH_GPU_FLOAT4 mass;
@@ -49,11 +55,15 @@ struct JPH_GPU_ALIGN BodyModel
     JPH_GPU_FLOAT4 inertiaRotation;
     // Linear damping, angular damping, maximum linear/angular speed.
     JPH_GPU_FLOAT4 damping;
+    // Layer index [0, 31], collision mask, friction combine, bounce combine.
+    // Both masks must admit the opposite layer for a pair to collide.
+    JPH_GPU_UINT4 surface;
 };
 
 struct JPH_GPU_ALIGN ShapeModel
 {
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
+    // Empty has no collision geometry; all four geometry values are padding.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
     // Primitive center in the body COM frame, xyz; w is zero padding. A collider
@@ -146,7 +156,7 @@ static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
 #define JPH_GPU_CHECK_TYPE(type, bytes) \
     static_assert(sizeof(type) == bytes && alignof(type) == 16); \
     static_assert(std::is_standard_layout_v<type> && std::is_trivially_copyable_v<type>)
-JPH_GPU_CHECK_TYPE(BodyModel, 80);
+JPH_GPU_CHECK_TYPE(BodyModel, 96);
 JPH_GPU_CHECK_TYPE(ShapeModel, 48);
 JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
@@ -156,7 +166,9 @@ JPH_GPU_CHECK_TYPE(Contact, 80);
 JPH_GPU_CHECK_TYPE(StepParams, 80);
 JPH_GPU_CHECK_TYPE(PoseBinding, 112);
 JPH_GPU_CHECK_TYPE(PoseParams, 16);
-static_assert(offsetof(BodyModel, mass) == 16 && offsetof(BodyModel, damping) == 64);
+static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
+    && offsetof(BodyModel, invInertiaDiagonal) == 32 && offsetof(BodyModel, inertiaRotation) == 48
+    && offsetof(BodyModel, damping) == 64 && offsetof(BodyModel, surface) == 80);
 static_assert(offsetof(ShapeModel, geometry) == 0 && offsetof(ShapeModel, localPositionCOM) == 16
     && offsetof(ShapeModel, localRotation) == 32);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);

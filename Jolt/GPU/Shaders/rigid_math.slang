@@ -75,6 +75,21 @@ float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
         : float3(0.0f);
 }
 
+void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt)
+{
+    // MotionProperties::ApplyGyroscopicForceInternal. Preparation admits only
+    // positive principal inverse inertia; locked axes are outside this slice.
+    float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
+    float3 local_velocity = jph_inverse_rotate(inertia_to_world, state.angularVelocity.xyz);
+    float3 local_momentum = local_velocity / model.invInertiaDiagonal.xyz;
+    float3 new_momentum = local_momentum - dt * cross(local_velocity, local_momentum);
+    float new_length_sq = dot(new_momentum, new_momentum);
+    new_momentum = new_length_sq > 0.0f
+        ? new_momentum * sqrt(dot(local_momentum, local_momentum) / new_length_sq)
+        : float3(0.0f);
+    state.angularVelocity.xyz = jph_rotate(inertia_to_world, model.invInertiaDiagonal.xyz * new_momentum);
+}
+
 float3 jph_acceleration(BodyModel model, BodyForces forces, float3 gravity)
 {
     return jph_dynamic(model) ? gravity * model.mass.w + forces.force.xyz * model.mass.x : float3(0.0f);
@@ -198,6 +213,19 @@ void jph_sphere_box(float3 sphere_center, float sphere_radius,
     point_box = box_center + jph_rotate(box_rotation, box_point_local);
 }
 
+float jph_combine_material(float value_a, uint mode_a, float value_b, uint mode_b)
+{
+    // The immutable model boundary validates the four supported modes.
+    uint mode = max(mode_a, mode_b);
+    if (mode == MaterialCombineAverage)
+        return 0.5f * (value_a + value_b);
+    if (mode == MaterialCombineMinimum)
+        return min(value_a, value_b);
+    if (mode == MaterialCombineMultiply)
+        return value_a * value_b;
+    return max(value_a, value_b);
+}
+
 void jph_solve_velocity(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
                         inout Contact contact)
 {
@@ -206,7 +234,7 @@ void jph_solve_velocity(BodyModel ma, inout BodyState sa, BodyModel mb, inout Bo
     jph_contact_points(contact, sa, sb, pa, pb, ra, rb);
     float3 tangent1, tangent2;
     jph_tangents(normal, tangent1, tangent2);
-    float friction = sqrt(ma.mass.y * mb.mass.y);
+    float friction = jph_combine_material(ma.mass.y, ma.surface.z, mb.mass.y, mb.surface.z);
 
     // Match Jolt's friction-first / normal-last ordering. The friction bound
     // uses the normal impulse from the PREVIOUS velocity iteration.

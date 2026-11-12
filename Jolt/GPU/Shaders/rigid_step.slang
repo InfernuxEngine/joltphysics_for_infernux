@@ -39,6 +39,8 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     BodyState state = body_states[index];
     BodyForces forces = body_forces[index];
     float dt = step_params.gravityDt.w;
+    // PhysicsSystem applies gyro before external force/torque and drag.
+    jph_apply_gyroscopic_force(model, state, dt);
     state.linearVelocity.xyz += dt * jph_acceleration(model, forces, step_params.gravityDt.xyz);
     state.angularVelocity.xyz += dt * jph_inverse_inertia(model, state, forces.torque.xyz);
     state.linearVelocity.xyz *= max(0.0f, 1.0f - model.damping.x * dt);
@@ -57,6 +59,14 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
         return;
     BodyModel model = body_models[index];
     BodyState state = body_states[index];
+    if (model.meta.y == ShapeEmpty)
+    {
+        Aabb empty_bounds;
+        empty_bounds.minimum = float4(state.positionCOM.xyz, 0.0f);
+        empty_bounds.maximum = empty_bounds.minimum;
+        bounds[index] = empty_bounds;
+        return;
+    }
     ShapeModel shape = shape_models[model.meta.x];
     float4 geometry = shape.geometry;
     float3 center = jph_leaf_position(shape, state);
@@ -102,7 +112,11 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
 
     BodyModel ma = body_models[a];
     BodyModel mb = body_models[b];
+    if (ma.meta.y == ShapeEmpty || mb.meta.y == ShapeEmpty)
+        return;
     if (!jph_dynamic(ma) && !jph_dynamic(mb))
+        return;
+    if ((ma.surface.y & (1u << mb.surface.x)) == 0u || (mb.surface.y & (1u << ma.surface.x)) == 0u)
         return;
     Aabb ba = bounds[a];
     Aabb bb = bounds[b];
@@ -129,7 +143,7 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
                        normal, penetration, pa, pb, feature);
     else
     {
-        // The host contract admits only Sphere or STATIC Box, so the only
+        // After Empty is skipped, admitted geometry is Sphere or STATIC Box; the only
         // remaining active type combination is static Box / dynamic Sphere.
         // Unsupported shape/motion combinations must be rejected at preparation.
         jph_sphere_box(cb, gb.w, ca, qa, ga,
@@ -168,7 +182,7 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     float normal_velocity = dot(jph_point_velocity(mb, sb, rb) - jph_point_velocity(ma, sa, ra), normal);
     float dt = step_params.gravityDt.w;
     float speculative_bias = max(0.0f, -contact.normalDepth.w / dt);
-    float restitution = max(ma.mass.z, mb.mass.z);
+    float restitution = jph_combine_material(ma.mass.z, ma.surface.w, mb.mass.z, mb.surface.w);
     float bias = speculative_bias;
     if (restitution > 0.0f && normal_velocity < -step_params.restitution.x
         && normal_velocity < -speculative_bias)
