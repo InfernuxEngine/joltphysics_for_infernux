@@ -150,6 +150,30 @@ struct JPH_GPU_ALIGN PoseParams
     JPH_GPU_UINT4 bindingCount;
 };
 
+// Sparse body mutations at an owner-controlled boundary between logical ticks.
+// Each list addresses unique slots. Neither operation advances simulation time.
+struct JPH_GPU_ALIGN BodyMutationParams
+{
+    // Initialization count, COM update count, first initialization record, padding.
+    JPH_GPU_UINT4 counts;
+};
+
+struct JPH_GPU_ALIGN BodyInitialization
+{
+    // x is the body slot; yzw are zero padding. The slot's actor identity is
+    // owned by the engine registry, not encoded in the device array index.
+    JPH_GPU_UINT4 bodyIndex;
+    BodyState state;
+    BodyForces forces;
+};
+
+struct JPH_GPU_ALIGN CenterOfMassUpdate
+{
+    JPH_GPU_UINT4 bodyIndex; // x is the body slot; yzw are zero padding.
+    // New minus old root COM in the authored body frame, including baked scale.
+    JPH_GPU_FLOAT4 deltaLocalCOM;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(Float4) == 16 && alignof(Float4) == 16);
 static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
@@ -166,6 +190,11 @@ JPH_GPU_CHECK_TYPE(Contact, 80);
 JPH_GPU_CHECK_TYPE(StepParams, 80);
 JPH_GPU_CHECK_TYPE(PoseBinding, 112);
 JPH_GPU_CHECK_TYPE(PoseParams, 16);
+JPH_GPU_CHECK_TYPE(BodyMutationParams, 16);
+JPH_GPU_CHECK_TYPE(BodyInitialization, 112);
+JPH_GPU_CHECK_TYPE(CenterOfMassUpdate, 32);
+static_assert(offsetof(BodyInitialization, state) == 16 && offsetof(BodyInitialization, forces) == 80);
+static_assert(offsetof(CenterOfMassUpdate, deltaLocalCOM) == 16);
 static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
     && offsetof(BodyModel, invInertiaDiagonal) == 32 && offsetof(BodyModel, inertiaRotation) == 48
     && offsetof(BodyModel, damping) == 64 && offsetof(BodyModel, surface) == 80);
