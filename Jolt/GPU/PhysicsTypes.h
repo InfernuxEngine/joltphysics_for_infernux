@@ -41,6 +41,21 @@ JPH_GPU_CONSTANT(MaterialCombineMultiply, 2);
 JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
 // Correctness bootstrap bound, not a permanent limit on user physics worlds.
 JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
+// FIFO body commands. These values match Infernux ForceMode.
+JPH_GPU_CONSTANT(CommandSetPosition, 0);
+JPH_GPU_CONSTANT(CommandSetRotation, 1);
+JPH_GPU_CONSTANT(CommandSetPose, 2);
+JPH_GPU_CONSTANT(CommandSetLinearVelocity, 3);
+JPH_GPU_CONSTANT(CommandSetAngularVelocity, 4);
+JPH_GPU_CONSTANT(CommandAddForce, 5);
+JPH_GPU_CONSTANT(CommandAddTorque, 6);
+JPH_GPU_CONSTANT(CommandAddForceAtPosition, 7);
+JPH_GPU_CONSTANT(CommandForce, 0);
+JPH_GPU_CONSTANT(CommandAcceleration, 1);
+JPH_GPU_CONSTANT(CommandImpulse, 2);
+JPH_GPU_CONSTANT(CommandVelocityChange, 3);
+JPH_GPU_CONSTANT(MaxCommandsPerBodyDispatch, 64);
+JPH_GPU_CONSTANT(MaxCommandBodiesPerDispatch, 64);
 
 struct JPH_GPU_ALIGN BodyModel
 {
@@ -177,6 +192,31 @@ struct JPH_GPU_ALIGN CenterOfMassUpdate
     JPH_GPU_FLOAT4 deltaLocalCOM;
 };
 
+// Cold command payload, separate from the hot 96-byte BodyModel. Pose commands
+// carry the accepted root COM in the authored body frame, including baked scale.
+// Positions supplied by the public API are body origins, not COM positions.
+struct JPH_GPU_ALIGN BodyCommand
+{
+    JPH_GPU_UINT4 meta; // Body slot, command kind, ForceMode, zero padding.
+    JPH_GPU_FLOAT4 value; // Position, velocity, force or torque xyz; w is zero.
+    // SetRotation/SetPose: normalized quaternion xyzw. Force-at-position:
+    // world point xyz with zero w. Other commands do not consume this field.
+    JPH_GPU_FLOAT4 auxiliary;
+    JPH_GPU_FLOAT4 rootCOM; // Pose commands' local root COM xyz; w is zero.
+};
+
+struct JPH_GPU_ALIGN BodyCommandSpan
+{
+    // Body slot, first command, command count (1..64), zero padding.
+    JPH_GPU_UINT4 range;
+};
+
+struct JPH_GPU_ALIGN BodyCommandParams
+{
+    // First span, span count (1..64); zw are zero padding.
+    JPH_GPU_UINT4 spans;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(Float4) == 16 && alignof(Float4) == 16);
 static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
@@ -196,6 +236,11 @@ JPH_GPU_CHECK_TYPE(PoseParams, 16);
 JPH_GPU_CHECK_TYPE(BodyMutationParams, 16);
 JPH_GPU_CHECK_TYPE(BodyInitialization, 112);
 JPH_GPU_CHECK_TYPE(CenterOfMassUpdate, 32);
+JPH_GPU_CHECK_TYPE(BodyCommand, 64);
+JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
+JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
+static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
+    && offsetof(BodyCommand, rootCOM) == 48);
 static_assert(offsetof(BodyInitialization, state) == 16 && offsetof(BodyInitialization, forces) == 80);
 static_assert(offsetof(CenterOfMassUpdate, deltaLocalCOM) == 16);
 static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
