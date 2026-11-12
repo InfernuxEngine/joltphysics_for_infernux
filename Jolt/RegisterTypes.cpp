@@ -27,8 +27,14 @@
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/EmptyShape.h>
 #include <Jolt/Physics/Collision/PhysicsMaterialSimple.h>
+#ifndef JPH_GPU_RUNTIME
 #include <Jolt/Physics/SoftBody/SoftBodyShape.h>
+#endif
 
+JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, PhysicsMaterial)
+JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, GroupFilter)
+JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, GroupFilterTable)
+#ifndef JPH_GPU_RUNTIME
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, Skeleton)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, SkeletalAnimation)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, RagdollSettings)
@@ -54,12 +60,10 @@ JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, GearConstraintSetti
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, PulleyConstraintSettings)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, MotorSettings)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, PhysicsScene)
-JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, PhysicsMaterial)
-JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, GroupFilter)
-JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, GroupFilterTable)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, BodyCreationSettings)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, SoftBodyCreationSettings)
 JPH_DECLARE_RTTI_WITH_NAMESPACE_FOR_FACTORY(JPH_EXPORT, JPH, HairSettings)
+#endif
 
 JPH_NAMESPACE_BEGIN
 
@@ -123,7 +127,9 @@ void RegisterTypesInternal(uint64 inVersionID)
 	MeshShape::sRegister();
 	ConvexHullShape::sRegister();
 	HeightFieldShape::sRegister();
+#ifndef JPH_GPU_RUNTIME
 	SoftBodyShape::sRegister();
+#endif
 
 	// Register these last because their collision functions are simple so we want to execute them first (register them in reverse order of collision complexity)
 	RotatedTranslatedShape::sRegister();
@@ -133,8 +139,10 @@ void RegisterTypesInternal(uint64 inVersionID)
 
 	// Create list of all types
 	const RTTI *types[] = {
+#ifndef JPH_GPU_RUNTIME
 		JPH_RTTI(SkeletalAnimation),
 		JPH_RTTI(Skeleton),
+#endif
 		JPH_RTTI(CompoundShapeSettings),
 		JPH_RTTI(StaticCompoundShapeSettings),
 		JPH_RTTI(MutableCompoundShapeSettings),
@@ -153,6 +161,7 @@ void RegisterTypesInternal(uint64 inVersionID)
 		JPH_RTTI(RotatedTranslatedShapeSettings),
 		JPH_RTTI(OffsetCenterOfMassShapeSettings),
 		JPH_RTTI(EmptyShapeSettings),
+#ifndef JPH_GPU_RUNTIME
 		JPH_RTTI(RagdollSettings),
 		JPH_RTTI(PointConstraintSettings),
 		JPH_RTTI(SixDOFConstraintSettings),
@@ -176,12 +185,15 @@ void RegisterTypesInternal(uint64 inVersionID)
 		JPH_RTTI(PulleyConstraintSettings),
 		JPH_RTTI(MotorSettings),
 		JPH_RTTI(PhysicsScene),
+#endif
 		JPH_RTTI(PhysicsMaterial),
 		JPH_RTTI(PhysicsMaterialSimple),
 		JPH_RTTI(GroupFilter),
 		JPH_RTTI(GroupFilterTable),
+#ifndef JPH_GPU_RUNTIME
 		JPH_RTTI(BodyCreationSettings),
 		JPH_RTTI(SoftBodyCreationSettings)
+#endif
 	};
 
 	// Register them all

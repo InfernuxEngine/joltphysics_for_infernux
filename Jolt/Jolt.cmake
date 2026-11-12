@@ -6,6 +6,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Root
 set(JOLT_PHYSICS_ROOT ${PHYSICS_REPO_ROOT}/Jolt)
 
+if(JPH_GPU_RUNTIME)
+	# GPU work uses the engine's common ComputeHost, not a second Jolt device.
+	set(JPH_USE_DX12 OFF)
+	set(JPH_USE_VK OFF)
+	set(JPH_USE_MTL OFF)
+	set(JPH_USE_CPU_COMPUTE OFF)
+endif()
+
 # Source files
 set(JOLT_PHYSICS_SRC_FILES
 	${JOLT_PHYSICS_ROOT}/AABBTree/AABBTreeBuilder.cpp
@@ -777,6 +785,16 @@ if (JPH_USE_VK)
 	endif()
 endif()
 
+# The production GPU runtime retains shape/cook/math support, but no CPU body
+# world, broad phase, constraint solver, ragdoll or alternative compute backend.
+# The complete upstream target remains available to independent CPU references.
+if(JPH_GPU_RUNTIME)
+	list(FILTER JOLT_PHYSICS_SRC_FILES INCLUDE REGEX
+		"/Jolt/(AABBTree/|Core/|Geometry/|Math/|ObjectStream/|TriangleSplitter/|Physics/Collision/|Physics/Body/MassProperties\\.|RegisterTypes\\.|Jolt\\.|ConfigurationString\\.)")
+	list(FILTER JOLT_PHYSICS_SRC_FILES EXCLUDE REGEX
+		"/Physics/Collision/(BroadPhase/|NarrowPhaseQuery\\.|EstimateCollisionResponse\\.)")
+endif()
+
 # Group source files
 source_group(TREE ${JOLT_PHYSICS_ROOT} FILES ${JOLT_PHYSICS_SRC_FILES} ${JOLT_PHYSICS_SHADERS} ${JOLT_PHYSICS_SHADER_HEADERS})
 
@@ -791,6 +809,9 @@ else()
 endif()
 add_library(Jolt ${JPH_LIB_TYPE} ${JOLT_PHYSICS_SRC_FILES} ${JOLT_PHYSICS_SHADERS} ${JOLT_PHYSICS_SHADER_HEADERS} ${JOLT_PHYSICS_DXIL_SHADERS} ${JOLT_PHYSICS_SPV_SHADERS} ${JOLT_PHYSICS_METAL_LIB})
 add_library(Jolt::Jolt ALIAS Jolt)
+if(JPH_GPU_RUNTIME)
+	target_compile_definitions(Jolt PUBLIC JPH_GPU_RUNTIME=1)
+endif()
 
 if (JPH_BUILD_SHARED_LIBS)
 	if (GENERATE_DEBUG_SYMBOLS)
