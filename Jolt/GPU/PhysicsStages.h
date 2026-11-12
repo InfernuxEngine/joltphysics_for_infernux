@@ -72,7 +72,7 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::Contacts)
             | Mask(Resource::BodyStates), Mask(Resource::BodyStates)},
     {Stage::ClearForces, "clear_forces", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams), Mask(Resource::BodyForces)},
+        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces), Mask(Resource::BodyForces)},
 };
 
 // One substep: ApplyForces, BuildBounds, CollidePairs, SetupContacts,

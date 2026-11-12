@@ -48,6 +48,13 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             state.rotation = command.auxiliary;
             state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
         }
+        else if (kind == CommandResetMotion)
+        {
+            state.linearVelocity = float4(0.0f);
+            state.angularVelocity = float4(0.0f);
+            forces.force = float4(0.0f);
+            forces.torque = float4(0.0f);
+        }
         else if (jph_dynamic(model))
         {
             if (kind == CommandSetLinearVelocity)

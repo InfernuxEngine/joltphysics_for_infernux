@@ -34,6 +34,9 @@ JPH_GPU_CONSTANT(ShapeBox, 1);
 JPH_GPU_CONSTANT(ShapeEmpty, 2);
 JPH_GPU_CONSTANT(MotionStatic, 0);
 JPH_GPU_CONSTANT(MotionDynamic, 2);
+// Residency is separate from motion type. A suspended actor retains its
+// dynamic properties and state, but does not integrate or produce contacts.
+JPH_GPU_CONSTANT(MotionNotResident, 4);
 // Infernux PhysicsMaterialCombine values and priority (higher mode wins).
 JPH_GPU_CONSTANT(MaterialCombineAverage, 0);
 JPH_GPU_CONSTANT(MaterialCombineMinimum, 1);
@@ -50,6 +53,9 @@ JPH_GPU_CONSTANT(CommandSetAngularVelocity, 4);
 JPH_GPU_CONSTANT(CommandAddForce, 5);
 JPH_GPU_CONSTANT(CommandAddTorque, 6);
 JPH_GPU_CONSTANT(CommandAddForceAtPosition, 7);
+// Internal motion-type boundary: preserve pose and clear velocities/forces,
+// including after accepting a Static model that ignores dynamic API commands.
+JPH_GPU_CONSTANT(CommandResetMotion, 8);
 JPH_GPU_CONSTANT(CommandForce, 0);
 JPH_GPU_CONSTANT(CommandAcceleration, 1);
 JPH_GPU_CONSTANT(CommandImpulse, 2);
@@ -59,7 +65,7 @@ JPH_GPU_CONSTANT(MaxCommandBodiesPerDispatch, 64);
 
 struct JPH_GPU_ALIGN BodyModel
 {
-    // Shape instance index, shape type, motion type, world index. Each body has
+    // Shape index, shape type, motion type | MotionNotResident, world index. Each body has
     // one primitive leaf or Empty; a shared index has an identical local pose.
     JPH_GPU_UINT4 meta;
     // Inverse mass, friction, restitution, gravity factor.
@@ -217,6 +223,28 @@ struct JPH_GPU_ALIGN BodyCommandParams
     JPH_GPU_UINT4 spans;
 };
 
+JPH_GPU_CONSTANT(InvalidQueryBodySlot, 0xFFFFFFFFu);
+
+struct JPH_GPU_ALIGN RaycastParams
+{
+    // Ray count, first body slot, body slots in this world (<=32), zero.
+    JPH_GPU_UINT4 counts;
+};
+
+struct JPH_GPU_ALIGN RaycastInput
+{
+    JPH_GPU_FLOAT4 originMaxDistance; // World origin xyz; finite positive maximum distance.
+    JPH_GPU_FLOAT4 direction; // Finite nonzero world direction xyz, normalized by the query; w zero.
+    JPH_GPU_UINT4 filter; // Query layer mask; yzw zero. Uses BodyModel.surface.x, not collision mask.
+};
+
+struct JPH_GPU_ALIGN RaycastHit
+{
+    JPH_GPU_UINT4 meta; // Body SLOT (not public body ID), hit flag, zero, zero.
+    JPH_GPU_FLOAT4 positionDistance; // World point xyz and distance; zero on miss.
+    JPH_GPU_FLOAT4 normalFraction; // Outward world normal xyz and ray fraction; zero on miss.
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(Float4) == 16 && alignof(Float4) == 16);
 static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
@@ -239,6 +267,11 @@ JPH_GPU_CHECK_TYPE(CenterOfMassUpdate, 32);
 JPH_GPU_CHECK_TYPE(BodyCommand, 64);
 JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
+JPH_GPU_CHECK_TYPE(RaycastParams, 16);
+JPH_GPU_CHECK_TYPE(RaycastInput, 48);
+JPH_GPU_CHECK_TYPE(RaycastHit, 48);
+static_assert(offsetof(RaycastInput, direction) == 16 && offsetof(RaycastInput, filter) == 32);
+static_assert(offsetof(RaycastHit, positionDistance) == 16 && offsetof(RaycastHit, normalFraction) == 32);
 static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
     && offsetof(BodyCommand, rootCOM) == 48);
 static_assert(offsetof(BodyInitialization, state) == 16 && offsetof(BodyInitialization, forces) == 80);

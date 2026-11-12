@@ -34,7 +34,7 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     if (index >= step_params.counts.x)
         return;
     BodyModel model = body_models[index];
-    if (!jph_dynamic(model))
+    if (!jph_dynamic(model) || !jph_resident(model))
         return;
     BodyState state = body_states[index];
     BodyForces forces = body_forces[index];
@@ -56,6 +56,8 @@ void clear_forces(uint3 tid : SV_DispatchThreadID)
 {
     uint index = tid.x;
     if (index >= step_params.counts.x)
+        return;
+    if (!jph_resident(body_models[index]))
         return;
     BodyForces cleared;
     cleared.force = float4(0.0f);
@@ -125,6 +127,8 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
 
     BodyModel ma = body_models[a];
     BodyModel mb = body_models[b];
+    if (!jph_resident(ma) || !jph_resident(mb))
+        return;
     if (ma.meta.y == ShapeEmpty || mb.meta.y == ShapeEmpty)
         return;
     if (!jph_dynamic(ma) && !jph_dynamic(mb))
@@ -251,7 +255,7 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     if (index >= step_params.counts.x)
         return;
     BodyModel model = body_models[index];
-    if (!jph_dynamic(model))
+    if (!jph_dynamic(model) || !jph_resident(model))
         return;
     BodyState state = body_states[index];
     float dt = step_params.gravityDt.w;

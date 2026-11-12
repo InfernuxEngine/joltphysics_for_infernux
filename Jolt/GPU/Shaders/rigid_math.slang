@@ -49,7 +49,12 @@ float3 jph_clamp_speed(float3 velocity, float maximum)
 
 bool jph_dynamic(BodyModel model)
 {
-    return model.meta.z == MotionDynamic;
+    return (model.meta.z & ~MotionNotResident) == MotionDynamic;
+}
+
+bool jph_resident(BodyModel model)
+{
+    return (model.meta.z & MotionNotResident) == 0u;
 }
 
 float jph_inverse_mass(BodyModel model)
