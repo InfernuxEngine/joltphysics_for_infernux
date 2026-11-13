@@ -5,8 +5,7 @@
 #include "rigid_math.slang"
 
 ConstantBuffer<QueryParams> query_params;
-StructuredBuffer<QueryInput> query_inputs;
-StructuredBuffer<QueryPrimitive> query_primitives;
+StructuredBuffer<QueryRecordWord> query_inputs;
 StructuredBuffer<QueryBodyIdentity> query_body_ids;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
@@ -17,6 +16,35 @@ RWStructuredBuffer<QuerySummary> query_summary;
 RWStructuredBuffer<QueryRecordWord> query_hits;
 ConstantBuffer<QueryExportParams> query_export_params;
 RWStructuredBuffer<uint> query_export_values;
+ConstantBuffer<QueryCastParams> query_cast_params;
+RWStructuredBuffer<QueryCastState> query_cast_states;
+
+// One 16-byte immutable request stream: all Input112 records precede the
+// explicit Primitive64 suffix. Identity records likewise share one resource.
+QueryInput query_load_input(uint index)
+{
+    uint base = index * 7u;
+    QueryInput request;
+    request.meta = query_inputs[base].value;
+    request.filter = query_inputs[base + 1u].value;
+    request.source = query_inputs[base + 2u].value;
+    request.positionMaximum = asfloat(query_inputs[base + 3u].value);
+    request.direction = asfloat(query_inputs[base + 4u].value);
+    request.rotation = asfloat(query_inputs[base + 5u].value);
+    request.geometry = asfloat(query_inputs[base + 6u].value);
+    return request;
+}
+
+QueryPrimitive query_load_primitive(uint index)
+{
+    uint base = query_params.counts.x * 7u + index * 4u;
+    QueryPrimitive primitive;
+    primitive.meta = query_inputs[base].value;
+    primitive.geometry = asfloat(query_inputs[base + 1u].value);
+    primitive.position = asfloat(query_inputs[base + 2u].value);
+    primitive.rotation = asfloat(query_inputs[base + 3u].value);
+    return primitive;
+}
 
 uint query_record_words()
 {
@@ -429,7 +457,7 @@ QueryHit query_leaf(QueryInput request, ShapeModel shape, BodyState state, uint 
         {
             hit.meta = uint4(shape.meta.y, 1u, leaf, 0u);
             hit.positionDistance = float4(request.positionMaximum.xyz + direction * distance, distance);
-            hit.normalFraction = float4(jph_rotate(rotation, normal), distance / request.positionMaximum.w);
+            hit.normalFraction = float4(jph_rotate(rotation, normal), request.positionMaximum.w > 0.0f ? distance / request.positionMaximum.w : 0.0f);
             hit.pointADepth = float4(hit.positionDistance.xyz, 0.0f);
             if (!all(isfinite(hit.positionDistance)) || !all(isfinite(hit.normalFraction)))
                 status = QueryNumericalFailure;
@@ -489,7 +517,9 @@ void query_collect(QueryInput request, QueryHit hit, uint begin, inout uint coun
     {
         QueryHit previous = query_load_hit(begin);
         // Closest rays preserve the existing strict-distance slot/leaf tie.
-        if (previous.meta.y == 0u || hit.positionDistance.w < previous.positionDistance.w)
+        if (previous.meta.y == 0u || hit.positionDistance.w < previous.positionDistance.w ||
+            (request.meta.x == QueryShapeCast && hit.positionDistance.w == previous.positionDistance.w &&
+             query_less(request, hit, previous)))
             query_store_hit(begin, hit);
         return;
     }
@@ -620,6 +650,337 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
     query_store_motion(begin, output);
 }
 
+
+float3 query_cast_support(uint type, float4 rotation, float4 geometry, float3 n)
+{
+    float3 core = float3(0.0f);
+    if (type == ShapeCapsule)
+    {
+        float3 axis = jph_rotate(rotation, float3(0, 1, 0));
+        core = (dot(axis, n) >= 0.0f ? geometry.y : -geometry.y) * axis;
+    }
+    else if (type == ShapeBox)
+    {
+        float3 local = jph_inverse_rotate(rotation, n);
+        float3 half = max(geometry.xyz - geometry.w, float3(0.0f));
+        core = jph_rotate(rotation, float3(local.x >= 0.0f ? half.x : -half.x,
+                                          local.y >= 0.0f ? half.y : -half.y,
+                                          local.z >= 0.0f ? half.z : -half.z));
+    }
+    return core + geometry.w * n;
+}
+
+bool query_cast_accept(QueryInput request, float3 normal, float3 direction)
+{
+    float closing = dot(normal, direction);
+    if ((request.meta.w & QuerySweepPolicy) != 0u)
+        return closing > 1.0e-3f;
+    return closing >= 0.0f;
+}
+
+bool query_cast_valid_hit(QueryHit hit)
+{
+    return all(isfinite(hit.positionDistance)) && all(isfinite(hit.normalFraction)) &&
+           all(isfinite(hit.pointADepth)) && hit.positionDistance.w >= 0.0f;
+}
+
+// An exact primitive reduction, not another executor: a Sphere versus a
+// rounded primitive is a ray against the same core with the radius sum.
+bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 center, float4 rotation,
+    float3 direction, float maximum, out QueryHit hit, out uint status)
+{
+    hit = query_miss();
+    status = QuerySuccess;
+    bool reverse = request.meta.z != ShapeSphere;
+    uint type = reverse ? request.meta.z : target.meta.x;
+    float4 q = reverse ? request.rotation : rotation;
+    float4 geometry = reverse ? request.geometry : target.geometry;
+    float radius = reverse ? target.geometry.w : request.geometry.w;
+    float3 relative = reverse ? center - request.positionMaximum.xyz : request.positionMaximum.xyz - center;
+    float3 local = jph_inverse_rotate(q, relative);
+    float3 velocity = jph_inverse_rotate(q, reverse ? -direction : direction);
+    float inflated = geometry.w + radius;
+    if (!all(isfinite(local)) || !all(isfinite(velocity)) || !isfinite(inflated))
+    {
+        status = QueryNumericalFailure;
+        return false;
+    }
+    float distance;
+    float3 outward;
+    bool found = false;
+    if (type == ShapeSphere)
+        found = query_sphere(local, velocity, inflated, maximum, distance, outward);
+    else if (type == ShapeCapsule)
+        found = query_capsule(local, velocity, geometry.y, inflated, maximum, distance, outward);
+    else if (type == ShapeBox)
+    {
+        float4 expanded = float4(geometry.xyz + radius, inflated);
+        if (!all(isfinite(expanded)))
+        {
+            status = QueryNumericalFailure;
+            return false;
+        }
+        found = query_rounded_box(local, velocity, expanded, maximum, distance, outward);
+    }
+    else
+    {
+        status = QueryUnsupported;
+        return false;
+    }
+    if (!found)
+        return false;
+    if (!isfinite(distance) || distance < 0.0f || !all(isfinite(outward)) ||
+        jph_capsule_max_abs(outward) == 0.0f)
+    {
+        status = QueryNumericalFailure;
+        return false;
+    }
+    float3 normal = jph_rotate(q, jph_capsule_unit(outward));
+    float3 n = reverse ? normal : -normal;
+    if (!query_cast_accept(request, n, direction))
+        return false;
+    float3 point;
+    if (reverse || target.meta.x == ShapeSphere)
+        point = center - target.geometry.w * n;
+    else
+    {
+        float3 at = local + velocity * distance;
+        float3 core = float3(0.0f);
+        if (type == ShapeCapsule)
+        {
+            core.y = clamp(at.y, -geometry.y, geometry.y);
+            if (outward.y != 0.0f)
+                core.y = outward.y > 0.0f ? geometry.y : -geometry.y;
+        }
+        else
+        {
+            float3 half = max(geometry.xyz - geometry.w, float3(0.0f));
+            core = clamp(at, -half, half);
+            for (uint axis = 0u; axis < 3u; ++axis)
+                if (outward[axis] != 0.0f)
+                    core[axis] = outward[axis] > 0.0f ? half[axis] : -half[axis];
+        }
+        point = center + jph_rotate(rotation, core + geometry.w * jph_capsule_unit(outward));
+    }
+    hit.meta = uint4(target.meta.y, 1u, 0u, 0u);
+    hit.positionDistance = float4(point, distance);
+    hit.normalFraction = float4(-n, request.positionMaximum.w > 0.0f ? distance / request.positionMaximum.w : 0.0f);
+    hit.pointADepth = float4(point, 0.0f);
+    if (!query_cast_valid_hit(hit))
+    {
+        status = QueryNumericalFailure;
+        return false;
+    }
+    return true;
+}
+
+// One real CA step. true ends the current pair; false retains its exact travel
+// and restart state for this request's next quantum. No iteration cap is miss.
+bool query_cast_pair_step(QueryInput request, ShapeModel target, BodyState body,
+    inout QueryCastState cursor, float3 direction, out QueryHit hit, out uint status)
+{
+    hit = query_miss();
+    status = QuerySuccess;
+    float3 center;
+    float4 rotation;
+    query_leaf_pose(target, body, center, rotation);
+    if (!all(isfinite(center)) || !query_valid_quaternion(rotation) ||
+        target.meta.x > ShapeCapsule)
+    {
+        status = target.meta.x > ShapeCapsule ? QueryUnsupported : QueryNumericalFailure;
+        return true;
+    }
+    rotation = normalize(rotation);
+    float3 relative = center - request.positionMaximum.xyz;
+    float travel = cursor.progress.x;
+    float3 remainingCenter = relative - direction * travel;
+    float scale = max(jph_capsule_max_abs(remainingCenter),
+        max(max(jph_capsule_max_abs(request.geometry.xyz), request.geometry.w),
+            max(jph_capsule_max_abs(target.geometry.xyz), target.geometry.w)));
+    if (!all(isfinite(relative)) || !all(isfinite(remainingCenter)) || !isfinite(scale) || scale <= 0.0f)
+    {
+        status = QueryNumericalFailure;
+        return true;
+    }
+    float3 b = remainingCenter / scale;
+    float4 ga = request.geometry / scale, gb = target.geometry / scale;
+    float3 origin = cursor.iteration.z == 0u ? float3(0.0f) : -0.5f * b;
+    JphPairMetric metric = jph_pair_metric(request.meta.z, origin, request.rotation, ga,
+        target.meta.x, b + origin, rotation, gb);
+    metric.pointA -= origin;
+    metric.pointB -= origin;
+    status = query_metric_status(metric);
+    if (status != QuerySuccess)
+        return true;
+    float normalSize = jph_capsule_max_abs(metric.normal);
+    if (normalSize == 0.0f || !isfinite(normalSize))
+    {
+        status = QueryNumericalFailure;
+        return true;
+    }
+    metric.normal = jph_capsule_unit(metric.normal);
+    float separation = metric.separation * scale;
+    if (!isfinite(separation))
+    {
+        status = QueryNumericalFailure;
+        return true;
+    }
+    bool initial = cursor.iteration.y == 0u;
+    ++cursor.iteration.y;
+    float limit = min(request.positionMaximum.w, cursor.progress.w);
+    if (initial && separation > 0.0f &&
+        (request.meta.z == ShapeSphere || target.meta.x == ShapeSphere))
+    {
+        bool found = query_cast_sphere_root(request, target, center, rotation, direction, limit, hit, status);
+        return true;
+    }
+    bool contact = separation <= 0.0f;
+    if (!contact)
+    {
+        float3 frontA = query_cast_support(request.meta.z, request.rotation, ga, metric.normal);
+        float3 backB = b + query_cast_support(target.meta.x, rotation, gb, -metric.normal);
+        float gap = dot(metric.normal, backB - frontA);
+        float closing = dot(metric.normal, direction);
+        float gapWorld = gap * scale;
+        float remaining = limit - travel;
+        if (!isfinite(gapWorld) || !isfinite(closing) || remaining < 0.0f)
+        {
+            status = QueryNumericalFailure;
+            return true;
+        }
+        if (gap > 0.0f && (closing <= 0.0f || gapWorld > closing * remaining))
+            return true;
+        // Explicit Jolt-quality contact residual, not an extra convex radius.
+        // A positive initial support gap must still advance. After one
+        // coordinate restart, a nonseparating support plane and witnessed
+        // residual within the same quality budget resolve FP32 disagreement
+        // at exact contact, including travel zero. Direction policy follows.
+        bool restartedSupportContact = cursor.iteration.z != 0u && gap <= 0.0f && separation <= 1.0e-4f;
+        contact = restartedSupportContact || (travel > 0.0f && separation <= 1.0e-4f && closing >= 0.0f);
+        if (!contact)
+        {
+            if (gap <= 0.0f || closing <= 0.0f)
+            {
+                if (cursor.iteration.z == 0u)
+                {
+                    cursor.iteration.z = 1u;
+                    cursor.iteration.w = 1u;
+                    return false;
+                }
+                status = QueryNumericalFailure;
+                return true;
+            }
+            float advance = gapWorld / closing;
+            float next = min(travel + advance, limit);
+            if (!isfinite(advance) || !isfinite(next))
+            {
+                status = QueryNumericalFailure;
+                return true;
+            }
+            if (next <= travel)
+            {
+                if (cursor.iteration.z == 0u)
+                {
+                    cursor.iteration.z = 1u;
+                    cursor.iteration.w = 1u;
+                    return false;
+                }
+                status = QueryNumericalFailure;
+                return true;
+            }
+            cursor.progress.xyz = float3(next, separation, advance);
+            cursor.normal = float4(metric.normal, gapWorld);
+            return false;
+        }
+    }
+    if (!query_cast_accept(request, metric.normal, direction))
+        return true;
+    float3 pointA = request.positionMaximum.xyz + direction * travel + metric.pointA * scale;
+    float3 pointB = center + (metric.pointB - b) * scale;
+    hit.meta = uint4(target.meta.y, 1u, cursor.cursor.x, metric.feature);
+    hit.positionDistance = float4(pointB, travel);
+    hit.normalFraction = float4(-metric.normal, request.positionMaximum.w > 0.0f ? travel / request.positionMaximum.w : 0.0f);
+    hit.pointADepth = float4(pointA, max(-separation, 0.0f));
+    if (!query_cast_valid_hit(hit))
+        status = QueryNumericalFailure;
+    return true;
+}
+
+void query_cast_advance(QueryInput request, uint begin, inout QueryCastState state)
+{
+    uint quantum = max(query_cast_params.controls.x, 1u);
+    float3 direction = jph_capsule_unit(request.direction.xyz);
+    for (uint unit = 0u; unit < quantum && state.cursor.y != 2u; ++unit)
+    {
+        if (state.iteration.x == 0xffffffffu)
+        {
+            state.cursor.w = QueryNumericalFailure;
+            state.cursor.y = 2u;
+            break;
+        }
+        ++state.iteration.x;
+        if (state.cursor.x >= query_params.counts.w)
+        {
+            state.cursor.w = QuerySuccess;
+            state.cursor.y = 2u;
+            break;
+        }
+        uint leaf = state.cursor.x;
+        ShapeModel shape = shape_models[leaf];
+        uint slot = shape.meta.y;
+        if (state.cursor.y == 0u)
+        {
+            bool admitted = slot >= query_params.counts.y && slot - query_params.counts.y < query_params.counts.z;
+            if (admitted)
+            {
+                BodyModel model = body_models[slot];
+                admitted = jph_resident(model) && leaf >= model.meta.x && leaf - model.meta.x < model.meta.y &&
+                           query_accepts(request, shape, slot);
+            }
+            if (admitted && (request.meta.w & QuerySweepPolicy) != 0u)
+                admitted = !all(query_body_ids[query_cast_params.controls.y + leaf].ids.xy == request.source.zw);
+            if (!admitted)
+            {
+                ++state.cursor.x;
+                continue;
+            }
+            state.cursor.y = 1u;
+            state.progress.xyz = float3(0.0f, 3.402823466e+38f, 0.0f);
+            state.normal = float4(0.0f);
+            state.iteration.yzw = uint3(0u);
+            continue; // A leaf visit consumes a whole request work unit.
+        }
+        QueryHit hit;
+        uint status;
+        bool finished = query_cast_pair_step(request, shape, body_states[slot], state, direction, hit, status);
+        if (status != QuerySuccess)
+        {
+            state.cursor.w = status;
+            state.cursor.y = 2u;
+            break;
+        }
+        if (!finished)
+            continue;
+        if (hit.meta.y != 0u)
+        {
+            hit.meta.z = leaf;
+            query_collect(request, hit, begin, state.cursor.z);
+            if (request.meta.y == QueryClosest)
+                state.progress.w = query_load_hit(begin).positionDistance.w;
+            if (request.meta.y == QueryAny)
+            {
+                state.cursor.w = QuerySuccess;
+                state.cursor.y = 2u;
+                break;
+            }
+        }
+        ++state.cursor.x;
+        state.cursor.y = 0u;
+    }
+    if (state.cursor.y != 2u)
+        state.cursor.w = QueryPending;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void query_evaluate(uint3 tid : SV_DispatchThreadID)
@@ -627,19 +988,31 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
     uint index = tid.x;
     if (index >= query_params.counts.x)
         return;
-    QueryInput request = query_inputs[index];
+    QueryInput request = query_load_input(index);
     uint begin = index * query_params.sizes.y;
     for (uint row = 0u; row < query_params.sizes.y; ++row)
         query_clear_candidate(begin + row);
     uint count = request.meta.y == QueryClosest ? 1u : 0u;
     uint status = QuerySuccess;
-    if (request.meta.x == QueryGatherShapes)
+    QueryCastState cast;
+    cast.cursor = uint4(0u, 2u, count, QuerySuccess);
+    cast.progress = float4(0.0f, 3.402823466e+38f, 0.0f, request.positionMaximum.w);
+    cast.normal = float4(0.0f);
+    cast.iteration = uint4(0u);
+    if (request.meta.x == QueryShapeCast)
+    {
+        cast.cursor.y = 0u;
+        query_cast_advance(request, begin, cast);
+        count = cast.cursor.z;
+        status = cast.cursor.w;
+    }
+    else if (request.meta.x == QueryGatherShapes)
         query_gather_shapes(request, begin, count, status);
     else if (request.meta.x == QueryGatherMotion)
         query_gather_motion(request, begin, status);
     else if (request.meta.x == QueryPenetration)
     {
-        QueryPrimitive other = query_primitives[request.source.y];
+        QueryPrimitive other = query_load_primitive(request.source.y);
         JphPairMetric metric = jph_pair_metric(request.meta.z, request.positionMaximum.xyz, request.rotation, request.geometry,
                                               other.meta.x, other.position.xyz, other.rotation, other.geometry);
         status = query_metric_status(metric);
@@ -712,8 +1085,27 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
                 break;
         }
     }
+    query_cast_states[index] = cast;
     QuerySpan span;
     span.range = uint4(0u, count, status, 0u);
+    query_spans[index] = span;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void query_resume_casts(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= query_params.counts.x || query_spans[index].range.z != QueryPending)
+        return;
+    QueryInput request = query_load_input(index);
+    if (request.meta.x != QueryShapeCast)
+        return;
+    QueryCastState cast = query_cast_states[index];
+    query_cast_advance(request, index * query_params.sizes.y, cast);
+    query_cast_states[index] = cast;
+    QuerySpan span;
+    span.range = uint4(0u, cast.cursor.z, cast.cursor.w, 0u);
     query_spans[index] = span;
 }
 
@@ -725,16 +1117,20 @@ void query_scan(uint3 tid : SV_DispatchThreadID)
         return;
     uint count = 0u;
     uint status = QuerySuccess;
+    bool pending = false;
     for (uint index = 0u; index < query_params.counts.x; ++index)
     {
         QuerySpan span = query_spans[index];
         span.range.x = count;
         count += span.range.y;
-        status = max(status, span.range.z);
+        if (span.range.z == QueryPending)
+            pending = true;
+        else
+            status = max(status, span.range.z);
         query_spans[index] = span;
     }
     QuerySummary summary;
-    summary.counts = uint4(count, status, query_params.counts.x, 0u);
+    summary.counts = uint4(count, status != QuerySuccess ? status : pending ? QueryPending : QuerySuccess, query_params.counts.x, 0u);
     query_summary[0] = summary;
 }
 

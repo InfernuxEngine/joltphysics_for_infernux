@@ -331,6 +331,7 @@ JPH_GPU_CONSTANT(QueryBodyBounds, 3);
 JPH_GPU_CONSTANT(QueryPenetration, 4);
 JPH_GPU_CONSTANT(QueryGatherShapes, 5);
 JPH_GPU_CONSTANT(QueryGatherMotion, 6);
+JPH_GPU_CONSTANT(QueryShapeCast, 7);
 JPH_GPU_CONSTANT(QueryAllShapeTypes, 0xFFFFFFFFu);
 JPH_GPU_CONSTANT(QueryOutputHit, 0);
 JPH_GPU_CONSTANT(QueryOutputShape, 1);
@@ -357,9 +358,12 @@ JPH_GPU_CONSTANT(QueryUniqueBody, 3);
 JPH_GPU_CONSTANT(QueryAny, 4);
 JPH_GPU_CONSTANT(QueryTargetCollider, 1);
 JPH_GPU_CONSTANT(QueryExcludeBody, 2);
+JPH_GPU_CONSTANT(QuerySweepPolicy, 4);
 JPH_GPU_CONSTANT(QuerySuccess, 0);
 JPH_GPU_CONSTANT(QueryUnsupported, 1);
 JPH_GPU_CONSTANT(QueryNumericalFailure, 2);
+// Internal continuation only; never a completed public query status.
+JPH_GPU_CONSTANT(QueryPending, 3);
 
 struct JPH_GPU_ALIGN QueryParams
 {
@@ -375,7 +379,7 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_UINT4 meta;
     // Layer mask, include sensors, exact Collider ID low/high when requested.
     JPH_GPU_UINT4 filter;
-    // Excluded body slot; second primitive / gather target slot; requested motion fields; zero.
+    // Excluded body slot; second primitive / gather target slot; requested motion fields / Sweep moving GameObject low/high in zw.
     JPH_GPU_UINT4 source;
     // Ray origin / point / query shape center / bounds center; w maximum travel.
     JPH_GPU_FLOAT4 positionMaximum;
@@ -383,6 +387,23 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_FLOAT4 direction;
     JPH_GPU_FLOAT4 rotation; // Query primitive quaternion xyzw.
     JPH_GPU_FLOAT4 geometry; // Same cooked geometry law as ShapeModel.
+};
+
+struct JPH_GPU_ALIGN QueryCastParams
+{
+    JPH_GPU_UINT4 controls; // Whole-request work quantum (default 32), body identity prefix count, zero, zero.
+};
+
+struct JPH_GPU_ALIGN QueryCastState
+{
+    // Current global leaf, phase (0 visit / 1 advance / 2 done), result count, status.
+    JPH_GPU_UINT4 cursor;
+    // Current travel, previous separation, previous advance, best travel (world units).
+    JPH_GPU_FLOAT4 progress;
+    // Previous unit A-to-B normal xyz and support gap in world units.
+    JPH_GPU_FLOAT4 normal;
+    // Total request work units, current pair steps, restart used, no-progress count.
+    JPH_GPU_UINT4 iteration;
 };
 
 struct JPH_GPU_ALIGN QueryPrimitive
@@ -395,7 +416,9 @@ struct JPH_GPU_ALIGN QueryPrimitive
 
 struct JPH_GPU_ALIGN QueryBodyIdentity
 {
-    JPH_GPU_UINT4 ids; // Public body ID, has Rigidbody, Rigidbody component ID low/high.
+    // Body prefix: public body ID, has Rigidbody, Rigidbody component ID low/high.
+    // Leaf suffix: owning GameObject ID low/high, then zero. Cast controls.y is its base.
+    JPH_GPU_UINT4 ids;
 };
 
 struct JPH_GPU_ALIGN QueryHit
@@ -483,6 +506,10 @@ JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
 JPH_GPU_CHECK_TYPE(QueryParams, 32);
 JPH_GPU_CHECK_TYPE(QueryInput, 112);
+JPH_GPU_CHECK_TYPE(QueryCastParams, 16);
+JPH_GPU_CHECK_TYPE(QueryCastState, 64);
+static_assert(offsetof(QueryCastState, progress) == 16 && offsetof(QueryCastState, normal) == 32
+    && offsetof(QueryCastState, iteration) == 48);
 JPH_GPU_CHECK_TYPE(QueryPrimitive, 64);
 JPH_GPU_CHECK_TYPE(QueryBodyIdentity, 16);
 JPH_GPU_CHECK_TYPE(QueryHit, 64);
