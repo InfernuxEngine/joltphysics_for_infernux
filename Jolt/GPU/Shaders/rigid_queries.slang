@@ -187,27 +187,38 @@ void raycast_closest(uint3 tid : SV_DispatchThreadID)
     {
         uint slot = raycast_params.counts.y + local;
         BodyModel model = body_models[slot];
-        if (!jph_resident(model) || model.meta.y == ShapeEmpty || (ray.filter.x & (1u << model.surface.x)) == 0u)
+        if (!jph_resident(model))
             continue;
-        ShapeModel shape = shape_models[model.meta.x];
         BodyState state = body_states[slot];
-        float3 center = state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz);
-        float4 rotation = jph_quat_mul(state.rotation, shape.localRotation);
-        float3 local_origin = jph_inverse_rotate(rotation, origin - center);
-        float3 local_direction = jph_inverse_rotate(rotation, direction);
-        float distance;
-        float3 normal;
-        bool found = model.meta.y == ShapeSphere
-            ? query_sphere(local_origin, local_direction, shape.geometry.w, closest, distance, normal)
-            : query_rounded_box(local_origin, local_direction, shape.geometry, closest, distance, normal);
-        if (found && (hit.meta.y == 0u || distance < closest))
+        for (uint local_leaf = 0u; local_leaf < model.meta.y; ++local_leaf)
         {
-            // Slots are scanned in ascending order, so exact-distance ties
-            // choose the lowest slot in this immutable publication.
-            closest = distance;
-            hit.meta = uint4(slot, 1u, 0u, 0u);
-            hit.positionDistance = float4(origin + direction * distance, distance);
-            hit.normalFraction = float4(jph_rotate(rotation, normal), distance / maximum);
+            uint leaf = model.meta.x + local_leaf;
+            ShapeModel shape = shape_models[leaf];
+            if ((ray.filter.x & (1u << shape.surface.x)) == 0u ||
+                (ray.filter.y == 0u && (shape.meta.w & ShapeSensor) != 0u))
+                continue;
+            float3 center = state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz);
+            float4 rotation = jph_quat_mul(state.rotation, shape.localRotation);
+            float3 local_origin = jph_inverse_rotate(rotation, origin - center);
+            float3 local_direction = jph_inverse_rotate(rotation, direction);
+            float distance;
+            float3 normal;
+            bool found;
+            if (shape.meta.x == ShapeSphere)
+                found = query_sphere(local_origin, local_direction, shape.geometry.w, closest, distance, normal);
+            else if (shape.meta.x == ShapeBox)
+                found = query_rounded_box(local_origin, local_direction, shape.geometry, closest, distance, normal);
+            else
+                continue; // Only admitted geometry has a query implementation.
+            if (found && (hit.meta.y == 0u || distance < closest))
+            {
+                // Body slots and their admitted leaf ranges are visited in
+                // stable order within this immutable publication.
+                closest = distance;
+                hit.meta = uint4(slot, 1u, leaf, 0u);
+                hit.positionDistance = float4(origin + direction * distance, distance);
+                hit.normalFraction = float4(jph_rotate(rotation, normal), distance / maximum);
+            }
         }
     }
     raycast_hits[index] = hit; // A complete output record for every ray, including misses.

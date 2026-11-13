@@ -14,6 +14,7 @@ RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
+RWStructuredBuffer<ContactPatch> contact_patches;
 
 // Only the primitive geometry uses this local pose. Body state, principal
 // inertia and contact anchors remain in the original body COM frame.
@@ -124,30 +125,21 @@ void finish_tick(uint3 tid : SV_DispatchThreadID)
 void build_bounds(uint3 tid : SV_DispatchThreadID)
 {
     uint index = tid.x;
-    if (index >= step_params.counts.x)
+    if (index >= step_params.counts.z)
         return;
-    BodyModel model = body_models[index];
-    BodyState state = body_states[index];
-    if (model.meta.y == ShapeEmpty)
-    {
-        Aabb empty_bounds;
-        empty_bounds.minimum = float4(state.positionCOM.xyz, 0.0f);
-        empty_bounds.maximum = empty_bounds.minimum;
-        bounds[index] = empty_bounds;
-        return;
-    }
-    ShapeModel shape = shape_models[model.meta.x];
+    ShapeModel shape = shape_models[index];
+    BodyState state = body_states[shape.meta.y];
     float4 geometry = shape.geometry;
     float3 center = jph_leaf_position(shape, state);
     float4 rotation = jph_leaf_rotation(shape, state);
     float3 extent;
-    if (model.meta.y == ShapeSphere)
+    if (shape.meta.x == ShapeSphere)
         extent = float3(geometry.w);
     else
         extent = abs(jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f))) * geometry.x
                + abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y
                + abs(jph_rotate(rotation, float3(0.0f, 0.0f, 1.0f))) * geometry.z;
-    // Expand each body by half the contact band, so the pair band is exactly
+    // Expand each leaf by half the contact band, so the pair band is exactly
     // the configured speculative distance, not twice that distance.
     extent += 0.5f * step_params.contact.x;
     Aabb result;
@@ -163,58 +155,72 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     if (tid.z >= step_params.counts.y)
         return;
     WorldRange world = worlds[tid.z];
-    uint count = world.range.y;
+    uint count = world.leaves.y;
     if (tid.x >= count || tid.y >= count)
         return;
-    uint slot = world.range.z + (tid.x * count + tid.y) * MaxContactPointsPerPair;
-    uint a = world.range.x + tid.x;
-    uint b = world.range.x + tid.y;
+    uint patch_index = world.bodies.z + tid.x * count + tid.y;
+    uint slot = patch_index * MaxContactPointsPerPair;
+    uint leaf_a = world.leaves.x + tid.x;
+    uint leaf_b = world.leaves.x + tid.y;
+    ShapeModel shape_a = shape_models[leaf_a];
+    ShapeModel shape_b = shape_models[leaf_b];
+    uint a = shape_a.meta.y;
+    uint b = shape_b.meta.y;
+    ContactPatch patch;
+    patch.leaves = uint4(leaf_a, leaf_b, 0u, 0u);
+    contact_patches[patch_index] = patch;
     Contact result;
     result.meta = uint4(a, b, 0u, 0u);
     result.normalDepth = float4(0.0f);
     result.localAnchorA = float4(0.0f);
     result.localAnchorB = float4(0.0f);
     result.impulse = float4(0.0f);
-    // Every ordered pair owns four records, including inactive/lower-triangle
-    // pairs. This remains a complete writer without atomics or compaction.
+    // Every ordered leaf pair owns a header and four point records, including
+    // inactive/lower-triangle/same-body pairs. Both buffers are complete writers
+    // without atomics or compaction; no patch combines unrelated leaf normals.
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         contacts[slot + point] = result;
-    if (tid.x >= tid.y)
+    if (tid.x >= tid.y || a == b)
         return;
 
     BodyModel ma = body_models[a];
     BodyModel mb = body_models[b];
     if (!jph_resident(ma) || !jph_resident(mb))
         return;
-    if (ma.meta.y == ShapeEmpty || mb.meta.y == ShapeEmpty)
+    bool sensor = jph_sensor(shape_a) || jph_sensor(shape_b);
+    if (!sensor && !jph_dynamic(ma) && !jph_dynamic(mb))
         return;
-    if (!jph_dynamic(ma) && !jph_dynamic(mb))
+    if (!jph_layers_collide(shape_a, shape_b))
         return;
-    if ((ma.surface.y & (1u << mb.surface.x)) == 0u || (mb.surface.y & (1u << ma.surface.x)) == 0u)
-        return;
-    Aabb ba = bounds[a];
-    Aabb bb = bounds[b];
+    patch.leaves.z = sensor ? PatchSensor : 0u;
+    contact_patches[patch_index] = patch;
+    Aabb ba = bounds[leaf_a];
+    Aabb bb = bounds[leaf_b];
     if (any(ba.minimum.xyz > bb.maximum.xyz) || any(bb.minimum.xyz > ba.maximum.xyz))
         return;
 
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
-    ShapeModel shape_a = shape_models[ma.meta.x];
-    ShapeModel shape_b = shape_models[mb.meta.x];
     float4 ga = shape_a.geometry;
     float4 gb = shape_b.geometry;
     float3 ca = jph_leaf_position(shape_a, sa);
     float3 cb = jph_leaf_position(shape_b, sb);
     float4 qa = jph_leaf_rotation(shape_a, sa);
     float4 qb = jph_leaf_rotation(shape_b, sb);
-    if (ma.meta.y == ShapeBox && mb.meta.y == ShapeBox)
+    float speculative_distance = sensor ? 0.0f : step_params.contact.x;
+    if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox)
     {
-        JphBoxManifold manifold = jph_box_box(ca, qa, ga, cb, qb, gb, step_params.contact.x);
+        JphBoxManifold manifold = jph_box_box(ca, qa, ga, cb, qb, gb, speculative_distance);
+        if (manifold.count == 0u)
+            return;
+        patch.leaves.z |= (sensor ? 0u : PatchActive) |
+                          (manifold.penetration >= 0.0f ? PatchOverlapping : 0u);
+        contact_patches[patch_index] = patch;
         for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
             if (point < manifold.count)
             {
                 JphBoxPoint contact = manifold.points[point];
-                result.meta = uint4(a, b, 1u, contact.feature);
+                result.meta = uint4(a, b, sensor ? 0u : 1u, contact.feature);
                 result.normalDepth = float4(manifold.normal, contact.depth);
                 result.localAnchorA = float4(jph_inverse_rotate(sa.rotation, contact.pointA - sa.positionCOM.xyz), 0.0f);
                 result.localAnchorB = float4(jph_inverse_rotate(sb.rotation, contact.pointB - sb.positionCOM.xyz), 0.0f);
@@ -226,18 +232,20 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     float3 normal, pa, pb;
     float penetration;
     uint feature = 0u;
-    if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeSphere)
+    if (shape_a.meta.x == ShapeSphere && shape_b.meta.x == ShapeSphere)
         jph_sphere_sphere(ca, ga.w, cb, gb.w, normal, penetration, pa, pb);
-    else if (ma.meta.y == ShapeSphere && mb.meta.y == ShapeBox)
+    else if (shape_a.meta.x == ShapeSphere && shape_b.meta.x == ShapeBox)
         jph_sphere_box(ca, ga.w, cb, qb, gb, normal, penetration, pa, pb, feature);
     else
     {
         jph_sphere_box(cb, gb.w, ca, qa, ga, normal, penetration, pb, pa, feature);
         normal = -normal;
     }
-    if (penetration < -step_params.contact.x)
+    if (penetration < -speculative_distance)
         return;
-    result.meta.z = 1u;
+    patch.leaves.z |= (sensor ? 0u : PatchActive) | (penetration >= 0.0f ? PatchOverlapping : 0u);
+    contact_patches[patch_index] = patch;
+    result.meta.z = sensor ? 0u : 1u;
     result.meta.w = feature;
     result.normalDepth = float4(normal, penetration);
     result.localAnchorA = float4(jph_inverse_rotate(sa.rotation, pa - sa.positionCOM.xyz), 0.0f);
@@ -255,6 +263,9 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     Contact contact = contacts[slot];
     if (contact.meta.z == 0u)
         return;
+    ContactPatch patch = contact_patches[slot / MaxContactPointsPerPair];
+    ShapeModel shape_a = shape_models[patch.leaves.x];
+    ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = contact.meta.x;
     uint b = contact.meta.y;
     BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
@@ -267,7 +278,8 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     float normal_velocity = dot(jph_point_velocity(mb, sb, rb) - jph_point_velocity(ma, sa, ra), normal);
     float dt = step_params.gravityDt.w;
     float speculative_bias = max(0.0f, -contact.normalDepth.w / dt);
-    float restitution = jph_combine_material(ma.mass.z, ma.surface.w, mb.mass.z, mb.surface.w);
+    float restitution = jph_combine_material(shape_a.material.y, shape_a.surface.w,
+                                               shape_b.material.y, shape_b.surface.w);
     float bias = speculative_bias;
     if (restitution > 0.0f && normal_velocity < -step_params.restitution.x
         && normal_velocity < -speculative_bias)
@@ -295,13 +307,15 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
     // One lane owns a whole small world, so contacts sharing a dynamic body
     // never race. This dispatch is ONE PGS iteration; the engine repeats it.
     // Preparation proves body count <= MaxBodiesPerWorld (currently 32).
-    for (uint local = 0u; local < world.range.w; local += MaxContactPointsPerPair)
+    for (uint local = 0u; local < world.bodies.w; ++local)
     {
-        uint slot = world.range.z + local;
+        uint patch_index = world.bodies.z + local;
+        ContactPatch patch = contact_patches[patch_index];
+        if ((patch.leaves.z & PatchActive) == 0u)
+            continue;
+        uint slot = patch_index * MaxContactPointsPerPair;
         // collide_pairs packs active points from the first record of a pair.
         Contact contact = contacts[slot];
-        if (contact.meta.z == 0u)
-            continue;
         uint a = contact.meta.x;
         uint b = contact.meta.y;
         BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
@@ -335,7 +349,10 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
             ++point_count;
         }
         center /= float(point_count);
-        float friction = jph_combine_material(ma.mass.y, ma.surface.z, mb.mass.y, mb.surface.z);
+        ShapeModel shape_a = shape_models[patch.leaves.x];
+        ShapeModel shape_b = shape_models[patch.leaves.y];
+        float friction = jph_combine_material(shape_a.material.x, shape_a.surface.z,
+                                               shape_b.material.x, shape_b.surface.z);
         float2 linear_impulse = contact.impulse.yz;
         jph_solve_friction(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
                            normal, friction * normal_impulse, linear_impulse);
@@ -433,9 +450,11 @@ void solve_position(uint3 tid : SV_DispatchThreadID)
         return;
     WorldRange world = worlds[world_index];
     // One bounded position iteration, at the same ownership boundary as PGS.
-    for (uint local = 0u; local < world.range.w; ++local)
+    uint contact_count = world.bodies.w * MaxContactPointsPerPair;
+    uint first_contact = world.bodies.z * MaxContactPointsPerPair;
+    for (uint local = 0u; local < contact_count; ++local)
     {
-        Contact contact = contacts[world.range.z + local];
+        Contact contact = contacts[first_contact + local];
         if (contact.meta.z == 0u)
             continue;
         uint a = contact.meta.x;

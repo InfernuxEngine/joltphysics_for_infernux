@@ -7,8 +7,8 @@
 
 // Shared, pointer-free C++ / Slang storage contract. This header intentionally
 // does not include Jolt.h, Body, PhysicsSystem, a graphics API or an allocator.
-// Body positions are centers of mass. A body has one primitive leaf or Empty;
-// the primitive's local pose is relative to the body's center of mass.
+// Body positions are centers of mass. Each body addresses a contiguous leaf
+// range; every leaf's local pose is relative to that body's center of mass.
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdint>
@@ -31,7 +31,11 @@ struct alignas(16) UInt4 { std::uint32_t x, y, z, w; };
 
 JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
-JPH_GPU_CONSTANT(ShapeEmpty, 2);
+JPH_GPU_CONSTANT(ShapeSensor, 1);
+JPH_GPU_CONSTANT(InvalidGeometryPayload, 0xffffffffu);
+JPH_GPU_CONSTANT(PatchActive, 1);
+JPH_GPU_CONSTANT(PatchSensor, 2);
+JPH_GPU_CONSTANT(PatchOverlapping, 4);
 JPH_GPU_CONSTANT(MotionStatic, 0);
 JPH_GPU_CONSTANT(MotionKinematic, 1);
 JPH_GPU_CONSTANT(MotionDynamic, 2);
@@ -45,7 +49,7 @@ JPH_GPU_CONSTANT(MaterialCombineMultiply, 2);
 JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
 // Correctness bootstrap bound, not a permanent limit on user physics worlds.
 JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
-// Fixed point records per ordered body pair; no contact compaction or overflow.
+// Fixed point records per independent ordered leaf pair.
 JPH_GPU_CONSTANT(MaxContactPointsPerPair, 4);
 // Sentinel for a render hierarchy node without a physical ancestor.
 JPH_GPU_CONSTANT(PoseNoParent, 0xffffffffu);
@@ -87,10 +91,10 @@ JPH_GPU_CONSTANT(MaxCommandBodiesPerDispatch, 64);
 
 struct JPH_GPU_ALIGN BodyModel
 {
-    // Shape index, shape type, motion type | MotionNotResident, world index. Each body has
-    // one primitive leaf or Empty; a shared index has an identical local pose.
+    // First leaf, leaf count, motion type | MotionNotResident, world index.
+    // Zero leaves represent an empty collision body without a dummy primitive.
     JPH_GPU_UINT4 meta;
-    // Inverse mass, friction, restitution, gravity factor.
+    // Inverse mass, zero padding, zero padding, gravity factor.
     JPH_GPU_FLOAT4 mass;
     // Principal inverse inertia; w is padding.
     JPH_GPU_FLOAT4 invInertiaDiagonal;
@@ -98,15 +102,13 @@ struct JPH_GPU_ALIGN BodyModel
     JPH_GPU_FLOAT4 inertiaRotation;
     // Linear damping, angular damping, maximum linear/angular speed.
     JPH_GPU_FLOAT4 damping;
-    // Layer index [0, 31], collision mask, friction combine, bounce combine.
-    // Both masks must admit the opposite layer for a pair to collide.
-    JPH_GPU_UINT4 surface;
 };
 
 struct JPH_GPU_ALIGN ShapeModel
 {
+    // Shape type, owning body slot, root SubShapeID prefix, ShapeSensor flags.
+    JPH_GPU_UINT4 meta;
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
-    // Empty has no collision geometry; all four geometry values are padding.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
     // Primitive center in the body COM frame, xyz; w is zero padding. A collider
@@ -115,6 +117,15 @@ struct JPH_GPU_ALIGN ShapeModel
     // Primitive frame relative to the body frame, normalized quaternion xyzw.
     // This does not rotate the body's principal inertia frame.
     JPH_GPU_FLOAT4 localRotation;
+    // Friction, restitution, then two zero padding values.
+    JPH_GPU_FLOAT4 material;
+    // Layer index [0, 31], collision mask, friction combine, bounce combine.
+    // Both masks must admit the opposite leaf's layer for a pair to collide.
+    JPH_GPU_UINT4 surface;
+    // Collider ID low/high words, geometry payload index, SubShapeID prefix
+    // bits written. Primitive leaves use InvalidGeometryPayload. The full
+    // Collider identity is preserved without requiring device uint64 math.
+    JPH_GPU_UINT4 source;
 };
 
 struct JPH_GPU_ALIGN BodyState
@@ -146,16 +157,25 @@ struct JPH_GPU_ALIGN KinematicTarget
 
 struct JPH_GPU_ALIGN WorldRange
 {
-    // Body begin/count, contact begin/count. Each ordered local pair owns
-    // MaxContactPointsPerPair point records; only i < j may become active.
-    // Contact count = body count squared * MaxContactPointsPerPair.
-    JPH_GPU_UINT4 range;
+    // Body begin/count, patch begin/count. The dense correctness collector
+    // allocates leaf count squared patches, including inactive lower pairs.
+    JPH_GPU_UINT4 bodies;
+    // Leaf begin/count, then two zero padding values.
+    JPH_GPU_UINT4 leaves;
 };
 
 struct JPH_GPU_ALIGN Aabb
 {
     JPH_GPU_FLOAT4 minimum; // xyz; w padding.
     JPH_GPU_FLOAT4 maximum; // xyz; w padding.
+};
+
+struct JPH_GPU_ALIGN ContactPatch
+{
+    // Global leaf A/B indices, patch flags, zero padding. Each patch owns
+    // MaxContactPointsPerPair consecutive Contact records. Sensor patches
+    // retain real overlap/source but never activate response points.
+    JPH_GPU_UINT4 leaves;
 };
 
 struct JPH_GPU_ALIGN Contact
@@ -177,9 +197,9 @@ struct JPH_GPU_ALIGN Contact
 
 struct JPH_GPU_ALIGN StepParams
 {
-    // Body count, world count, max body count in any world, velocity iterations.
+    // Body count, world count, total leaf count, velocity iterations.
     JPH_GPU_UINT4 counts;
-    // Position iterations, substep count, total contact count, padding.
+    // Position iterations, substep count, total contact count, total patch count.
     JPH_GPU_UINT4 solve;
     // Gravity xyz and the delta time of this substep.
     JPH_GPU_FLOAT4 gravityDt;
@@ -305,7 +325,7 @@ JPH_GPU_CONSTANT(InvalidQueryBodySlot, 0xFFFFFFFFu);
 
 struct JPH_GPU_ALIGN RaycastParams
 {
-    // Ray count, first body slot, body slots in this world (<=32), zero.
+    // Ray count, first body slot, body slots in this world (<=32), total leaf count.
     JPH_GPU_UINT4 counts;
 };
 
@@ -313,12 +333,12 @@ struct JPH_GPU_ALIGN RaycastInput
 {
     JPH_GPU_FLOAT4 originMaxDistance; // World origin xyz; finite positive maximum distance.
     JPH_GPU_FLOAT4 direction; // Finite nonzero world direction xyz, normalized by the query; w zero.
-    JPH_GPU_UINT4 filter; // Query layer mask; yzw zero. Uses BodyModel.surface.x, not collision mask.
+    JPH_GPU_UINT4 filter; // Query layer mask, include sensors (0/1), then zero padding. Uses leaf layer.
 };
 
 struct JPH_GPU_ALIGN RaycastHit
 {
-    JPH_GPU_UINT4 meta; // Body SLOT (not public body ID), hit flag, zero, zero.
+    JPH_GPU_UINT4 meta; // Body SLOT (not public body ID), hit flag, global leaf index, geometry feature.
     JPH_GPU_FLOAT4 positionDistance; // World point xyz and distance; zero on miss.
     JPH_GPU_FLOAT4 normalFraction; // Outward world normal xyz and ray fraction; zero on miss.
 };
@@ -329,13 +349,14 @@ static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
 #define JPH_GPU_CHECK_TYPE(type, bytes) \
     static_assert(sizeof(type) == bytes && alignof(type) == 16); \
     static_assert(std::is_standard_layout_v<type> && std::is_trivially_copyable_v<type>)
-JPH_GPU_CHECK_TYPE(BodyModel, 96);
-JPH_GPU_CHECK_TYPE(ShapeModel, 48);
+JPH_GPU_CHECK_TYPE(BodyModel, 80);
+JPH_GPU_CHECK_TYPE(ShapeModel, 112);
 JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
-JPH_GPU_CHECK_TYPE(WorldRange, 16);
+JPH_GPU_CHECK_TYPE(WorldRange, 32);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
+JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);
 JPH_GPU_CHECK_TYPE(StepParams, 80);
 JPH_GPU_CHECK_TYPE(PoseNode, 192);
@@ -360,9 +381,13 @@ static_assert(offsetof(BodyInitialization, state) == 16 && offsetof(BodyInitiali
 static_assert(offsetof(CenterOfMassUpdate, deltaLocalCOM) == 16);
 static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
     && offsetof(BodyModel, invInertiaDiagonal) == 32 && offsetof(BodyModel, inertiaRotation) == 48
-    && offsetof(BodyModel, damping) == 64 && offsetof(BodyModel, surface) == 80);
-static_assert(offsetof(ShapeModel, geometry) == 0 && offsetof(ShapeModel, localPositionCOM) == 16
-    && offsetof(ShapeModel, localRotation) == 32);
+    && offsetof(BodyModel, damping) == 64);
+static_assert(offsetof(ShapeModel, meta) == 0 && offsetof(ShapeModel, geometry) == 16
+    && offsetof(ShapeModel, localPositionCOM) == 32 && offsetof(ShapeModel, localRotation) == 48
+    && offsetof(ShapeModel, material) == 64 && offsetof(ShapeModel, surface) == 80
+    && offsetof(ShapeModel, source) == 96);
+static_assert(offsetof(WorldRange, bodies) == 0 && offsetof(WorldRange, leaves) == 16);
+static_assert(offsetof(ContactPatch, leaves) == 0);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);
 static_assert(offsetof(Contact, normalDepth) == 16 && offsetof(Contact, impulse) == 64);
 static_assert(offsetof(StepParams, gravityDt) == 32 && offsetof(StepParams, restitution) == 64);

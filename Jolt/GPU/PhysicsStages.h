@@ -21,6 +21,7 @@ enum class Resource : std::uint32_t
     Bounds = 1u << 6,
     Contacts = 1u << 7,
     KinematicTargets = 1u << 8,
+    ContactPatches = 1u << 9,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -38,7 +39,7 @@ enum class Stage : std::uint32_t
     PrepareKinematics,
 };
 
-enum class Domain : std::uint32_t { Bodies, WorldPairs, Contacts, Worlds };
+enum class Domain : std::uint32_t { Bodies, Shapes, WorldPairs, Contacts, Worlds };
 
 struct StageDefinition
 {
@@ -56,18 +57,20 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::ApplyForces, "apply_forces", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces) | Mask(Resource::BodyStates),
         Mask(Resource::BodyStates)},
-    {Stage::BuildBounds, "build_bounds", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates),
+    {Stage::BuildBounds, "build_bounds", Domain::Shapes, 64, 1, 1,
+        Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates),
         Mask(Resource::Bounds)},
     {Stage::CollidePairs, "collide_pairs", Domain::WorldPairs, 8, 8, 1,
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::ShapeModels)
-            | Mask(Resource::BodyStates) | Mask(Resource::Bounds), Mask(Resource::Contacts)},
+            | Mask(Resource::BodyStates) | Mask(Resource::Bounds), Mask(Resource::Contacts) | Mask(Resource::ContactPatches)},
     {Stage::SetupContacts, "setup_contacts", Domain::Contacts, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets), Mask(Resource::Contacts)},
+            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
+            | Mask(Resource::ContactPatches), Mask(Resource::Contacts)},
     {Stage::SolveVelocity, "solve_velocity", Domain::Worlds, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
+            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
+            | Mask(Resource::ContactPatches), Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates)},
@@ -88,19 +91,20 @@ inline constexpr StageDefinition Stages[] = {
 // solve.x times. Each solve dispatch performs ONE iteration. The logical-tick
 // owner appends FinishTick once after all substeps, clearing forces and arming
 // the target arrival stop without snapping pose. Control-only jobs use neither
-// PrepareKinematics nor FinishTick. No warmstart,
-// sleeping, CCD, multiple-primitive bodies, pair-ignore filters, joints or locked DOFs
-// are implemented by this bootstrap. A
-// host must reject these unsupported options. Each body has one primitive leaf or Empty;
-// its local pose may differ from the body's COM frame, including an explicit
-// center-of-mass offset. Authoring containers with one leaf may be flattened;
-// multiple-leaf compound collision and mass/response are not implemented here.
-// It must also validate finite inputs, normalized body/shape/inertia rotations,
+// PrepareKinematics nor FinishTick. Warmstart, sleeping, CCD, pair-ignore
+// filters, event delivery, joints and locked DOFs are not implemented by this
+// correctness baseline; a host must reject unsupported capabilities. Bodies
+// address zero or more Sphere/Box leaves in their COM frame, including explicit
+// COM offsets. Every leaf pair owns an independent four-point patch; sensors
+// record real overlap but do not participate in response. Dense leaf-pair
+// collection and serial-per-world solving are not final throughput algorithms.
+// The host must validate finite inputs, normalized body/shape/inertia rotations,
 // zero shape local-position padding, positive dimensions, layer indices < 32,
 // material combine modes in [MaterialCombineAverage, MaterialCombineMaximum],
 // nonnegative material/damping/speed bounds, convex radius <= min half extent,
-// disjoint complete world ranges with four point records per ordered pair,
-// matching body.meta.w and at most 32 bodies per
+// disjoint complete body/leaf world ranges with four point records per ordered
+// leaf pair, each leaf's owning body and range, matching body.meta.w,
+// patch/contact counts within device indexing, and at most 32 bodies per
 // world. This is a bounded, serial-per-world correctness baseline, not a parallel
 // contact solver or a published performance result.
 

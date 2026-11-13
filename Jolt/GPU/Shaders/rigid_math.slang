@@ -126,6 +126,17 @@ bool jph_resident(BodyModel model)
     return (model.meta.z & MotionNotResident) == 0u;
 }
 
+bool jph_sensor(ShapeModel shape)
+{
+    return (shape.meta.w & ShapeSensor) != 0u;
+}
+
+bool jph_layers_collide(ShapeModel a, ShapeModel b)
+{
+    return (a.surface.y & (1u << b.surface.x)) != 0u &&
+           (b.surface.y & (1u << a.surface.x)) != 0u;
+}
+
 float jph_inverse_mass(BodyModel model)
 {
     return jph_dynamic(model) ? model.mass.x : 0.0f;
@@ -311,6 +322,9 @@ struct JphBoxManifold
 {
     float3 normal;
     uint count;
+    // Exact primary distance test, independent of contact-area point reduction.
+    // Patch overlap must not be inferred from the speculative contact band.
+    float penetration;
     JphBoxPoint points[MaxContactPointsPerPair];
 };
 
@@ -659,6 +673,7 @@ JphBoxManifold jph_box_box(float3 centerA, float4 rotationA, float4 geometryA,
     JphBoxManifold manifold;
     manifold.normal = normal;
     manifold.count = 0u;
+    manifold.penetration = penetration;
     if (penetration < -speculative_distance)
         return manifold;
     JphBoxPoint candidates[9];
