@@ -159,8 +159,8 @@ struct JPH_GPU_ALIGN KinematicTarget
 
 struct JPH_GPU_ALIGN WorldRange
 {
-    // Body begin/count, patch begin/count. The dense correctness collector
-    // allocates leaf count squared patches, including inactive lower pairs.
+    // Body begin/count. Author models reserve zw as zero; a substep runtime
+    // view writes its actual candidate begin/count there after the GPU scan.
     JPH_GPU_UINT4 bodies;
     // Leaf begin/count, joint begin/count in the accepted JointStream.
     JPH_GPU_UINT4 leaves;

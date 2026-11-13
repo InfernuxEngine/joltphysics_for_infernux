@@ -279,29 +279,24 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void collide_pairs(uint3 tid : SV_DispatchThreadID)
+void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
 {
-    if (tid.x >= stage_work.range.y || tid.y >= stage_work.range.w)
-        return;
-    uint world_index = stage_work.range.z + tid.y;
-    if (world_index >= step_params.counts.y) return;
-    WorldRange world = worlds[world_index];
-    uint count = world.leaves.y;
-    uint ordinal = stage_work.range.x + tid.x;
-    if (ordinal >= world.bodies.w)
-        return;
-    uint local_a = ordinal / count;
-    uint local_b = ordinal % count;
-    uint patch_index = world.bodies.z + ordinal;
-    uint slot = patch_index * MaxContactPointsPerPair;
-    uint leaf_a = world.leaves.x + local_a;
-    uint leaf_b = world.leaves.x + local_b;
-    ShapeModel shape_a = shape_models[leaf_a];
-    ShapeModel shape_b = shape_models[leaf_b];
+    if (tid.x >= stage_work.range.y || stage_work.range.x >= step_params.solve.w) return;
+    if (tid.x >= step_params.solve.w - stage_work.range.x) return;
+    uint candidate_ordinal = stage_work.range.x + tid.x;
+    uint candidate_base = contact_patches[0].leaves.x;
+    uint patch_index = candidate_base + candidate_ordinal; // WORD address.
+    uint slot = candidate_ordinal * MaxContactPointsPerPair; // CONTACT ordinal.
+    ContactPatch patch = contact_patches[patch_index];
+    ShapeModel shape_a = shape_models[patch.leaves.x];
+    ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = shape_a.meta.y;
     uint b = shape_b.meta.y;
-    ContactPatch patch;
-    patch.leaves = uint4(leaf_a, leaf_b, 0u, 0u);
+    bool sensor = jph_sensor(shape_a) || jph_sensor(shape_b);
+    // Eligibility was established in count/fill against the same frozen model
+    // and bounds. There is no third filter that could change that contract.
+    patch.leaves.z = sensor ? PatchSensor : 0u;
+    patch.leaves.w = 0u;
     contact_patches[patch_index] = patch;
     Contact result;
     result.meta = uint4(a, b, 0u, 0u);
@@ -309,31 +304,10 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     result.localAnchorA = float4(0.0f);
     result.localAnchorB = float4(0.0f);
     result.impulse = float4(0.0f);
-    // Every ordered leaf pair owns a header and four point records, including
-    // inactive/lower-triangle/same-body pairs. Both buffers are complete writers
-    // without atomics or compaction; no patch combines unrelated leaf normals.
+    // Every accepted candidate is a complete four-Contact writer, including
+    // no-manifold and sensor candidates. Other capacity is not read/written.
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         contacts[slot + point] = result;
-    if (local_a >= local_b || a == b)
-        return;
-
-    BodyModel ma = body_models[a];
-    BodyModel mb = body_models[b];
-    if (!jph_resident(ma) || !jph_resident(mb))
-        return;
-    bool sensor = jph_sensor(shape_a) || jph_sensor(shape_b);
-    if (!sensor && !jph_dynamic(ma) && !jph_dynamic(mb))
-        return;
-    if (!jph_layers_collide(shape_a, shape_b))
-        return;
-    if (jph_joint_suppresses_pair(world, a, b))
-        return;
-    patch.leaves.z = sensor ? PatchSensor : 0u;
-    contact_patches[patch_index] = patch;
-    Aabb ba = bounds[leaf_a];
-    Aabb bb = bounds[leaf_b];
-    if (any(ba.minimum.xyz > bb.maximum.xyz) || any(bb.minimum.xyz > ba.maximum.xyz))
-        return;
 
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
@@ -432,7 +406,7 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     Contact contact = contacts[slot];
     if (contact.meta.z == 0u)
         return;
-    ContactPatch patch = contact_patches[slot / MaxContactPointsPerPair];
+    ContactPatch patch = contact_patches[contact_patches[0].leaves.x + slot / MaxContactPointsPerPair];
     ShapeModel shape_a = shape_models[patch.leaves.x];
     ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = contact.meta.x;
@@ -482,11 +456,11 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
     for (uint local = first; local < end; ++local)
     {
         uint patch_index = world.bodies.z + local;
-        ContactPatch patch = contact_patches[patch_index];
+        ContactPatch patch = contact_patches[contact_patches[0].leaves.x + patch_index];
         if ((patch.leaves.z & PatchActive) == 0u)
             continue;
         uint slot = patch_index * MaxContactPointsPerPair;
-        // collide_pairs packs active points from the first record of a pair.
+        // Narrowphase packs active points from the first record of a candidate.
         Contact contact = contacts[slot];
         uint a = contact.meta.x;
         uint b = contact.meta.y;
