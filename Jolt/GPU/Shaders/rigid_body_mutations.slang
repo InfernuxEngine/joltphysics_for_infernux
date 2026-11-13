@@ -5,11 +5,32 @@
 #include "rigid_math.slang"
 
 ConstantBuffer<BodyMutationParams> mutation_params;
+ConstantBuffer<StageWork> stage_work;
 StructuredBuffer<BodyInitialization> body_initializations;
 StructuredBuffer<CenterOfMassUpdate> center_of_mass_updates;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void initialize_capacity(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y)
+        return;
+    uint index = stage_work.range.x + tid.x;
+    BodyState state;
+    state.positionCOM = float4(0.0f);
+    state.rotation = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    state.linearVelocity = float4(0.0f);
+    state.angularVelocity = float4(0.0f);
+    BodyForces forces;
+    forces.force = float4(0.0f);
+    forces.torque = float4(0.0f);
+    body_states[index] = state;
+    body_forces[index] = forces;
+    kinematic_targets[index] = jph_empty_kinematic_target();
+}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]

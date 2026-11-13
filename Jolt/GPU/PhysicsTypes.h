@@ -48,8 +48,8 @@ JPH_GPU_CONSTANT(MaterialCombineAverage, 0);
 JPH_GPU_CONSTANT(MaterialCombineMinimum, 1);
 JPH_GPU_CONSTANT(MaterialCombineMultiply, 2);
 JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
-// Correctness bootstrap bound, not a permanent limit on user physics worlds.
-JPH_GPU_CONSTANT(MaxBodiesPerWorld, 32);
+// Initial allocation, grown by the owner without changing stable body slots.
+JPH_GPU_CONSTANT(InitialBodyCapacity, 32);
 // Fixed point records per independent ordered leaf pair.
 JPH_GPU_CONSTANT(MaxContactPointsPerPair, 4);
 // Sentinel for a render hierarchy node without a physical ancestor.

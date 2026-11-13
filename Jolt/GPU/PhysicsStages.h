@@ -159,8 +159,8 @@ inline constexpr StageDefinition Stages[] = {
 // disjoint complete author body/leaf world ranges with bodies.zw reserved zero,
 // each leaf's owning body and range, matching body.meta.w, actual runtime world
 // candidate begin/count ranges, StepParams.solve.zw equal to 4C/C, candidate and
-// Contact counts within device indexing, and at most 32 bodies per
-// world. This is a bounded, serial-per-world correctness baseline, not a parallel
+// Contact counts within device indexing and buffer/device address limits.
+// This is a bounded, serial-per-world correctness baseline, not a parallel
 // contact solver or a published performance result.
 // JointStream contains a header, twelve words per author, then twelve words
 // per runtime record. World joint ranges are disjoint and complete; endpoints
