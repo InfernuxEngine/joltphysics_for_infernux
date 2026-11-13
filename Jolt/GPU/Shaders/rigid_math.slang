@@ -89,9 +89,20 @@ KinematicTarget jph_empty_kinematic_target()
 
 float3 jph_clamp_speed(float3 velocity, float maximum)
 {
-    float speed_sq = dot(velocity, velocity);
-    if (speed_sq > maximum * maximum)
-        velocity *= maximum / sqrt(speed_sq);
+    // Scale by a normal power of two before measuring the speed. Dividing by
+    // the largest component can flush its reciprocal to zero on the GPU.
+    float scale = max(abs(velocity.x), max(abs(velocity.y), abs(velocity.z)));
+    if (scale == 0.0f)
+        return velocity;
+    // This also keeps the scaled cap finite: the remaining maximum is < 2*scale.
+    if (scale <= maximum * 0.5f)
+        return velocity;
+    uint exponent = (asuint(scale) >> 23) & 255u;
+    float normalization = asfloat(max(1u, 254u - exponent) << 23);
+    float3 direction = velocity * normalization;
+    float speed = length(direction);
+    if (speed > maximum * normalization)
+        velocity = (direction / speed) * maximum;
     return velocity;
 }
 

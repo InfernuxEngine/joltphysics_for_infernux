@@ -265,7 +265,8 @@ struct JPH_GPU_ALIGN StepParams
 };
 
 // Immutable render hierarchy nodes address one frozen BodyState generation.
-// Parent chains are acyclic and contain at most MaxBodiesPerWorld nodes.
+// Parent chains are acyclic. The host schedules topological levels separately
+// from physical body capacity; a node consumes its completed parent's affine.
 // Ordinary parent chains retain both their affine and their authored TRS inverse:
 // a collapsed scale uses zero reciprocal, rather than a generic matrix inverse.
 struct JPH_GPU_ALIGN PoseNode
@@ -318,7 +319,7 @@ struct JPH_GPU_ALIGN PoseBinding
 
 struct JPH_GPU_ALIGN PoseParams
 {
-    // Node count, renderer binding count, then zero padding.
+    // Total node count, renderer binding count, current level first/count.
     JPH_GPU_UINT4 counts;
 };
 
