@@ -39,6 +39,54 @@ float4 jph_rotation_step(float4 q, float3 angular_step)
     return normalize(jph_quat_mul(delta, q));
 }
 
+float3 jph_kinematic_angular_velocity(float4 target, float4 current, float requested_dt)
+{
+    float4 delta = jph_quat_mul(target, float4(-current.xyz, current.w));
+    // q and -q choose the same shortest arc, including an exact PI tie.
+    if (delta.w < 0.0f || (delta.w == 0.0f && (delta.x < 0.0f ||
+        (delta.x == 0.0f && (delta.y < 0.0f || (delta.y == 0.0f && delta.z < 0.0f))))))
+        delta = -delta;
+    float length_squared = dot(delta.xyz, delta.xyz);
+    if (length_squared < 1e-12f)
+        return (2.0f * delta.xyz) / requested_dt;
+    float imaginary_length = sqrt(length_squared);
+    float angle = 2.0f * atan2(imaginary_length, delta.w);
+    return (delta.xyz * (angle / imaginary_length)) / requested_dt;
+}
+
+float4 jph_kinematic_rotation_step(float4 rotation, float3 angular_step)
+{
+    float length_squared = dot(angular_step, angular_step);
+    if (length_squared == 0.0f)
+        return rotation;
+    float sine_scale;
+    float cosine;
+    if (length_squared < 1e-12f)
+    {
+        // Continuous exponential at zero; a small target is not discarded
+        // merely because collision substeps make each angular step tiny.
+        sine_scale = 0.5f - length_squared / 48.0f;
+        cosine = 1.0f - length_squared / 8.0f;
+    }
+    else
+    {
+        float angle = sqrt(length_squared);
+        sine_scale = sin(0.5f * angle) / angle;
+        cosine = cos(0.5f * angle);
+    }
+    return normalize(jph_quat_mul(float4(angular_step * sine_scale, cosine), rotation));
+}
+
+KinematicTarget jph_empty_kinematic_target()
+{
+    KinematicTarget target;
+    target.positionSpeed = float4(0.0f);
+    target.rotation = float4(0.0f);
+    target.rootCOMDt = float4(0.0f);
+    target.state = uint4(0u);
+    return target;
+}
+
 float3 jph_clamp_speed(float3 velocity, float maximum)
 {
     float speed_sq = dot(velocity, velocity);
@@ -50,6 +98,27 @@ float3 jph_clamp_speed(float3 velocity, float maximum)
 bool jph_dynamic(BodyModel model)
 {
     return (model.meta.z & ~MotionNotResident) == MotionDynamic;
+}
+
+bool jph_nonstatic(BodyModel model)
+{
+    return (model.meta.z & ~MotionNotResident) != MotionStatic;
+}
+
+bool jph_has_kinematic_move(KinematicTarget target)
+{
+    return (target.state.x & (TargetPending | TargetActive | TargetDrivenLastTick)) != 0u;
+}
+
+BodyModel jph_effective_model(BodyModel author, KinematicTarget target)
+{
+    // This local view never writes BodyModels: accepted author Static remains
+    // Static while the explicit GPU drive state supplies temporary movement.
+    if ((author.meta.z & ~MotionNotResident) == MotionStatic &&
+        (target.state.x & TargetTemporaryStatic) != 0u &&
+        (target.state.x & (TargetActive | TargetDrivenLastTick)) != 0u)
+        author.meta.z = (author.meta.z & MotionNotResident) | MotionKinematic;
+    return author;
 }
 
 bool jph_resident(BodyModel model)
@@ -73,9 +142,9 @@ float3 jph_inverse_inertia(BodyModel model, BodyState state, float3 v)
 
 float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
 {
-    // Like Jolt's motion-type specialization, static bodies have zero point
-    // velocity even if an input snapshot contains stale velocity padding/data.
-    return jph_dynamic(model)
+    // Moving bodies provide prescribed velocity, but only Dynamic bodies
+    // have nonzero inverse mass/inertia and receive solver impulses.
+    return jph_nonstatic(model)
         ? state.linearVelocity.xyz + cross(state.angularVelocity.xyz, r)
         : float3(0.0f);
 }
@@ -764,8 +833,8 @@ void jph_solve_angular_friction(BodyModel ma, inout BodyState sa, BodyModel mb, 
     float3 inverse_axis_b = jph_inverse_inertia(mb, sb, normal);
     float inverse_effective_mass = dot(normal, inverse_axis_a + inverse_axis_b);
     float effective_mass = inverse_effective_mass > 0.0f ? 1.0f / inverse_effective_mass : 0.0f;
-    float3 angular_a = jph_dynamic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
-    float3 angular_b = jph_dynamic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
+    float3 angular_a = jph_nonstatic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
+    float3 angular_b = jph_nonstatic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
     float lambda = clamp(impulse + effective_mass * dot(normal, angular_a - angular_b),
                          -maximum_impulse, maximum_impulse);
     float delta = lambda - impulse;
@@ -804,10 +873,10 @@ float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyStat
         }
     }
 
-    float3 linear_a = jph_dynamic(ma) ? sa.linearVelocity.xyz : float3(0.0f);
-    float3 linear_b = jph_dynamic(mb) ? sb.linearVelocity.xyz : float3(0.0f);
-    float3 angular_a = jph_dynamic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
-    float3 angular_b = jph_dynamic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
+    float3 linear_a = jph_nonstatic(ma) ? sa.linearVelocity.xyz : float3(0.0f);
+    float3 linear_b = jph_nonstatic(mb) ? sb.linearVelocity.xyz : float3(0.0f);
+    float3 angular_a = jph_nonstatic(ma) ? sa.angularVelocity.xyz : float3(0.0f);
+    float3 angular_b = jph_nonstatic(mb) ? sb.angularVelocity.xyz : float3(0.0f);
     float linear_jv = dot(normal, linear_a - linear_b);
     float4 q = float4(0.0f);
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)

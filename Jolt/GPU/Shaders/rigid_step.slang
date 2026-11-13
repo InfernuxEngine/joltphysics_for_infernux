@@ -13,6 +13,7 @@ RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
+RWStructuredBuffer<KinematicTarget> kinematic_targets;
 
 // Only the primitive geometry uses this local pose. Body state, principal
 // inertia and contact anchors remain in the original body COM frame.
@@ -24,6 +25,55 @@ float3 jph_leaf_position(ShapeModel shape, BodyState state)
 float4 jph_leaf_rotation(ShapeModel shape, BodyState state)
 {
     return jph_quat_mul(state.rotation, shape.localRotation);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= step_params.counts.x)
+        return;
+    BodyModel model = body_models[index];
+    if (!jph_resident(model))
+        return;
+    KinematicTarget target = kinematic_targets[index];
+    uint motion = model.meta.z & ~MotionNotResident;
+    if (motion != MotionKinematic &&
+        !(motion == MotionStatic && (target.state.x & TargetTemporaryStatic) != 0u))
+        return;
+    BodyState state = body_states[index];
+    if ((target.state.x & TargetPending) != 0u)
+    {
+        // Capture this logical tick's start once. Requested time belongs to
+        // the command; only later Integrate dispatches use substep time h.
+        float requested_dt = target.rootCOMDt.w;
+        float3 root_com = target.rootCOMDt.xyz;
+        float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, root_com);
+        float3 delta = target.positionSpeed.xyz - origin;
+        float maximum_distance = target.positionSpeed.w * requested_dt;
+        float distance = length(delta);
+        if (target.positionSpeed.w > 0.0f && distance > maximum_distance)
+        {
+            // Preserve the old origin-based transform-drive cap exactly:
+            // excess translation AND rotation teleport before the last stretch.
+            origin = target.positionSpeed.xyz - delta * (maximum_distance / distance);
+            state.rotation = target.rotation;
+            state.positionCOM.xyz = origin + jph_rotate(state.rotation, root_com);
+        }
+        float3 target_com = target.positionSpeed.xyz + jph_rotate(target.rotation, root_com);
+        state.linearVelocity = float4((target_com - state.positionCOM.xyz) / requested_dt, 0.0f);
+        state.angularVelocity = float4(jph_kinematic_angular_velocity(target.rotation, state.rotation, requested_dt), 0.0f);
+        target.state.x = (target.state.x & TargetTemporaryStatic) | TargetActive;
+    }
+    else if ((target.state.x & TargetDrivenLastTick) != 0u)
+    {
+        state.linearVelocity = float4(0.0f);
+        state.angularVelocity = float4(0.0f);
+        target.state = uint4(0u);
+    }
+    body_states[index] = state;
+    kinematic_targets[index] = target;
 }
 
 [shader("compute")]
@@ -52,7 +102,7 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void clear_forces(uint3 tid : SV_DispatchThreadID)
+void finish_tick(uint3 tid : SV_DispatchThreadID)
 {
     uint index = tid.x;
     if (index >= step_params.counts.x)
@@ -63,6 +113,10 @@ void clear_forces(uint3 tid : SV_DispatchThreadID)
     cleared.force = float4(0.0f);
     cleared.torque = float4(0.0f);
     body_forces[index] = cleared;
+    KinematicTarget target = kinematic_targets[index];
+    if ((target.state.x & TargetActive) != 0u)
+        target.state.x = (target.state.x & TargetTemporaryStatic) | TargetDrivenLastTick;
+    kinematic_targets[index] = target;
 }
 
 [shader("compute")]
@@ -203,8 +257,8 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
         return;
     uint a = contact.meta.x;
     uint b = contact.meta.y;
-    BodyModel ma = body_models[a];
-    BodyModel mb = body_models[b];
+    BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
+    BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
     float3 pa, pb, ra, rb;
@@ -250,8 +304,8 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
             continue;
         uint a = contact.meta.x;
         uint b = contact.meta.y;
-        BodyModel ma = body_models[a];
-        BodyModel mb = body_models[b];
+        BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
+        BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
         BodyState sa = body_states[a];
         BodyState sb = body_states[b];
         // ContactConstraintManager uses one linear-friction center per patch,
@@ -351,15 +405,21 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     uint index = tid.x;
     if (index >= step_params.counts.x)
         return;
-    BodyModel model = body_models[index];
-    if (!jph_dynamic(model) || !jph_resident(model))
+    BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
+    if (!jph_nonstatic(model) || !jph_resident(model))
         return;
     BodyState state = body_states[index];
     float dt = step_params.gravityDt.w;
-    // Jolt clamps again after impulses, then rotates and translates using v1.
-    state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
-    state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
-    state.rotation = jph_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
+    // Jolt clamps Dynamic bodies after impulses. Prescribed Kinematic target
+    // velocity must not be truncated by Dynamic speed limits.
+    if (jph_dynamic(model))
+    {
+        state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
+        state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
+        state.rotation = jph_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
+    }
+    else
+        state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
     state.positionCOM.xyz += dt * state.linearVelocity.xyz;
     body_states[index] = state;
 }

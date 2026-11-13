@@ -10,11 +10,22 @@ StructuredBuffer<BodyCommandSpan> command_spans;
 StructuredBuffer<BodyModel> body_models;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
+RWStructuredBuffer<KinematicTarget> kinematic_targets;
 
 float3 command_world_inertia(BodyModel model, BodyState state, float3 value)
 {
     float4 frame = jph_quat_mul(state.rotation, model.inertiaRotation);
     return jph_rotate(frame, jph_inverse_rotate(frame, value) / model.invInertiaDiagonal.xyz);
+}
+
+void command_cancel_move(inout BodyState state, inout KinematicTarget target)
+{
+    if (jph_has_kinematic_move(target))
+    {
+        state.linearVelocity = float4(0.0f);
+        state.angularVelocity = float4(0.0f);
+    }
+    target.state = uint4(0u);
 }
 
 [shader("compute")]
@@ -28,6 +39,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
     BodyModel model = body_models[body];
     BodyState state = body_states[body];
     BodyForces forces = body_forces[body];
+    KinematicTarget target = kinematic_targets[body];
     // The validated immutable plan bounds every span to 64. Each dispatch has
     // at most one span for any body, so no atomics or global command scan occur.
     for (uint offset = 0; offset < span.range.z; ++offset)
@@ -35,18 +47,23 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
         BodyCommand command = body_commands[span.range.y + offset];
         uint kind = command.meta.y;
         uint mode = command.meta.z;
-        if (kind == CommandSetPosition)
-            state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
-        else if (kind == CommandSetRotation)
+        if (kind <= CommandSetPose)
         {
-            float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, command.rootCOM.xyz);
-            state.rotation = command.auxiliary;
-            state.positionCOM.xyz = origin + jph_rotate(state.rotation, command.rootCOM.xyz);
-        }
-        else if (kind == CommandSetPose)
-        {
-            state.rotation = command.auxiliary;
-            state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
+            if ((mode & CommandPreserveKinematicMove) == 0u)
+                command_cancel_move(state, target);
+            if (kind == CommandSetPosition)
+                state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
+            else if (kind == CommandSetRotation)
+            {
+                float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, command.rootCOM.xyz);
+                state.rotation = command.auxiliary;
+                state.positionCOM.xyz = origin + jph_rotate(state.rotation, command.rootCOM.xyz);
+            }
+            else
+            {
+                state.rotation = command.auxiliary;
+                state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
+            }
         }
         else if (kind == CommandResetMotion)
         {
@@ -54,14 +71,87 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             state.angularVelocity = float4(0.0f);
             forces.force = float4(0.0f);
             forces.torque = float4(0.0f);
+            target.state = uint4(0u);
+        }
+        else if (kind >= CommandMovePosition && kind <= CommandMovePose)
+        {
+            uint motion = model.meta.z & ~MotionNotResident;
+            bool temporary_static = motion == MotionStatic && (mode & CommandTemporaryStatic) != 0u;
+            if (motion == MotionKinematic || temporary_static)
+            {
+                // Only the first pending partial move samples the actual
+                // device pose. Later partial moves compose that queued target.
+                if ((target.state.x & TargetPending) == 0u)
+                {
+                    float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, command.rootCOM.xyz);
+                    target.positionSpeed = float4(origin, 0.0f);
+                    target.rotation = state.rotation;
+                }
+                if (kind != CommandMoveRotation)
+                    target.positionSpeed.xyz = command.value.xyz;
+                if (kind != CommandMovePosition)
+                    target.rotation = command.auxiliary;
+                target.positionSpeed.w = command.rootCOM.w;
+                target.rootCOMDt = float4(command.rootCOM.xyz, command.value.w);
+                target.state = uint4(TargetPending | (temporary_static ? TargetTemporaryStatic : 0u), 0u, 0u, 0u);
+            }
+        }
+        else if (kind == CommandMotionBoundary)
+        {
+            uint action = mode & MotionBoundaryActionMask;
+            bool had_move = jph_has_kinematic_move(target);
+            if (action == MotionBoundaryTypeChange)
+            {
+                // Carry protected author channels from the device target,
+                // never from a newer CPU pose. COM mutation rebased rootCOM.
+                uint carry = mode & (MotionBoundaryCarryAuthoredPosition | MotionBoundaryCarryAuthoredRotation);
+                if (had_move && carry != 0u)
+                {
+                    float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, target.rootCOMDt.xyz);
+                    if ((carry & MotionBoundaryCarryAuthoredPosition) != 0u)
+                        origin = target.positionSpeed.xyz;
+                    if ((carry & MotionBoundaryCarryAuthoredRotation) != 0u)
+                        state.rotation = target.rotation;
+                    state.positionCOM.xyz = origin + jph_rotate(state.rotation, target.rootCOMDt.xyz);
+                }
+                uint motion = model.meta.z & ~MotionNotResident;
+                if (motion == MotionStatic)
+                {
+                    state.linearVelocity = float4(0.0f);
+                    state.angularVelocity = float4(0.0f);
+                }
+                if (motion != MotionDynamic)
+                {
+                    forces.force = float4(0.0f);
+                    forces.torque = float4(0.0f);
+                }
+            }
+            else if (action == MotionBoundarySuspendReset || had_move)
+            {
+                // Suspension stops target-owned motion. Explicit manual
+                // velocity survives preserve mode; force accumulation survives
+                // either suspension mode, matching ordinary body removal.
+                state.linearVelocity = float4(0.0f);
+                state.angularVelocity = float4(0.0f);
+            }
+            target.state = uint4(0u);
+        }
+        else if (kind == CommandSetLinearVelocity || kind == CommandSetAngularVelocity)
+        {
+            if (jph_nonstatic(model))
+            {
+                // Explicit velocity supersedes the whole arrival stop while
+                // preserving the other channel's actual current velocity.
+                target.state = uint4(0u);
+                if (kind == CommandSetLinearVelocity)
+                    state.linearVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.z);
+                else
+                    state.angularVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.w);
+            }
         }
         else if (jph_dynamic(model))
         {
-            if (kind == CommandSetLinearVelocity)
-                state.linearVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.z);
-            else if (kind == CommandSetAngularVelocity)
-                state.angularVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.w);
-            else if (kind == CommandAddTorque)
+            if (kind == CommandAddTorque)
             {
                 float3 torque = command.value.xyz;
                 // Acceleration converts to a world torque NOW. A later pose
@@ -97,6 +187,9 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             }
         }
     }
+    // Every selected span writes its complete slot values, including when
+    // individual kinds have no effect for the accepted author motion type.
     body_states[body] = state;
     body_forces[body] = forces;
+    kinematic_targets[body] = target;
 }

@@ -9,6 +9,7 @@ StructuredBuffer<BodyInitialization> body_initializations;
 StructuredBuffer<CenterOfMassUpdate> center_of_mass_updates;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
+RWStructuredBuffer<KinematicTarget> kinematic_targets;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -19,6 +20,7 @@ void initialize_bodies(uint3 tid : SV_DispatchThreadID)
     BodyInitialization initial = body_initializations[mutation_params.counts.z + tid.x];
     body_states[initial.bodyIndex.x] = initial.state;
     body_forces[initial.bodyIndex.x] = initial.forces;
+    kinematic_targets[initial.bodyIndex.x] = jph_empty_kinematic_target();
 }
 
 [shader("compute")]
@@ -33,4 +35,8 @@ void update_centers_of_mass(uint3 tid : SV_DispatchThreadID)
     // does not modify velocities, accumulated forces or the body rotation.
     state.positionCOM.xyz += jph_rotate(state.rotation, change.deltaLocalCOM.xyz);
     body_states[change.bodyIndex.x] = state;
+    KinematicTarget target = kinematic_targets[change.bodyIndex.x];
+    if (jph_has_kinematic_move(target))
+        target.rootCOMDt.xyz += change.deltaLocalCOM.xyz;
+    kinematic_targets[change.bodyIndex.x] = target;
 }

@@ -20,6 +20,7 @@ enum class Resource : std::uint32_t
     BodyStates = 1u << 5,
     Bounds = 1u << 6,
     Contacts = 1u << 7,
+    KinematicTargets = 1u << 8,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -33,7 +34,8 @@ enum class Stage : std::uint32_t
     SolveVelocity,
     Integrate,
     SolvePosition,
-    ClearForces,
+    FinishTick,
+    PrepareKinematics,
 };
 
 enum class Domain : std::uint32_t { Bodies, WorldPairs, Contacts, Worlds };
@@ -62,26 +64,33 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyStates) | Mask(Resource::Bounds), Mask(Resource::Contacts)},
     {Stage::SetupContacts, "setup_contacts", Domain::Contacts, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts), Mask(Resource::Contacts)},
+            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets), Mask(Resource::Contacts)},
     {Stage::SolveVelocity, "solve_velocity", Domain::Worlds, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts), Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
+            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates), Mask(Resource::BodyStates)},
+        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+            | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates)},
     {Stage::SolvePosition, "solve_position", Domain::Worlds, 64, 1, 1,
         Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::Contacts)
             | Mask(Resource::BodyStates), Mask(Resource::BodyStates)},
-    {Stage::ClearForces, "clear_forces", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces), Mask(Resource::BodyForces)},
+    {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
+        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces)
+            | Mask(Resource::KinematicTargets), Mask(Resource::BodyForces) | Mask(Resource::KinematicTargets)},
+    {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
+        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+            | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets)},
 };
 
-// One substep: ApplyForces, BuildBounds, CollidePairs, SetupContacts,
+// PrepareKinematics runs once before all substeps. One substep consists of
+// ApplyForces, BuildBounds, CollidePairs, SetupContacts,
 // SolveVelocity repeated counts.w times, Integrate, SolvePosition repeated
 // solve.x times. Each solve dispatch performs ONE iteration. The logical-tick
-// owner appends ClearForces once after all substeps; direct recipe consumers
-// choose that boundary themselves. No warmstart,
-// sleeping, CCD, multiple-primitive bodies, pair-ignore filters, joints, locked DOFs or
-// kinematic motion are implemented by this bootstrap. A
+// owner appends FinishTick once after all substeps, clearing forces and arming
+// the target arrival stop without snapping pose. Control-only jobs use neither
+// PrepareKinematics nor FinishTick. No warmstart,
+// sleeping, CCD, multiple-primitive bodies, pair-ignore filters, joints or locked DOFs
+// are implemented by this bootstrap. A
 // host must reject these unsupported options. Each body has one primitive leaf or Empty;
 // its local pose may differ from the body's COM frame, including an explicit
 // center-of-mass offset. Authoring containers with one leaf may be flattened;

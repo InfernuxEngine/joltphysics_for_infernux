@@ -33,6 +33,7 @@ JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
 JPH_GPU_CONSTANT(ShapeEmpty, 2);
 JPH_GPU_CONSTANT(MotionStatic, 0);
+JPH_GPU_CONSTANT(MotionKinematic, 1);
 JPH_GPU_CONSTANT(MotionDynamic, 2);
 // Residency is separate from motion type. A suspended actor retains its
 // dynamic properties and state, but does not integrate or produce contacts.
@@ -60,6 +61,23 @@ JPH_GPU_CONSTANT(CommandAddForceAtPosition, 7);
 // Internal motion-type boundary: preserve pose and clear velocities/forces,
 // including after accepting a Static model that ignores dynamic API commands.
 JPH_GPU_CONSTANT(CommandResetMotion, 8);
+JPH_GPU_CONSTANT(CommandMovePosition, 9);
+JPH_GPU_CONSTANT(CommandMoveRotation, 10);
+JPH_GPU_CONSTANT(CommandMovePose, 11);
+JPH_GPU_CONSTANT(CommandMotionBoundary, 12);
+// meta.z is decoded by command kind, independently of ForceMode.
+JPH_GPU_CONSTANT(CommandPreserveKinematicMove, 1);
+JPH_GPU_CONSTANT(CommandTemporaryStatic, 1);
+JPH_GPU_CONSTANT(MotionBoundaryActionMask, 3);
+JPH_GPU_CONSTANT(MotionBoundaryTypeChange, 0);
+JPH_GPU_CONSTANT(MotionBoundarySuspendPreserve, 1);
+JPH_GPU_CONSTANT(MotionBoundarySuspendReset, 2);
+JPH_GPU_CONSTANT(MotionBoundaryCarryAuthoredPosition, 4);
+JPH_GPU_CONSTANT(MotionBoundaryCarryAuthoredRotation, 8);
+JPH_GPU_CONSTANT(TargetPending, 1);
+JPH_GPU_CONSTANT(TargetActive, 2);
+JPH_GPU_CONSTANT(TargetDrivenLastTick, 4);
+JPH_GPU_CONSTANT(TargetTemporaryStatic, 8);
 JPH_GPU_CONSTANT(CommandForce, 0);
 JPH_GPU_CONSTANT(CommandAcceleration, 1);
 JPH_GPU_CONSTANT(CommandImpulse, 2);
@@ -114,6 +132,16 @@ struct JPH_GPU_ALIGN BodyForces
     // submit their contribution for each logical tick.
     JPH_GPU_FLOAT4 force;   // World space xyz; w padding.
     JPH_GPU_FLOAT4 torque;  // World space xyz; w padding.
+};
+
+// Device-owned target/arrival-stop state. No CPU dynamic pose mirror is used.
+// The inactive payload is not read; initialization and retirement clear it.
+struct JPH_GPU_ALIGN KinematicTarget
+{
+    JPH_GPU_FLOAT4 positionSpeed; // Target body origin xyz; w maximum drive speed (0 = uncapped).
+    JPH_GPU_FLOAT4 rotation;      // Target normalized quaternion xyzw.
+    JPH_GPU_FLOAT4 rootCOMDt;     // Accepted local root COM xyz; w requested duration.
+    JPH_GPU_UINT4 state;          // Target flags in x; yzw zero.
 };
 
 struct JPH_GPU_ALIGN WorldRange
@@ -248,12 +276,17 @@ struct JPH_GPU_ALIGN CenterOfMassUpdate
 // Positions supplied by the public API are body origins, not COM positions.
 struct JPH_GPU_ALIGN BodyCommand
 {
-    JPH_GPU_UINT4 meta; // Body slot, command kind, ForceMode, zero padding.
-    JPH_GPU_FLOAT4 value; // Position, velocity, force or torque xyz; w is zero.
+    JPH_GPU_UINT4 meta; // Body slot, kind, kind-specific mode/flags, zero padding.
+    // Position/velocity/force/torque xyz. Move kinds use w for requested dt;
+    // all other consumed vector w values are zero.
+    JPH_GPU_FLOAT4 value;
     // SetRotation/SetPose: normalized quaternion xyzw. Force-at-position:
-    // world point xyz with zero w. Other commands do not consume this field.
+    // world point xyz with zero w. MoveRotation/MovePose also consume quaternion.
+    // Other commands do not consume this field.
     JPH_GPU_FLOAT4 auxiliary;
-    JPH_GPU_FLOAT4 rootCOM; // Pose commands' local root COM xyz; w is zero.
+    // Pose/Move local root COM xyz. Move kinds use w for maximum drive speed;
+    // ordinary pose commands use zero w. Boundary carries use device Target.
+    JPH_GPU_FLOAT4 rootCOM;
 };
 
 struct JPH_GPU_ALIGN BodyCommandSpan
@@ -300,6 +333,7 @@ JPH_GPU_CHECK_TYPE(BodyModel, 96);
 JPH_GPU_CHECK_TYPE(ShapeModel, 48);
 JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
+JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 16);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(Contact, 80);
@@ -320,6 +354,8 @@ static_assert(offsetof(RaycastInput, direction) == 16 && offsetof(RaycastInput, 
 static_assert(offsetof(RaycastHit, positionDistance) == 16 && offsetof(RaycastHit, normalFraction) == 32);
 static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
     && offsetof(BodyCommand, rootCOM) == 48);
+static_assert(offsetof(KinematicTarget, positionSpeed) == 0 && offsetof(KinematicTarget, rotation) == 16
+    && offsetof(KinematicTarget, rootCOMDt) == 32 && offsetof(KinematicTarget, state) == 48);
 static_assert(offsetof(BodyInitialization, state) == 16 && offsetof(BodyInitialization, forces) == 80);
 static_assert(offsetof(CenterOfMassUpdate, deltaLocalCOM) == 16);
 static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
