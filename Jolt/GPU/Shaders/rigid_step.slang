@@ -9,7 +9,6 @@ ConstantBuffer<StepParams> step_params;
 ConstantBuffer<StageWork> stage_work;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
-StructuredBuffer<WorldRange> worlds;
 RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
@@ -17,35 +16,55 @@ RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 
-void jph_joint_bodies(JointAuthor author, out BodyModel m1, out BodyState s1,
-    out BodyModel m2, out BodyState s2)
+#include "island_owner_schedule.slang"
+
+void jph_joint_models(JointAuthor author, out BodyModel m1, out BodyModel m2)
 {
     m1 = jph_joint_world_model();
+    if (author.bodies.x != InvalidQueryBodySlot)
+        m1 = jph_effective_model(body_models[author.bodies.x], kinematic_targets[author.bodies.x]);
+    m2 = jph_effective_model(body_models[author.bodies.y], kinematic_targets[author.bodies.y]);
+}
+
+void jph_joint_states(JointAuthor author, out BodyState s1, out BodyState s2)
+{
     s1 = jph_joint_world_state();
     if (author.bodies.x != InvalidQueryBodySlot)
-    {
-        m1 = jph_effective_model(body_models[author.bodies.x], kinematic_targets[author.bodies.x]);
         s1 = body_states[author.bodies.x];
-    }
-    m2 = jph_effective_model(body_models[author.bodies.y], kinematic_targets[author.bodies.y]);
     s2 = body_states[author.bodies.y];
 }
 
-// A world lane alone owns both endpoints. Each call consumes one joint and
-// each dispatch visits only the explicitly selected local joint range.
+void jph_joint_bodies(JointAuthor author, out BodyModel m1, out BodyState s1,
+    out BodyModel m2, out BodyState s2)
+{
+    jph_joint_models(author, m1, m2);
+    jph_joint_states(author, s1, s2);
+}
+
+// One island lane alone owns every Dynamic endpoint of its numerical rows.
+// All-stream SetupJoints/FinishJoints retain independent runtime maintenance.
 void jph_step_joint(uint index, uint phase)
 {
     JointAuthor author = jph_joint_load_author(index);
     JointState runtime = jph_joint_load_state(index);
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
     BodyModel m1, m2;
-    BodyState s1, s2;
-    jph_joint_bodies(author, m1, s1, m2, s2);
+    jph_joint_models(author, m1, m2);
     if (!jph_resident(m1) || !jph_resident(m2))
     {
         jph_joint_clear_impulses(runtime);
         jph_joint_store_state(index, runtime);
         return;
     }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(author, s1, s2);
     BodyState old1 = s1, old2 = s2;
     if (phase == 1u)
         jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
@@ -66,17 +85,12 @@ void jph_step_joint(uint index, uint phase)
     jph_joint_store_state(index, runtime);
 }
 
-void jph_step_world_joints(uint world_lane, uint phase)
+void jph_step_island_joints(uint island_lane, uint phase)
 {
-    if (world_lane >= stage_work.range.w) return;
-    uint world_index = stage_work.range.z + world_lane;
-    if (world_index >= step_params.counts.y) return;
-    WorldRange world = worlds[world_index];
-    uint first = stage_work.range.x;
-    if (first >= world.leaves.w) return;
-    uint end = first + min(stage_work.range.y, world.leaves.w - first);
+    uint begin, first, end;
+    if (!jph_island_joint_range(island_lane, begin, first, end)) return;
     for (uint local = first; local < end; ++local)
-        jph_step_joint(world.leaves.z + local, phase);
+        jph_step_joint(jph_island_joint_source(begin, local), phase);
 }
 
 [shader("compute")]
@@ -110,21 +124,21 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void warm_joints(uint3 tid : SV_DispatchThreadID)
 {
-    jph_step_world_joints(tid.x, 3u);
+    jph_step_island_joints(tid.x, 3u);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void solve_joint_velocity(uint3 tid : SV_DispatchThreadID)
 {
-    jph_step_world_joints(tid.x, 1u);
+    jph_step_island_joints(tid.x, 1u);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void solve_joint_position(uint3 tid : SV_DispatchThreadID)
 {
-    jph_step_world_joints(tid.x, 2u);
+    jph_step_island_joints(tid.x, 2u);
 }
 
 [shader("compute")]
@@ -439,46 +453,63 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     contacts[slot] = contact;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void solve_velocity(uint3 tid : SV_DispatchThreadID)
+// One complete original patch: linear friction, angular friction, four-point normal block.
+void jph_solve_patch_velocity(uint patch_index)
 {
-    if (tid.x >= stage_work.range.w) return;
-    uint world_index = stage_work.range.z + tid.x;
-    if (world_index >= step_params.counts.y)
+    ContactPatch patch = contact_patches[contact_patches[0].leaves.x + patch_index];
+    if ((patch.leaves.z & PatchActive) == 0u)
         return;
-    WorldRange world = worlds[world_index];
-    // One lane owns this world's bounded patch range. Accepted units preserve
-    // PGS order and consume prior units' body values before the next iteration.
-    uint first = stage_work.range.x;
-    if (first >= world.bodies.w) return;
-    uint end = first + min(stage_work.range.y, world.bodies.w - first);
-    for (uint local = first; local < end; ++local)
+    uint slot = patch_index * MaxContactPointsPerPair;
+    // Narrowphase packs active points from the first record of a candidate.
+    Contact contact = contacts[slot];
+    uint a = contact.meta.x;
+    uint b = contact.meta.y;
+    BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
+    BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
+    BodyState sa = body_states[a];
+    BodyState sb = body_states[b];
+    // ContactConstraintManager uses one linear-friction center per patch,
+    // plus normal-axis angular friction for multiple contact points. Both
+    // precede all non-penetration constraints in this PGS iteration.
+    float3 normal = contact.normalDepth.xyz;
+    float3 center = float3(0.0f);
+    float normal_impulse = 0.0f;
+    uint point_count = 0u;
+    float3 ja[4];
+    float3 jb[4];
+    float4 old_normal_impulse = float4(0.0f);
+    float4 normal_bias = float4(0.0f);
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
     {
-        uint patch_index = world.bodies.z + local;
-        ContactPatch patch = contact_patches[contact_patches[0].leaves.x + patch_index];
-        if ((patch.leaves.z & PatchActive) == 0u)
+        Contact current = contacts[slot + point];
+        if (current.meta.z == 0u)
             continue;
-        uint slot = patch_index * MaxContactPointsPerPair;
-        // Narrowphase packs active points from the first record of a candidate.
-        Contact contact = contacts[slot];
-        uint a = contact.meta.x;
-        uint b = contact.meta.y;
-        BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
-        BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
-        BodyState sa = body_states[a];
-        BodyState sb = body_states[b];
-        // ContactConstraintManager uses one linear-friction center per patch,
-        // plus normal-axis angular friction for multiple contact points. Both
-        // precede all non-penetration constraints in this PGS iteration.
-        float3 normal = contact.normalDepth.xyz;
-        float3 center = float3(0.0f);
-        float normal_impulse = 0.0f;
-        uint point_count = 0u;
-        float3 ja[4];
-        float3 jb[4];
-        float4 old_normal_impulse = float4(0.0f);
-        float4 normal_bias = float4(0.0f);
+        float3 pa, pb, ra, rb;
+        jph_contact_points(current, sa, sb, pa, pb, ra, rb);
+        ja[point] = cross(ra, normal);
+        jb[point] = cross(rb, normal);
+        old_normal_impulse[point] = current.impulse.x;
+        normal_bias[point] = current.impulse.w;
+        center += 0.5f * (pa + pb);
+        normal_impulse += current.impulse.x;
+        ++point_count;
+    }
+    center /= float(point_count);
+    ShapeModel shape_a = shape_models[patch.leaves.x];
+    ShapeModel shape_b = shape_models[patch.leaves.y];
+    float friction = jph_combine_material(shape_a.material.x, shape_a.surface.z,
+                                           shape_b.material.x, shape_b.surface.z);
+    float2 linear_impulse = contact.impulse.yz;
+    jph_solve_friction(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
+                       normal, friction * normal_impulse, linear_impulse);
+    contact.impulse.yz = linear_impulse;
+
+    float angular_impulse = 0.0f;
+    if (point_count > 1u)
+    {
+        // Read the four point records again instead of holding a private
+        // Contact array. Radius is measured only in the contact plane.
+        float weighted_radius = 0.0f;
         for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         {
             Contact current = contacts[slot + point];
@@ -486,79 +517,59 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
                 continue;
             float3 pa, pb, ra, rb;
             jph_contact_points(current, sa, sb, pa, pb, ra, rb);
-            ja[point] = cross(ra, normal);
-            jb[point] = cross(rb, normal);
-            old_normal_impulse[point] = current.impulse.x;
-            normal_bias[point] = current.impulse.w;
-            center += 0.5f * (pa + pb);
-            normal_impulse += current.impulse.x;
-            ++point_count;
+            float3 delta = 0.5f * (pa + pb) - center;
+            delta -= normal * dot(delta, normal);
+            weighted_radius += length(delta) * current.impulse.x;
         }
-        center /= float(point_count);
-        ShapeModel shape_a = shape_models[patch.leaves.x];
-        ShapeModel shape_b = shape_models[patch.leaves.y];
-        float friction = jph_combine_material(shape_a.material.x, shape_a.surface.z,
-                                               shape_b.material.x, shape_b.surface.z);
-        float2 linear_impulse = contact.impulse.yz;
-        jph_solve_friction(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
-                           normal, friction * normal_impulse, linear_impulse);
-        contact.impulse.yz = linear_impulse;
-
-        float angular_impulse = 0.0f;
-        if (point_count > 1u)
-        {
-            // Read the four point records again instead of holding a private
-            // Contact array. Radius is measured only in the contact plane.
-            float weighted_radius = 0.0f;
-            for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
-            {
-                Contact current = contacts[slot + point];
-                if (current.meta.z == 0u)
-                    continue;
-                float3 pa, pb, ra, rb;
-                jph_contact_points(current, sa, sb, pa, pb, ra, rb);
-                float3 delta = 0.5f * (pa + pb) - center;
-                delta -= normal * dot(delta, normal);
-                weighted_radius += length(delta) * current.impulse.x;
-            }
-            angular_impulse = contact.localAnchorA.w;
-            jph_solve_angular_friction(ma, sa, mb, sb, normal, friction * weighted_radius, angular_impulse);
-        }
-        contact.localAnchorA.w = angular_impulse;
-        contacts[slot] = contact;
-
-        // Solve the pair's unilateral normal QP as one block. Coupled normal
-        // impulses must not leave the last scalar point's rocking residual.
-        float4 next_normal_impulse = jph_solve_normal_block(ma, sa, mb, sb, normal, ja, jb,
-                                                            old_normal_impulse, normal_bias, point_count);
-        float delta_linear = 0.0f;
-        float3 delta_angular_a = float3(0.0f);
-        float3 delta_angular_b = float3(0.0f);
-        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
-        {
-            Contact current = contacts[slot + point];
-            if (current.meta.z == 0u)
-                continue;
-            float delta = next_normal_impulse[point] - old_normal_impulse[point];
-            delta_linear += delta;
-            delta_angular_a += ja[point] * delta;
-            delta_angular_b += jb[point] * delta;
-            current.impulse.x = next_normal_impulse[point];
-            contacts[slot + point] = current;
-        }
-        if (jph_dynamic(ma))
-        {
-            sa.linearVelocity.xyz -= ma.mass.x * delta_linear * normal;
-            sa.angularVelocity.xyz -= jph_inverse_inertia(ma, sa, delta_angular_a);
-            body_states[a] = sa;
-        }
-        if (jph_dynamic(mb))
-        {
-            sb.linearVelocity.xyz += mb.mass.x * delta_linear * normal;
-            sb.angularVelocity.xyz += jph_inverse_inertia(mb, sb, delta_angular_b);
-            body_states[b] = sb;
-        }
+        angular_impulse = contact.localAnchorA.w;
+        jph_solve_angular_friction(ma, sa, mb, sb, normal, friction * weighted_radius, angular_impulse);
     }
+    contact.localAnchorA.w = angular_impulse;
+    contacts[slot] = contact;
+
+    // Solve the pair's unilateral normal QP as one block. Coupled normal
+    // impulses must not leave the last scalar point's rocking residual.
+    float4 next_normal_impulse = jph_solve_normal_block(ma, sa, mb, sb, normal, ja, jb,
+                                                        old_normal_impulse, normal_bias, point_count);
+    float delta_linear = 0.0f;
+    float3 delta_angular_a = float3(0.0f);
+    float3 delta_angular_b = float3(0.0f);
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+    {
+        Contact current = contacts[slot + point];
+        if (current.meta.z == 0u)
+            continue;
+        float delta = next_normal_impulse[point] - old_normal_impulse[point];
+        delta_linear += delta;
+        delta_angular_a += ja[point] * delta;
+        delta_angular_b += jb[point] * delta;
+        current.impulse.x = next_normal_impulse[point];
+        contacts[slot + point] = current;
+    }
+    if (jph_dynamic(ma))
+    {
+        sa.linearVelocity.xyz -= ma.mass.x * delta_linear * normal;
+        sa.angularVelocity.xyz -= jph_inverse_inertia(ma, sa, delta_angular_a);
+        body_states[a] = sa;
+    }
+    if (jph_dynamic(mb))
+    {
+        sb.linearVelocity.xyz += mb.mass.x * delta_linear * normal;
+        sb.angularVelocity.xyz += jph_inverse_inertia(mb, sb, delta_angular_b);
+        body_states[b] = sb;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void solve_velocity(uint3 tid : SV_DispatchThreadID)
+{
+    uint begin, first, end;
+    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
+    // This lane owns this island's entire Dynamic write domain. The host
+    // submits local slices in ascending order before the next solver phase.
+    for (uint local = first; local < end; ++local)
+        jph_solve_patch_velocity(jph_island_patch_source(begin, local));
 }
 
 [shader("compute")]
@@ -588,37 +599,36 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     body_states[index] = state;
 }
 
+// One original row, retaining raw models and per-row BodyState load/store.
+void jph_solve_contact_position(uint source_row)
+{
+    Contact contact = contacts[source_row];
+    if (contact.meta.z == 0u)
+        return;
+    uint a = contact.meta.x;
+    uint b = contact.meta.y;
+    BodyModel ma = body_models[a];
+    BodyModel mb = body_models[b];
+    BodyState sa = body_states[a];
+    BodyState sb = body_states[b];
+    jph_solve_position(ma, sa, mb, sb, contact,
+        step_params.contact.y, step_params.contact.z, step_params.contact.w);
+    if (jph_dynamic(ma))
+        body_states[a] = sa;
+    if (jph_dynamic(mb))
+        body_states[b] = sb;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void solve_position(uint3 tid : SV_DispatchThreadID)
 {
-    if (tid.x >= stage_work.range.w) return;
-    uint world_index = stage_work.range.z + tid.x;
-    if (world_index >= step_params.counts.y)
-        return;
-    WorldRange world = worlds[world_index];
-    // Bounded contact rows from one position iteration, in the original order.
-    uint contact_count = world.bodies.w * MaxContactPointsPerPair;
-    uint first_contact = world.bodies.z * MaxContactPointsPerPair;
-    uint first = stage_work.range.x;
-    if (first >= contact_count) return;
-    uint end = first + min(stage_work.range.y, contact_count - first);
+    uint patch_begin, first, end;
+    if (!jph_island_contact_range(tid.x, patch_begin, first, end)) return;
     for (uint local = first; local < end; ++local)
     {
-        Contact contact = contacts[first_contact + local];
-        if (contact.meta.z == 0u)
-            continue;
-        uint a = contact.meta.x;
-        uint b = contact.meta.y;
-        BodyModel ma = body_models[a];
-        BodyModel mb = body_models[b];
-        BodyState sa = body_states[a];
-        BodyState sb = body_states[b];
-        jph_solve_position(ma, sa, mb, sb, contact,
-            step_params.contact.y, step_params.contact.z, step_params.contact.w);
-        if (jph_dynamic(ma))
-            body_states[a] = sa;
-        if (jph_dynamic(mb))
-            body_states[b] = sb;
+        uint patch = jph_island_patch_source(patch_begin, local / MaxContactPointsPerPair);
+        uint point = local % MaxContactPointsPerPair;
+        jph_solve_contact_position(patch * MaxContactPointsPerPair + point);
     }
 }
