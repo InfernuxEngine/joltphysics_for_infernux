@@ -4,13 +4,17 @@
 
 #include "rigid_math.slang"
 
-ConstantBuffer<RaycastParams> raycast_params;
-StructuredBuffer<RaycastInput> raycast_inputs;
+ConstantBuffer<QueryParams> query_params;
+StructuredBuffer<QueryInput> query_inputs;
+StructuredBuffer<QueryPrimitive> query_primitives;
+StructuredBuffer<QueryBodyIdentity> query_body_ids;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
 StructuredBuffer<BodyState> body_states;
-RWStructuredBuffer<RaycastHit> raycast_hits;
-
+RWStructuredBuffer<QueryHit> query_candidates;
+RWStructuredBuffer<QuerySpan> query_spans;
+RWStructuredBuffer<QuerySummary> query_summary;
+RWStructuredBuffer<QueryHit> query_hits;
 float3 query_box_face_normal(float3 point, float3 half_extent)
 {
     // BoxShape::GetSurfaceNormal: nearest outer face, lowest axis on ties.
@@ -268,65 +272,319 @@ bool query_rounded_box(float3 origin, float3 direction, float4 geometry, float m
     return false;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void raycast_closest(uint3 tid : SV_DispatchThreadID)
+QueryHit query_miss()
 {
-    uint index = tid.x;
-    if (index >= raycast_params.counts.x)
-        return;
-    RaycastInput ray = raycast_inputs[index];
-    float3 origin = ray.originMaxDistance.xyz;
-    float maximum = ray.originMaxDistance.w;
-    // Max-component scaling avoids squaring the raw direction magnitude.
-    // Subnormal handling still follows the target GPU's floating-point mode.
-    float direction_scale = max(abs(ray.direction.x), max(abs(ray.direction.y), abs(ray.direction.z)));
-    float3 direction = normalize(ray.direction.xyz / direction_scale);
-    RaycastHit hit;
-    hit.meta = uint4(InvalidQueryBodySlot, 0u, 0u, 0u);
+    QueryHit hit;
+    hit.meta = uint4(InvalidQueryBodySlot, 0u, InvalidQueryBodySlot, 0u);
     hit.positionDistance = float4(0.0f);
     hit.normalFraction = float4(0.0f);
-    float closest = maximum;
-    for (uint local = 0u; local < raycast_params.counts.z; ++local)
+    hit.pointADepth = float4(0.0f);
+    return hit;
+}
+
+bool query_accepts(QueryInput request, ShapeModel shape, uint slot)
+{
+    if ((request.meta.w & QueryExcludeBody) != 0u && slot == request.source.x)
+        return false;
+    if ((request.meta.w & QueryTargetCollider) != 0u)
+        return all(shape.source.xy == request.filter.zw);
+    return (request.filter.x & (1u << shape.surface.x)) != 0u &&
+           (request.filter.y != 0u || (shape.meta.w & ShapeSensor) == 0u);
+}
+
+void query_leaf_pose(ShapeModel shape, BodyState state, out float3 center, out float4 rotation)
+{
+    center = state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz);
+    rotation = jph_quat_mul(state.rotation, shape.localRotation);
+}
+
+void query_leaf_bounds(ShapeModel shape, BodyState state, out float3 low, out float3 high)
+{
+    float3 center;
+    float4 rotation;
+    query_leaf_pose(shape, state, center, rotation);
+    float3 extent = float3(shape.geometry.w);
+    if (shape.meta.x == ShapeBox)
     {
-        uint slot = raycast_params.counts.y + local;
-        BodyModel model = body_models[slot];
-        if (!jph_resident(model))
-            continue;
-        BodyState state = body_states[slot];
-        for (uint local_leaf = 0u; local_leaf < model.meta.y; ++local_leaf)
+        float3 core = max(shape.geometry.xyz - shape.geometry.w, float3(0.0f));
+        extent += abs(jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f))) * core.x +
+                  abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * core.y +
+                  abs(jph_rotate(rotation, float3(0.0f, 0.0f, 1.0f))) * core.z;
+    }
+    else if (shape.meta.x == ShapeCapsule)
+        extent += abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * shape.geometry.y;
+    low = center - extent;
+    high = center + extent;
+}
+
+uint query_metric_status(JphPairMetric metric)
+{
+    return metric.status == 1u ? QuerySuccess :
+           metric.status == 0u ? QueryUnsupported : QueryNumericalFailure;
+}
+
+QueryHit query_leaf(QueryInput request, ShapeModel shape, BodyState state, uint leaf, out uint status)
+{
+    status = QuerySuccess;
+    QueryHit hit = query_miss();
+    float3 center;
+    float4 rotation;
+    query_leaf_pose(shape, state, center, rotation);
+    if (!all(isfinite(center)) || !all(isfinite(rotation)))
+    {
+        status = QueryNumericalFailure;
+        return hit;
+    }
+    if (request.meta.x == QueryRay)
+    {
+        float3 direction = jph_capsule_unit(request.direction.xyz);
+        float3 local_origin = jph_inverse_rotate(rotation, request.positionMaximum.xyz - center);
+        float3 local_direction = jph_inverse_rotate(rotation, direction);
+        if (!all(isfinite(local_origin)) || !all(isfinite(local_direction)))
         {
-            uint leaf = model.meta.x + local_leaf;
-            ShapeModel shape = shape_models[leaf];
-            if ((ray.filter.x & (1u << shape.surface.x)) == 0u ||
-                (ray.filter.y == 0u && (shape.meta.w & ShapeSensor) != 0u))
-                continue;
-            float3 center = state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz);
-            float4 rotation = jph_quat_mul(state.rotation, shape.localRotation);
-            float3 local_origin = jph_inverse_rotate(rotation, origin - center);
-            float3 local_direction = jph_inverse_rotate(rotation, direction);
-            float distance;
-            float3 normal;
-            bool found;
-            if (shape.meta.x == ShapeSphere)
-                found = query_sphere(local_origin, local_direction, shape.geometry.w, closest, distance, normal);
-            else if (shape.meta.x == ShapeBox)
-                found = query_rounded_box(local_origin, local_direction, shape.geometry, closest, distance, normal);
-            else if (shape.meta.x == ShapeCapsule)
-                found = query_capsule(local_origin, local_direction, shape.geometry.y, shape.geometry.w,
-                                      closest, distance, normal);
-            else
-                continue; // Only admitted geometry has a query implementation.
-            if (found && (hit.meta.y == 0u || distance < closest))
-            {
-                // Body slots and their admitted leaf ranges are visited in
-                // stable order within this immutable publication.
-                closest = distance;
-                hit.meta = uint4(slot, 1u, leaf, 0u);
-                hit.positionDistance = float4(origin + direction * distance, distance);
-                hit.normalFraction = float4(jph_rotate(rotation, normal), distance / maximum);
-            }
+            status = QueryNumericalFailure;
+            return hit;
+        }
+        float distance;
+        float3 normal;
+        bool found;
+        if (shape.meta.x == ShapeSphere)
+            found = query_sphere(local_origin, local_direction, shape.geometry.w, request.positionMaximum.w, distance, normal);
+        else if (shape.meta.x == ShapeBox)
+            found = query_rounded_box(local_origin, local_direction, shape.geometry, request.positionMaximum.w, distance, normal);
+        else if (shape.meta.x == ShapeCapsule)
+            found = query_capsule(local_origin, local_direction, shape.geometry.y, shape.geometry.w,
+                                  request.positionMaximum.w, distance, normal);
+        else
+        {
+            status = QueryUnsupported;
+            return hit;
+        }
+        if (found)
+        {
+            hit.meta = uint4(shape.meta.y, 1u, leaf, 0u);
+            hit.positionDistance = float4(request.positionMaximum.xyz + direction * distance, distance);
+            hit.normalFraction = float4(jph_rotate(rotation, normal), distance / request.positionMaximum.w);
+            hit.pointADepth = float4(hit.positionDistance.xyz, 0.0f);
+            if (!all(isfinite(hit.positionDistance)) || !all(isfinite(hit.normalFraction)))
+                status = QueryNumericalFailure;
+        }
+        return hit;
+    }
+    uint query_type = request.meta.x == QueryClosestPoint ? ShapeSphere : request.meta.z;
+    float4 query_geometry = request.meta.x == QueryClosestPoint ? float4(0.0f) : request.geometry;
+    JphPairMetric metric = jph_pair_metric(query_type, request.positionMaximum.xyz, request.rotation, query_geometry,
+                                          shape.meta.x, center, rotation, shape.geometry);
+    status = query_metric_status(metric);
+    if (status != QuerySuccess)
+        return hit;
+    if (request.meta.x == QueryOverlap && metric.separation > 0.0f)
+        return hit;
+    hit.meta = uint4(shape.meta.y, 1u, leaf, metric.feature);
+    float3 point = metric.pointB;
+    if (request.meta.x == QueryClosestPoint && metric.separation <= 0.0f)
+        point = request.positionMaximum.xyz;
+    hit.positionDistance = float4(point, max(metric.separation, 0.0f));
+    hit.normalFraction = float4(-metric.normal, 0.0f);
+    hit.pointADepth = float4(metric.pointA, max(-metric.separation, 0.0f));
+    return hit;
+}
+
+bool query_less(QueryInput request, QueryHit a, QueryHit b)
+{
+    if (request.meta.y == QueryUniqueCollider)
+    {
+        uint2 ca = shape_models[a.meta.z].source.xy;
+        uint2 cb = shape_models[b.meta.z].source.xy;
+        return ca.y != cb.y ? ca.y < cb.y : ca.x < cb.x;
+    }
+    if (request.meta.y == QueryUniqueBody)
+    {
+        uint2 a_id = query_body_ids[a.meta.x].ids.zw;
+        uint2 b_id = query_body_ids[b.meta.x].ids.zw;
+        if (a_id.y != b_id.y || a_id.x != b_id.x)
+            return a_id.y != b_id.y ? a_id.y < b_id.y : a_id.x < b_id.x;
+    }
+    if (request.meta.y != QueryUniqueBody && a.positionDistance.w != b.positionDistance.w)
+        return a.positionDistance.w < b.positionDistance.w;
+    uint bodyA = query_body_ids[a.meta.x].ids.x;
+    uint bodyB = query_body_ids[b.meta.x].ids.x;
+    if (bodyA != bodyB)
+        return bodyA < bodyB;
+    uint subA = shape_models[a.meta.z].meta.z;
+    uint subB = shape_models[b.meta.z].meta.z;
+    return subA != subB ? subA < subB : a.meta.z < b.meta.z;
+}
+
+void query_collect(QueryInput request, QueryHit hit, uint begin, inout uint count)
+{
+    if (hit.meta.y == 0u)
+        return;
+    if (request.meta.y == QueryClosest)
+    {
+        QueryHit previous = query_candidates[begin];
+        // Closest rays preserve the existing strict-distance slot/leaf tie.
+        if (previous.meta.y == 0u || hit.positionDistance.w < previous.positionDistance.w)
+            query_candidates[begin] = hit;
+        return;
+    }
+    if (request.meta.y == QueryUniqueCollider)
+        for (uint old = 0u; old < count; ++old)
+            if (all(shape_models[query_candidates[begin + old].meta.z].source.xy == shape_models[hit.meta.z].source.xy))
+                return;
+    if (request.meta.y == QueryUniqueBody)
+        for (uint old = 0u; old < count; ++old)
+            if (query_candidates[begin + old].meta.x == hit.meta.x)
+                return;
+    uint position = count;
+    while (position > 0u && query_less(request, hit, query_candidates[begin + position - 1u]))
+    {
+        query_candidates[begin + position] = query_candidates[begin + position - 1u];
+        --position;
+    }
+    query_candidates[begin + position] = hit;
+    ++count;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void query_evaluate(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= query_params.counts.x)
+        return;
+    QueryInput request = query_inputs[index];
+    uint begin = index * query_params.sizes.y;
+    for (uint row = 0u; row < query_params.sizes.y; ++row)
+        query_candidates[begin + row] = query_miss();
+    uint count = request.meta.y == QueryClosest ? 1u : 0u;
+    uint status = QuerySuccess;
+    if (request.meta.x == QueryPenetration)
+    {
+        QueryPrimitive other = query_primitives[request.source.y];
+        JphPairMetric metric = jph_pair_metric(request.meta.z, request.positionMaximum.xyz, request.rotation, request.geometry,
+                                              other.meta.x, other.position.xyz, other.rotation, other.geometry);
+        status = query_metric_status(metric);
+        if (status == QuerySuccess && metric.separation < 0.0f)
+        {
+            QueryHit hit = query_miss();
+            hit.meta.yw = uint2(1u, metric.feature);
+            hit.positionDistance = float4(metric.pointB, 0.0f);
+            hit.normalFraction = float4(-metric.normal, 0.0f);
+            hit.pointADepth = float4(metric.pointA, -metric.separation);
+            query_candidates[begin] = hit;
+            count = 1u;
         }
     }
-    raycast_hits[index] = hit; // A complete output record for every ray, including misses.
+    else
+    {
+        for (uint local = 0u; local < query_params.counts.z && status == QuerySuccess; ++local)
+        {
+            uint slot = query_params.counts.y + local;
+            BodyModel model = body_models[slot];
+            if (!jph_resident(model) || model.meta.y == 0u)
+                continue;
+            if (request.meta.x == QueryBodyBounds && query_body_ids[slot].ids.y == 0u)
+                continue;
+            BodyState state = body_states[slot];
+            bool accepted = false;
+            float3 low = float3(3.402823466e+38f);
+            float3 high = -low;
+            uint first = model.meta.x;
+            for (uint ordinal = 0u; ordinal < model.meta.y; ++ordinal)
+            {
+                uint leaf = model.meta.x + ordinal;
+                ShapeModel shape = shape_models[leaf];
+                if (request.meta.x == QueryBodyBounds)
+                {
+                    float3 a, b;
+                    query_leaf_bounds(shape, state, a, b);
+                    if (!all(isfinite(a)) || !all(isfinite(b)))
+                    {
+                        status = QueryNumericalFailure;
+                        break;
+                    }
+                    low = min(low, a);
+                    high = max(high, b);
+                    accepted = accepted || query_accepts(request, shape, slot);
+                    continue;
+                }
+                if (!query_accepts(request, shape, slot))
+                    continue;
+                uint leaf_status;
+                QueryHit hit = query_leaf(request, shape, state, leaf, leaf_status);
+                if (leaf_status != QuerySuccess)
+                {
+                    status = leaf_status;
+                    break;
+                }
+                query_collect(request, hit, begin, count);
+                if (request.meta.y == QueryAny && count != 0u)
+                    break;
+            }
+            if (request.meta.x == QueryBodyBounds && accepted &&
+                all(low <= request.positionMaximum.xyz + request.direction.xyz) &&
+                all(high >= request.positionMaximum.xyz - request.direction.xyz))
+            {
+                QueryHit hit = query_miss();
+                hit.meta = uint4(slot, 1u, first, 0u);
+                query_collect(request, hit, begin, count);
+            }
+            if (request.meta.y == QueryAny && count != 0u)
+                break;
+        }
+    }
+    QuerySpan span;
+    span.range = uint4(0u, count, status, 0u);
+    query_spans[index] = span;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void query_scan(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u)
+        return;
+    uint count = 0u;
+    uint status = QuerySuccess;
+    for (uint index = 0u; index < query_params.counts.x; ++index)
+    {
+        QuerySpan span = query_spans[index];
+        span.range.x = count;
+        count += span.range.y;
+        status = max(status, span.range.z);
+        query_spans[index] = span;
+    }
+    QuerySummary summary;
+    summary.counts = uint4(count, status, query_params.counts.x, 0u);
+    query_summary[0] = summary;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void query_compact(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= query_params.sizes.z)
+        return;
+    QueryHit hit = query_miss();
+    if (index < query_summary[0].counts.x)
+    {
+        uint low = 0u;
+        uint high = query_params.counts.x;
+        while (low < high)
+        {
+            uint middle = low + (high - low) / 2u;
+            QuerySpan span = query_spans[middle];
+            if (span.range.x + span.range.y <= index)
+                low = middle + 1u;
+            else
+                high = middle;
+        }
+        QuerySpan source = query_spans[low];
+        hit = query_candidates[low * query_params.sizes.y + index - source.range.x];
+    }
+    // One writer per final index, including the unused tail. A sparse scatter
+    // plus concurrent clearing would race and would not prove initialization.
+    query_hits[index] = hit;
 }

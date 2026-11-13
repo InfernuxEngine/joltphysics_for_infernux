@@ -324,25 +324,75 @@ struct JPH_GPU_ALIGN BodyCommandParams
 };
 
 JPH_GPU_CONSTANT(InvalidQueryBodySlot, 0xFFFFFFFFu);
+JPH_GPU_CONSTANT(QueryRay, 0);
+JPH_GPU_CONSTANT(QueryOverlap, 1);
+JPH_GPU_CONSTANT(QueryClosestPoint, 2);
+JPH_GPU_CONSTANT(QueryBodyBounds, 3);
+JPH_GPU_CONSTANT(QueryPenetration, 4);
+JPH_GPU_CONSTANT(QueryClosest, 0);
+JPH_GPU_CONSTANT(QueryAll, 1);
+JPH_GPU_CONSTANT(QueryUniqueCollider, 2);
+JPH_GPU_CONSTANT(QueryUniqueBody, 3);
+JPH_GPU_CONSTANT(QueryAny, 4);
+JPH_GPU_CONSTANT(QueryTargetCollider, 1);
+JPH_GPU_CONSTANT(QueryExcludeBody, 2);
+JPH_GPU_CONSTANT(QuerySuccess, 0);
+JPH_GPU_CONSTANT(QueryUnsupported, 1);
+JPH_GPU_CONSTANT(QueryNumericalFailure, 2);
 
-struct JPH_GPU_ALIGN RaycastParams
+struct JPH_GPU_ALIGN QueryParams
 {
-    // Ray count, first body slot, body slots in this world (<=32), total leaf count.
+    // Request count, first body slot, body slots, published leaf count.
     JPH_GPU_UINT4 counts;
+    // Explicit primitive count, per-request scratch stride, result capacity, zero.
+    JPH_GPU_UINT4 sizes;
 };
 
-struct JPH_GPU_ALIGN RaycastInput
+struct JPH_GPU_ALIGN QueryInput
 {
-    JPH_GPU_FLOAT4 originMaxDistance; // World origin xyz; finite positive maximum distance.
-    JPH_GPU_FLOAT4 direction; // Finite nonzero world direction xyz, normalized by the query; w zero.
-    JPH_GPU_UINT4 filter; // Query layer mask, include sensors (0/1), then zero padding. Uses leaf layer.
+    // Operation, collector, query primitive type, filter flags.
+    JPH_GPU_UINT4 meta;
+    // Layer mask, include sensors, exact Collider ID low/high when requested.
+    JPH_GPU_UINT4 filter;
+    // Excluded body slot, explicit second primitive index, then zero padding.
+    JPH_GPU_UINT4 source;
+    // Ray origin / point / query shape center / bounds center; w maximum travel.
+    JPH_GPU_FLOAT4 positionMaximum;
+    // Ray direction or bounds half extent; w zero padding.
+    JPH_GPU_FLOAT4 direction;
+    JPH_GPU_FLOAT4 rotation; // Query primitive quaternion xyzw.
+    JPH_GPU_FLOAT4 geometry; // Same cooked geometry law as ShapeModel.
 };
 
-struct JPH_GPU_ALIGN RaycastHit
+struct JPH_GPU_ALIGN QueryPrimitive
 {
-    JPH_GPU_UINT4 meta; // Body SLOT (not public body ID), hit flag, global leaf index, geometry feature.
-    JPH_GPU_FLOAT4 positionDistance; // World point xyz and distance; zero on miss.
-    JPH_GPU_FLOAT4 normalFraction; // Outward world normal xyz and ray fraction; zero on miss.
+    JPH_GPU_UINT4 meta; // Shape type, then zero padding.
+    JPH_GPU_FLOAT4 geometry;
+    JPH_GPU_FLOAT4 position;
+    JPH_GPU_FLOAT4 rotation;
+};
+
+struct JPH_GPU_ALIGN QueryBodyIdentity
+{
+    JPH_GPU_UINT4 ids; // Public body ID, has Rigidbody, Rigidbody component ID low/high.
+};
+
+struct JPH_GPU_ALIGN QueryHit
+{
+    JPH_GPU_UINT4 meta; // Body slot, valid flag, global leaf ordinal, feature.
+    JPH_GPU_FLOAT4 positionDistance; // Target surface point xyz and travel/distance.
+    JPH_GPU_FLOAT4 normalFraction; // Target outward normal xyz and travel fraction.
+    JPH_GPU_FLOAT4 pointADepth; // Query surface witness xyz and positive penetration.
+};
+
+struct JPH_GPU_ALIGN QuerySpan
+{
+    JPH_GPU_UINT4 range; // Compact offset, record count, status, zero padding.
+};
+
+struct JPH_GPU_ALIGN QuerySummary
+{
+    JPH_GPU_UINT4 counts; // Total records, status, request count, zero padding.
 };
 
 #ifdef __cplusplus
@@ -370,11 +420,15 @@ JPH_GPU_CHECK_TYPE(CenterOfMassUpdate, 32);
 JPH_GPU_CHECK_TYPE(BodyCommand, 64);
 JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
-JPH_GPU_CHECK_TYPE(RaycastParams, 16);
-JPH_GPU_CHECK_TYPE(RaycastInput, 48);
-JPH_GPU_CHECK_TYPE(RaycastHit, 48);
-static_assert(offsetof(RaycastInput, direction) == 16 && offsetof(RaycastInput, filter) == 32);
-static_assert(offsetof(RaycastHit, positionDistance) == 16 && offsetof(RaycastHit, normalFraction) == 32);
+JPH_GPU_CHECK_TYPE(QueryParams, 32);
+JPH_GPU_CHECK_TYPE(QueryInput, 112);
+JPH_GPU_CHECK_TYPE(QueryPrimitive, 64);
+JPH_GPU_CHECK_TYPE(QueryBodyIdentity, 16);
+JPH_GPU_CHECK_TYPE(QueryHit, 64);
+JPH_GPU_CHECK_TYPE(QuerySpan, 16);
+JPH_GPU_CHECK_TYPE(QuerySummary, 16);
+static_assert(offsetof(QueryInput, geometry) == 96 && offsetof(QueryInput, filter) == 16);
+static_assert(offsetof(QueryHit, positionDistance) == 16 && offsetof(QueryHit, pointADepth) == 48);
 static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
     && offsetof(BodyCommand, rootCOM) == 48);
 static_assert(offsetof(KinematicTarget, positionSpeed) == 0 && offsetof(KinematicTarget, rotation) == 16
