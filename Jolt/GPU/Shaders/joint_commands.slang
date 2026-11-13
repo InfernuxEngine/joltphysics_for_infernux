@@ -104,24 +104,50 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
     joint_motion[row] = result;
 }
 
+groupshared uint joint_status_values[64];
+groupshared uint joint_status_failures[64];
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void read_joint_status(uint3 tid : SV_DispatchThreadID)
+void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThreadID, uint3 group : SV_GroupID)
 {
-    if (tid.x != 0u) return;
     uint status = JointStatusSuccess;
     uint first_failure = InvalidQueryBodySlot;
-    for (uint index = 0u; index < joint_params.counts.x; ++index)
+    // Status work: source first/count, destination first, reduction level.
+    // Every lane reaches the barriers, including the last group's padding.
+    if (tid.x < joint_params.counts.y)
     {
-        uint runtime_word = joint_stream[0].value.y + JointRecordWords * index;
-        uint current = joint_stream[runtime_word].value.y;
-        if (current != JointStatusSuccess && first_failure == InvalidQueryBodySlot)
-            first_failure = index;
-        status = max(status, current);
+        uint index = joint_params.counts.x + tid.x;
+        if (joint_params.counts.w == 0u)
+        {
+            uint runtime_word = joint_stream[0].value.y + JointRecordWords * index;
+            status = joint_stream[runtime_word].value.y;
+            if (status != JointStatusSuccess)
+                first_failure = index;
+        }
+        else
+        {
+            uint4 previous = joint_motion[index].value;
+            status = previous.x;
+            first_failure = previous.y;
+        }
     }
-    // Publication consumes this small metadata record before accepting the
-    // logical step. Local NaN guards do not turn a partial solve into success.
-    QueryRecordWord result;
-    result.value = uint4(status, first_failure, 0u, 0u);
-    joint_motion[0] = result;
+    joint_status_values[lane.x] = status;
+    joint_status_failures[lane.x] = first_failure;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 32u; stride != 0u; stride >>= 1u)
+    {
+        if (lane.x < stride)
+        {
+            joint_status_values[lane.x] = max(joint_status_values[lane.x], joint_status_values[lane.x + stride]);
+            joint_status_failures[lane.x] = min(joint_status_failures[lane.x], joint_status_failures[lane.x + stride]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane.x == 0u)
+    {
+        QueryRecordWord result;
+        result.value = uint4(joint_status_values[0], joint_status_failures[0], 0u, 0u);
+        joint_motion[joint_params.counts.z + group.x] = result;
+    }
 }

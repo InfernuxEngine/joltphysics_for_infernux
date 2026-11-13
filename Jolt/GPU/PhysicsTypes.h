@@ -264,6 +264,13 @@ struct JPH_GPU_ALIGN StepParams
     JPH_GPU_FLOAT4 restitution;
 };
 
+// One immutable dispatch unit. Independent domains use global item ordinals;
+// world domains use local item ordinals and an explicit world range.
+struct JPH_GPU_ALIGN StageWork
+{
+    JPH_GPU_UINT4 range; // Item first/count, world first/count.
+};
+
 // Immutable render hierarchy nodes address one frozen BodyState generation.
 // Parent chains are acyclic. The host schedules topological levels separately
 // from physical body capacity; a node consumes its completed parent's affine.
@@ -554,6 +561,7 @@ JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);
 JPH_GPU_CHECK_TYPE(StepParams, 80);
+JPH_GPU_CHECK_TYPE(StageWork, 16);
 JPH_GPU_CHECK_TYPE(PoseNode, 192);
 JPH_GPU_CHECK_TYPE(PoseBinding, 128);
 JPH_GPU_CHECK_TYPE(PoseParams, 16);
@@ -609,6 +617,7 @@ static_assert(offsetof(ContactPatch, leaves) == 0);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);
 static_assert(offsetof(Contact, normalDepth) == 16 && offsetof(Contact, impulse) == 64);
 static_assert(offsetof(StepParams, gravityDt) == 32 && offsetof(StepParams, restitution) == 64);
+static_assert(offsetof(StageWork, range) == 0);
 static_assert(offsetof(PoseNode, bodyParent) == 0 && offsetof(PoseNode, rootCOM) == 16
     && offsetof(PoseNode, localScale) == 32 && offsetof(PoseNode, parentRotation) == 48
     && offsetof(PoseNode, parentLocalToAncestor0) == 64 && offsetof(PoseNode, parentLocalToAncestor1) == 80

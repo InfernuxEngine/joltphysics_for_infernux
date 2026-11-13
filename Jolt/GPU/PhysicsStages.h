@@ -23,6 +23,7 @@ enum class Resource : std::uint32_t
     KinematicTargets = 1u << 8,
     ContactPatches = 1u << 9,
     Joints = 1u << 10,
+    StageWork = 1u << 11,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -40,9 +41,27 @@ enum class Stage : std::uint32_t
     PrepareKinematics,
     SetupJoints,
     FinishJoints,
+    WarmJoints,
+    SolveJointVelocity,
+    SolveJointPosition,
 };
 
-enum class Domain : std::uint32_t { Bodies, Shapes, WorldPairs, Contacts, Worlds };
+enum class Domain : std::uint32_t
+{
+    Bodies, Shapes, WorldPairs, Contacts, WorldPatches, WorldContacts, WorldJoints, Joints
+};
+
+// Scheduling bounds, independent of world capacity. Contact points are cheaper
+// than coupled patches and joints; avoid paying a launch for every 64 points.
+constexpr std::uint32_t WorkItemLimit(Domain inDomain)
+{
+    switch (inDomain) {
+    case Domain::WorldJoints: return 64;
+    case Domain::WorldPatches: return 256;
+    case Domain::WorldContacts: return 1024;
+    default: return 2048;
+    }
+}
 
 struct StageDefinition
 {
@@ -58,50 +77,68 @@ inline constexpr const char *StepSourcePath = "Jolt/GPU/Shaders/rigid_step.slang
 
 inline constexpr StageDefinition Stages[] = {
     {Stage::ApplyForces, "apply_forces", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces) | Mask(Resource::BodyStates),
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyForces) | Mask(Resource::BodyStates),
         Mask(Resource::BodyStates)},
     {Stage::BuildBounds, "build_bounds", Domain::Shapes, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates),
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates),
         Mask(Resource::Bounds)},
-    {Stage::CollidePairs, "collide_pairs", Domain::WorldPairs, 8, 8, 1,
-        Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::ShapeModels)
+    {Stage::CollidePairs, "collide_pairs", Domain::WorldPairs, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds)
+            | Mask(Resource::BodyModels) | Mask(Resource::ShapeModels)
             | Mask(Resource::BodyStates) | Mask(Resource::Bounds) | Mask(Resource::Joints),
         Mask(Resource::Contacts) | Mask(Resource::ContactPatches)},
     {Stage::SetupContacts, "setup_contacts", Domain::Contacts, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
             | Mask(Resource::ContactPatches), Mask(Resource::Contacts)},
-    {Stage::SolveVelocity, "solve_velocity", Domain::Worlds, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+    {Stage::SolveVelocity, "solve_velocity", Domain::WorldPatches, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds)
+            | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
-            | Mask(Resource::ContactPatches) | Mask(Resource::Joints),
-        Mask(Resource::BodyStates) | Mask(Resource::Contacts) | Mask(Resource::Joints)},
+            | Mask(Resource::ContactPatches),
+        Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates)},
-    {Stage::SolvePosition, "solve_position", Domain::Worlds, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels) | Mask(Resource::Contacts)
-            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
-        Mask(Resource::BodyStates) | Mask(Resource::Joints)},
+    {Stage::SolvePosition, "solve_position", Domain::WorldContacts, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds)
+            | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates),
+        Mask(Resource::BodyStates)},
     {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces)
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces)
             | Mask(Resource::KinematicTargets), Mask(Resource::BodyForces) | Mask(Resource::KinematicTargets)},
     {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets)},
-    {Stage::SetupJoints, "setup_joints", Domain::Worlds, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels)
+    {Stage::SetupJoints, "setup_joints", Domain::Joints, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+        Mask(Resource::Joints)},
+    {Stage::FinishJoints, "finish_joints", Domain::Joints, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Joints), Mask(Resource::Joints)},
+    {Stage::WarmJoints, "warm_joints", Domain::WorldJoints, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
-    {Stage::FinishJoints, "finish_joints", Domain::Worlds, 64, 1, 1,
-        Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::Joints), Mask(Resource::Joints)},
+    {Stage::SolveJointVelocity, "solve_joint_velocity", Domain::WorldJoints, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+        Mask(Resource::BodyStates) | Mask(Resource::Joints)},
+    {Stage::SolveJointPosition, "solve_joint_position", Domain::WorldJoints, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Worlds) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+        Mask(Resource::BodyStates) | Mask(Resource::Joints)},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of
-// ApplyForces, BuildBounds, CollidePairs, SetupContacts, SetupJoints,
-// SolveVelocity repeated counts.w times, Integrate, SolvePosition repeated
-// solve.x times, FinishJoints. Joint-only worlds run both solvers even without
-// shapes. Each solve dispatch performs ONE iteration. The logical-tick
+// ApplyForces, BuildBounds, CollidePairs, SetupContacts, SetupJoints, WarmJoints
+// (only with nonzero velocity iterations), then SolveJointVelocity followed by
+// SolveVelocity for each counts.w iteration, Integrate, SolveJointPosition then
+// SolvePosition for each solve.x iteration, FinishJoints. StageWork bounds each
+// dispatch's items/worlds; all units of an iteration precede its successor.
+// Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner appends FinishTick once after all substeps, clearing forces and arming
 // the target arrival stop without snapping pose. Control-only jobs use neither
 // PrepareKinematics nor FinishTick. Contact warmstart, sleeping, CCD, general
@@ -124,8 +161,9 @@ inline constexpr StageDefinition Stages[] = {
 // per runtime record. World joint ranges are disjoint and complete; endpoints
 // belong to that world or use InvalidQueryBodySlot for the world endpoint.
 // Fixed/Hinge author parameters must be finite, axes unit length and
-// stiffness/damping/torque/friction/armature nonnegative. SetupJoints applies
-// warmstart once per substep, only with nonzero velocity iterations. Joints
+// stiffness/damping/torque/friction/armature nonnegative. SetupJoints writes
+// runtime independently; WarmJoints applies warmstart once per substep, only
+// with nonzero velocity iterations. Joints
 // and contacts share each iteration's single world owner. Runtime stores never
 // modify the header or author prefix. No entry uses over eight storage ports.
 
