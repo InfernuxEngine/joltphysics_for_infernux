@@ -162,8 +162,61 @@ struct JPH_GPU_ALIGN WorldRange
     // Body begin/count, patch begin/count. The dense correctness collector
     // allocates leaf count squared patches, including inactive lower pairs.
     JPH_GPU_UINT4 bodies;
-    // Leaf begin/count, then two zero padding values.
+    // Leaf begin/count, joint begin/count in the accepted JointStream.
     JPH_GPU_UINT4 leaves;
+};
+
+JPH_GPU_CONSTANT(JointFixed, 0);
+JPH_GPU_CONSTANT(JointHinge, 1);
+JPH_GPU_CONSTANT(JointEnabled, 1);
+JPH_GPU_CONSTANT(JointCollisionEnabled, 2);
+JPH_GPU_CONSTANT(JointLimitsEnabled, 4);
+JPH_GPU_CONSTANT(JointMotorEnabled, 8);
+JPH_GPU_CONSTANT(JointResetWarmStart, 1);
+JPH_GPU_CONSTANT(JointResetRotor, 2);
+JPH_GPU_CONSTANT(JointRecordWords, 12);
+JPH_GPU_CONSTANT(JointStatusSuccess, 0);
+JPH_GPU_CONSTANT(JointStatusInvalid, 1);
+JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
+
+// One stream of 16-byte QueryRecordWords: header (count, 1+12*count,0,0),
+// count author records, then count runtime records. CPU uploads only the
+// header/author prefix; device stores address only the runtime suffix.
+struct JPH_GPU_ALIGN JointAuthor
+{
+    JPH_GPU_UINT4 bodies; // Connected slot (or InvalidQueryBodySlot), owner, type, flags.
+    JPH_GPU_UINT4 identity; // Stable joint identity low/high, world index, zero.
+    JPH_GPU_FLOAT4 ownerAnchor; // Affine-baked offset from the owner's origin.
+    JPH_GPU_FLOAT4 ownerAxis; // Unit hinge axis in the owner's rotation frame.
+    JPH_GPU_FLOAT4 ownerLocalAnchor; // Raw authored anchor, retained on collapsed axes.
+    JPH_GPU_FLOAT4 rootCOM1;
+    JPH_GPU_FLOAT4 rootCOM2;
+    JPH_GPU_FLOAT4 scale1;
+    JPH_GPU_FLOAT4 scale2;
+    JPH_GPU_FLOAT4 limits; // Minimum/maximum radians, zero, zero.
+    JPH_GPU_FLOAT4 motor; // Target radians, stiffness, damping, maximum torque.
+    JPH_GPU_FLOAT4 passive; // Viscous damping, dry friction torque, armature, zero.
+};
+
+struct JPH_GPU_ALIGN JointState
+{
+    JPH_GPU_UINT4 flags; // Initialized, numerical status, last armature float bits, zero.
+    JPH_GPU_FLOAT4 frame1;
+    JPH_GPU_FLOAT4 frame2;
+    JPH_GPU_FLOAT4 anchor1; // Unscaled body-origin anchor; world point for world endpoint.
+    JPH_GPU_FLOAT4 anchor2;
+    JPH_GPU_FLOAT4 collapsed1; // Origin offset on axes whose author scale was zero.
+    JPH_GPU_FLOAT4 collapsed2;
+    JPH_GPU_FLOAT4 pointImpulse;
+    JPH_GPU_FLOAT4 angularImpulse; // Fixed xyz world impulse, or hinge swing basis xy.
+    JPH_GPU_FLOAT4 axisImpulse; // Limit, motor, passive, total drive impulse.
+    JPH_GPU_FLOAT4 rotor; // Stored speed, rotor impulse, frozen old speed, preceding dt.
+    JPH_GPU_FLOAT4 setup; // Frozen angle, motor softness, motor bias, limit side (-1/0/+1).
+};
+
+struct JPH_GPU_ALIGN JointParams
+{
+    JPH_GPU_UINT4 counts; // New count, old count, query row count, zero.
 };
 
 struct JPH_GPU_ALIGN Aabb
@@ -491,6 +544,11 @@ JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 32);
+JPH_GPU_CHECK_TYPE(JointAuthor, 192);
+JPH_GPU_CHECK_TYPE(JointState, 192);
+JPH_GPU_CHECK_TYPE(JointParams, 16);
+static_assert(offsetof(JointAuthor, ownerAnchor) == 32 && offsetof(JointAuthor, passive) == 176);
+static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, setup) == 176);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);

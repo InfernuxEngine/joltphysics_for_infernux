@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Infernux contributors
 // SPDX-License-Identifier: MIT
 
-#include "rigid_math.slang"
+#include "rigid_joints.slang"
 
 ConstantBuffer<StepParams> step_params;
 StructuredBuffer<BodyModel> body_models;
@@ -15,6 +15,82 @@ RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
+
+// The world lane is the sole owner of both endpoints for joint and contact
+// iterations. No helper in rigid_joints.slang accesses the BodyState resource.
+void jph_step_joints(WorldRange world, uint phase)
+{
+    for (uint local = 0u; local < world.leaves.w; ++local)
+    {
+        uint index = world.leaves.z + local;
+        JointAuthor author = jph_joint_load_author(index);
+        JointState runtime = jph_joint_load_state(index);
+        BodyModel m1 = jph_joint_world_model();
+        BodyState s1 = jph_joint_world_state();
+        if (author.bodies.x != InvalidQueryBodySlot)
+        {
+            m1 = jph_effective_model(body_models[author.bodies.x], kinematic_targets[author.bodies.x]);
+            s1 = body_states[author.bodies.x];
+        }
+        BodyModel m2 = jph_effective_model(body_models[author.bodies.y], kinematic_targets[author.bodies.y]);
+        BodyState s2 = body_states[author.bodies.y];
+        if (!jph_resident(m1) || !jph_resident(m2))
+        {
+            jph_joint_clear_impulses(runtime);
+            jph_joint_store_state(index, runtime);
+            continue;
+        }
+        BodyState old1 = s1, old2 = s2;
+        if (phase == 0u)
+            jph_joint_setup(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w, step_params.counts.w != 0u);
+        else if (phase == 1u)
+            jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+        else if (phase == 2u)
+            jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+        else
+            jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+        if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime))
+        {
+            if (runtime.flags.y == JointStatusSuccess)
+                runtime.flags.y = JointStatusNumericalFailure;
+            s1 = old1;
+            s2 = old2;
+        }
+        if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+        if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+        jph_joint_store_state(index, runtime);
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void setup_joints(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x < step_params.counts.y)
+    {
+        WorldRange world = worlds[tid.x];
+        // Freeze all setup/rotor state before any joint warm impulse changes
+        // velocities (especially when armature was just changed).
+        jph_step_joints(world, 0u);
+        if (step_params.counts.w != 0u)
+            jph_step_joints(world, 3u);
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void finish_joints(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= step_params.counts.y) return;
+    WorldRange world = worlds[tid.x];
+    for (uint local = 0u; local < world.leaves.w; ++local)
+    {
+        uint index = world.leaves.z + local;
+        JointState runtime = jph_joint_load_state(index);
+        runtime.rotor.w = step_params.gravityDt.w;
+        jph_joint_store_state(index, runtime);
+    }
+}
 
 // Only the primitive geometry uses this local pose. Body state, principal
 // inertia and contact anchors remain in the original body COM frame.
@@ -194,6 +270,8 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
         return;
     if (!jph_layers_collide(shape_a, shape_b))
         return;
+    if (jph_joint_suppresses_pair(world, a, b))
+        return;
     patch.leaves.z = sensor ? PatchSensor : 0u;
     contact_patches[patch_index] = patch;
     Aabb ba = bounds[leaf_a];
@@ -338,6 +416,7 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
     if (world_index >= step_params.counts.y)
         return;
     WorldRange world = worlds[world_index];
+    jph_step_joints(world, 1u);
     // One lane owns a whole small world, so contacts sharing a dynamic body
     // never race. This dispatch is ONE PGS iteration; the engine repeats it.
     // Preparation proves body count <= MaxBodiesPerWorld (currently 32).
@@ -483,6 +562,7 @@ void solve_position(uint3 tid : SV_DispatchThreadID)
     if (world_index >= step_params.counts.y)
         return;
     WorldRange world = worlds[world_index];
+    jph_step_joints(world, 2u);
     // One bounded position iteration, at the same ownership boundary as PGS.
     uint contact_count = world.bodies.w * MaxContactPointsPerPair;
     uint first_contact = world.bodies.z * MaxContactPointsPerPair;
