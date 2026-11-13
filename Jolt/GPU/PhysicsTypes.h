@@ -31,6 +31,7 @@ struct alignas(16) UInt4 { std::uint32_t x, y, z, w; };
 
 JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
+JPH_GPU_CONSTANT(ShapeCapsule, 2);
 JPH_GPU_CONSTANT(ShapeSensor, 1);
 JPH_GPU_CONSTANT(InvalidGeometryPayload, 0xffffffffu);
 JPH_GPU_CONSTANT(PatchActive, 1);
@@ -109,6 +110,7 @@ struct JPH_GPU_ALIGN ShapeModel
     // Shape type, owning body slot, root SubShapeID prefix, ShapeSensor flags.
     JPH_GPU_UINT4 meta;
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
+    // Capsule: (0, half cylinder height, 0, radius), with the core along local Y.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
     // Primitive center in the body COM frame, xyz; w is zero padding. A collider

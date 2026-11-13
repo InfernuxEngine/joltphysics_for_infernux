@@ -802,6 +802,439 @@ JphBoxManifold jph_box_box(float3 centerA, float4 rotationA, float4 geometryA,
     return manifold;
 }
 
+// Capsule geometry is a finite Y-axis segment plus its actual spherical radius.
+// The helpers below use pair-relative, scaled coordinates; no sampling, angular
+// parallel threshold or enlarged sharp-box approximation decides a contact.
+float jph_capsule_max_abs(float3 value)
+{
+    return max(abs(value.x), max(abs(value.y), abs(value.z)));
+}
+
+float jph_capsule_length(float3 value)
+{
+    float scale = jph_capsule_max_abs(value);
+    return scale > 0.0f ? scale * length(value / scale) : 0.0f;
+}
+
+float3 jph_capsule_unit(float3 value)
+{
+    float3 scaled = value / jph_capsule_max_abs(value);
+    return scaled / length(scaled);
+}
+
+void jph_capsule_segment_closest(float3 a0, float3 a1, float3 b0, float3 b1,
+                                 out float3 pa, out float3 pb)
+{
+    float3 da = a1 - a0;
+    float3 db = b1 - b0;
+    float scale_a = jph_capsule_max_abs(da);
+    float scale_b = jph_capsule_max_abs(db);
+    float3 ua = scale_a > 0.0f ? da / scale_a : float3(0.0f);
+    float3 ub = scale_b > 0.0f ? db / scale_b : float3(0.0f);
+    float aa = dot(ua, ua);
+    float bb = dot(ub, ub);
+    float3 delta = a0 - b0;
+    float s = 0.0f;
+    float t = 0.0f;
+    if (scale_a == 0.0f)
+    {
+        if (scale_b > 0.0f)
+            t = clamp(dot(ub, delta) / bb, 0.0f, scale_b);
+    }
+    else if (scale_b == 0.0f)
+        s = clamp(-dot(ua, delta) / aa, 0.0f, scale_a);
+    else
+    {
+        float ab = dot(ua, ub);
+        float ad = dot(ua, delta);
+        float bd = dot(ub, delta);
+        float3 perpendicular = cross(ua, ub);
+        float cross_scale = jph_capsule_max_abs(perpendicular);
+        if (cross_scale > 0.0f)
+        {
+            float3 scaled_cross = perpendicular / cross_scale;
+            // Dividing out the nonzero cross scale before squaring retains
+            // long, thin, nearly parallel segments that actually intersect.
+            s = clamp(dot(cross(ub, delta), scaled_cross) /
+                      (cross_scale * dot(scaled_cross, scaled_cross)), 0.0f, scale_a);
+        }
+        t = (ab * s + bd) / bb;
+        if (t < 0.0f)
+        {
+            t = 0.0f;
+            s = clamp(-ad / aa, 0.0f, scale_a);
+        }
+        else if (t > scale_b)
+        {
+            t = scale_b;
+            s = clamp((ab * t - ad) / aa, 0.0f, scale_a);
+        }
+    }
+    pa = a0 + s * ua;
+    pb = b0 + t * ub;
+}
+
+bool jph_capsule_clip_parameter(float constant, float slope, inout float low, inout float high)
+{
+    if (slope > 0.0f)
+        low = max(low, -constant / slope);
+    else if (slope < 0.0f)
+        high = min(high, -constant / slope);
+    else if (constant < 0.0f)
+        return false;
+    return low <= high;
+}
+
+bool jph_capsule_core_box_intersects(float3 a, float3 b, float3 extent)
+{
+    float low = 0.0f;
+    float high = 1.0f;
+    float3 direction = b - a;
+    for (uint axis = 0u; axis < 3u; ++axis)
+        if (!jph_capsule_clip_parameter(extent[axis] + a[axis], direction[axis], low, high) ||
+            !jph_capsule_clip_parameter(extent[axis] - a[axis], -direction[axis], low, high))
+            return false;
+    return true;
+}
+
+void jph_capsule_segment_box_closest(float3 a, float3 b, float3 extent,
+                                     out float3 p, out float3 q)
+{
+    float3 direction = b - a;
+    float breaks[8];
+    breaks[0] = 0.0f;
+    breaks[1] = 1.0f;
+    uint count = 2u;
+    for (uint axis = 0u; axis < 3u; ++axis)
+        if (direction[axis] != 0.0f)
+            for (uint side = 0u; side < 2u; ++side)
+            {
+                float plane = side == 0u ? -extent[axis] : extent[axis];
+                float t = (plane - a[axis]) / direction[axis];
+                if (t > 0.0f && t < 1.0f)
+                    breaks[count++] = t;
+            }
+    for (uint index = 1u; index < count; ++index)
+    {
+        float value = breaks[index];
+        uint position = index;
+        for (uint move = 0u; move < 7u && position > 0u; ++move)
+        {
+            if (breaks[position - 1u] <= value)
+                break;
+            breaks[position] = breaks[position - 1u];
+            --position;
+        }
+        breaks[position] = value;
+    }
+    p = a;
+    q = clamp(a, -extent, extent);
+    float best = jph_capsule_length(p - q);
+    float3 end_q = clamp(b, -extent, extent);
+    float end_distance = jph_capsule_length(b - end_q);
+    if (end_distance < best)
+    {
+        p = b;
+        q = end_q;
+        best = end_distance;
+    }
+    // Distance squared is quadratic on each fixed outside-axis interval.
+    // At most six slab crossings produce seven nonempty intervals.
+    for (uint interval = 0u; interval + 1u < count; ++interval)
+    {
+        float start = breaks[interval];
+        float width = breaks[interval + 1u] - start;
+        if (width <= 0.0f)
+            continue;
+        float3 middle = a + (start + 0.5f * width) * direction;
+        float3 at_start = a + start * direction;
+        float quadratic = 0.0f;
+        float linear = 0.0f;
+        for (uint axis = 0u; axis < 3u; ++axis)
+        {
+            float side = middle[axis] < -extent[axis] ? -1.0f :
+                         middle[axis] > extent[axis] ? 1.0f : 0.0f;
+            if (side == 0.0f)
+                continue;
+            quadratic += direction[axis] * direction[axis];
+            linear += (at_start[axis] - side * extent[axis]) * direction[axis];
+        }
+        float offset = quadratic > 0.0f ? clamp(-linear / quadratic, 0.0f, width) : 0.0f;
+        float3 candidate = at_start + offset * direction;
+        float3 closest = clamp(candidate, -extent, extent);
+        float distance = jph_capsule_length(candidate - closest);
+        if (distance < best)
+        {
+            best = distance;
+            p = candidate;
+            q = closest;
+        }
+    }
+}
+
+void jph_capsule_core_box_mtd(float3 center, float3 axis, float half_height, float3 extent,
+                             out float3 normal, out float depth, out uint feature)
+{
+    depth = 3.402823466e+38f;
+    normal = float3(1.0f, 0.0f, 0.0f);
+    feature = 0u;
+    // The box-minus-segment zonotope has four generators. Their pairwise
+    // cross products give exactly these six facet-normal classes. For an
+    // intersecting core its nearest facet slack is the true exit distance.
+    for (uint candidate = 0u; candidate < 6u; ++candidate)
+    {
+        float3 basis = float3(0.0f);
+        basis[candidate % 3u] = 1.0f;
+        float3 n = candidate < 3u ? basis : cross(axis, basis);
+        if (jph_capsule_max_abs(n) == 0.0f)
+            continue;
+        n = jph_capsule_unit(n);
+        float projection = dot(center, n);
+        float slack = half_height * abs(dot(axis, n)) + dot(extent, abs(n)) - abs(projection);
+        if (slack < depth)
+        {
+            depth = slack;
+            normal = projection <= 0.0f ? n : -n;
+            feature = candidate;
+        }
+    }
+}
+
+JphBoxManifold jph_capsule_capsule(float3 centerA, float4 rotationA, float halfA, float radiusA,
+                                  float3 centerB, float4 rotationB, float halfB, float radiusB,
+                                  float speculative_distance)
+{
+    float3 relative = centerB - centerA;
+    float scale = max(jph_capsule_max_abs(relative), max(max(halfA, halfB), max(radiusA, radiusB)));
+    float3 center = relative / scale;
+    float3 axisA = jph_rotate(rotationA, float3(0.0f, 1.0f, 0.0f));
+    float3 axisB = jph_rotate(rotationB, float3(0.0f, 1.0f, 0.0f));
+    float ha = halfA / scale;
+    float hb = halfB / scale;
+    float ra = radiusA / scale;
+    float rb = radiusB / scale;
+    float3 p, q;
+    jph_capsule_segment_closest(-ha * axisA, ha * axisA, center - hb * axisB, center + hb * axisB, p, q);
+    float3 delta = q - p;
+    float distance = jph_capsule_length(delta);
+    float3 normal;
+    float3 axis_cross = cross(axisA, axisB);
+    bool parallel = jph_capsule_max_abs(axis_cross) == 0.0f;
+    if (distance > 0.0f)
+        normal = jph_capsule_unit(delta);
+    else if (halfA > 0.0f && halfB > 0.0f && !parallel)
+        normal = jph_capsule_unit(axis_cross);
+    else
+    {
+        float3 radial = halfA > 0.0f ? jph_rotate(rotationA, float3(1.0f, 0.0f, 0.0f)) :
+                        halfB > 0.0f ? jph_rotate(rotationB, float3(1.0f, 0.0f, 0.0f)) :
+                        float3(1.0f, 0.0f, 0.0f);
+        normal = jph_capsule_unit(radial);
+    }
+    JphBoxManifold result;
+    result.normal = normal;
+    result.penetration = (ra + rb - distance) * scale;
+    result.count = 0u;
+    if (result.penetration < -speculative_distance)
+        return result;
+    result.count = 1u;
+    result.points[0].pointA = centerA + (p + ra * normal) * scale;
+    result.points[0].pointB = centerA + (q - rb * normal) * scale;
+    result.points[0].depth = result.penetration;
+    result.points[0].feature = 2048u;
+    if (halfA > 0.0f && halfB > 0.0f && parallel)
+    {
+        float aa = dot(axisA, axisA);
+        float axial_center = dot(center, axisA) / aa;
+        float axial_scale = dot(axisB, axisA) / aa;
+        float low = max(-ha, axial_center - hb * abs(axial_scale));
+        float high = min(ha, axial_center + hb * abs(axial_scale));
+        if (low < high)
+        {
+            result.count = 2u;
+            for (uint point = 0u; point < 2u; ++point)
+            {
+                float t = point == 0u ? low : high;
+                float3 a = t * axisA;
+                float3 b = center + ((t - axial_center) / axial_scale) * axisB;
+                result.points[point].pointA = centerA + (a + ra * normal) * scale;
+                result.points[point].pointB = centerA + (b - rb * normal) * scale;
+                result.points[point].depth = dot(a - b, normal) * scale + radiusA + radiusB;
+                result.points[point].feature = 2049u + point;
+            }
+        }
+    }
+    return result;
+}
+
+JphBoxManifold jph_capsule_sphere(float3 center, float4 rotation, float half_height, float radius,
+                                 float3 sphere_center, float sphere_radius, float speculative_distance)
+{
+    return jph_capsule_capsule(center, rotation, half_height, radius,
+                               sphere_center, float4(0.0f, 0.0f, 0.0f, 1.0f), 0.0f, sphere_radius,
+                               speculative_distance);
+}
+
+JphBoxManifold jph_capsule_box(float3 capsule_center, float4 capsule_rotation, float half_height, float radius,
+                              float3 box_center, float4 box_rotation, float4 box_geometry,
+                              float speculative_distance)
+{
+    float3 local_center = jph_inverse_rotate(box_rotation, capsule_center - box_center);
+    float3 axis = jph_inverse_rotate(box_rotation, jph_rotate(capsule_rotation, float3(0.0f, 1.0f, 0.0f)));
+    float3 core = max(box_geometry.xyz - box_geometry.w, float3(0.0f));
+    float scale = max(jph_capsule_max_abs(local_center),
+                      max(jph_capsule_max_abs(core), max(half_height, max(radius, box_geometry.w))));
+    float3 center = local_center / scale;
+    float3 extent = core / scale;
+    float h = half_height / scale;
+    float r = radius / scale;
+    float box_radius = box_geometry.w / scale;
+    float spec = speculative_distance / scale;
+    float3 a = center - h * axis;
+    float3 b = center + h * axis;
+    float3 p, q, normal;
+    float penetration;
+    uint feature = 0u;
+    jph_capsule_segment_box_closest(a, b, extent, p, q);
+    float core_distance = jph_capsule_length(q - p);
+    // Coincident closest witnesses also establish intersection. At an exact
+    // corner touch the separately rounded slab parameters may straddle a ULP;
+    // neither a true overlap nor coincident witnesses define a distance normal.
+    if (jph_capsule_core_box_intersects(a, b, extent) || core_distance == 0.0f)
+    {
+        float core_depth;
+        jph_capsule_core_box_mtd(center, axis, h, extent, normal, core_depth, feature);
+        // Closest points in the intersecting core would coincide and lose the
+        // penetration. Retreat to tangency, recover true support witnesses,
+        // then restore only the capsule segment's displacement.
+        jph_capsule_segment_box_closest(a - normal * core_depth, b - normal * core_depth, extent, p, q);
+        p += normal * core_depth;
+        penetration = core_depth + r + box_radius;
+    }
+    else
+    {
+        float3 delta = q - p;
+        normal = jph_capsule_unit(delta);
+        penetration = r + box_radius - core_distance;
+        uint outside = 0u;
+        for (uint coordinate = 0u; coordinate < 3u; ++coordinate)
+            if (p[coordinate] < -extent[coordinate] || p[coordinate] > extent[coordinate])
+                outside |= 1u << coordinate;
+        feature = 8u + outside;
+    }
+    // AABox::GetSupportingFace chooses the most aligned actual face. A
+    // closest witness rounded just beyond an edge must not turn a near-face
+    // contact into an edge-only manifold. Projection and finite core-face
+    // clipping below still require every additional witness to lie on both
+    // actual surfaces; this selection cannot create a primary hit.
+    uint face_axis = 0u;
+    if (abs(normal.y) > abs(normal.x))
+        face_axis = 1u;
+    if (abs(normal.z) > abs(normal[face_axis]))
+        face_axis = 2u;
+    JphBoxManifold result;
+    result.normal = jph_rotate(box_rotation, normal);
+    result.penetration = penetration * scale;
+    result.count = 0u;
+    if (result.penetration < -speculative_distance)
+        return result;
+    JphBoxPoint candidates[3];
+    candidates[0].pointA = p + r * normal;
+    candidates[0].pointB = q - box_radius * normal;
+    candidates[0].depth = dot(candidates[0].pointA - candidates[0].pointB, normal);
+    candidates[0].feature = 2080u + feature;
+    uint count = 1u;
+    float axial_projection = dot(axis, normal);
+    float3 radial = normal - axis * (axial_projection / dot(axis, axis));
+    // CapsuleShape::GetSupportingFace uses .02m projected endpoint slop,
+    // not a fixed angle. Project the radius into the true cylindrical plane.
+    if (jph_capsule_max_abs(radial) > 0.0f &&
+        2.0f * half_height * abs(axial_projection) < 0.02f)
+    {
+        float3 side = center + r * jph_capsule_unit(radial);
+        float3 face_normal = float3(0.0f);
+        face_normal[face_axis] = normal[face_axis] > 0.0f ? -1.0f : 1.0f;
+        float3 plane = face_normal * (extent[face_axis] + box_radius);
+        float denominator = dot(face_normal, normal);
+        float t0 = dot(plane - side, face_normal) / denominator;
+        float t1 = -dot(axis, face_normal) / denominator;
+        float3 projected = side + t0 * normal;
+        float3 projected_axis = axis + t1 * normal;
+        float low = -h;
+        float high = h;
+        bool valid = true;
+        for (uint coordinate = 0u; coordinate < 3u; ++coordinate)
+            if (coordinate != face_axis)
+                valid = valid &&
+                    jph_capsule_clip_parameter(extent[coordinate] + projected[coordinate], projected_axis[coordinate], low, high) &&
+                    jph_capsule_clip_parameter(extent[coordinate] - projected[coordinate], -projected_axis[coordinate], low, high);
+        valid = valid && jph_capsule_clip_parameter(spec - t0, -t1, low, high);
+        if (valid)
+            for (uint point = 0u; point < 2u; ++point)
+            {
+                float s = point == 0u ? low : high;
+                candidates[count].pointA = side + s * axis;
+                candidates[count].pointB = projected + s * projected_axis;
+                candidates[count].depth = -(t0 + s * t1);
+                candidates[count].feature = 2112u + face_axis * 2u + point;
+                ++count;
+            }
+    }
+    // Keep the exact primary among at most three candidates. Equal-depth side
+    // contacts retain the two extreme support points; a tilted cap's deeper
+    // primary cannot be replaced by a shallower approximate supporting line.
+    float3 patch_center = float3(0.0f);
+    for (uint point = 0u; point < count; ++point)
+        patch_center += 0.5f * (candidates[point].pointA + candidates[point].pointB);
+    patch_center /= float(count);
+    // Tolerances belong to the contact, not a distant box extent or the full
+    // capsule length. A million-unit segment on a small platform still has a
+    // small contact patch and must retain its distinct support endpoints.
+    float depth_scale = max(max(r, box_radius), abs(penetration));
+    float depth_tolerance = 8.0f * 1.192092896e-7f * depth_scale;
+    float point_scale = max(r, box_radius);
+    uint first = 0u;
+    float first_distance = -1.0f;
+    for (uint point = 0u; point < count; ++point)
+    {
+        float3 delta = 0.5f * (candidates[point].pointA + candidates[point].pointB) - patch_center;
+        point_scale = max(point_scale, jph_capsule_max_abs(delta));
+        delta -= normal * dot(delta, normal);
+        float distance = dot(delta, delta);
+        if (candidates[point].depth > candidates[first].depth + depth_tolerance ||
+            (abs(candidates[point].depth - candidates[first].depth) <= depth_tolerance && distance > first_distance))
+        {
+            first = point;
+            first_distance = distance;
+        }
+    }
+    uint second = first;
+    float longest = 0.0f;
+    float3 first_midpoint = 0.5f * (candidates[first].pointA + candidates[first].pointB);
+    for (uint point = 0u; point < count; ++point)
+    {
+        float3 delta = 0.5f * (candidates[point].pointA + candidates[point].pointB) - first_midpoint;
+        delta -= normal * dot(delta, normal);
+        float distance = dot(delta, delta);
+        if (distance > longest)
+        {
+            longest = distance;
+            second = point;
+        }
+    }
+    float point_tolerance = 32.0f * 1.192092896e-7f * point_scale;
+    result.count = longest > point_tolerance * point_tolerance ? 2u : 1u;
+    for (uint point = 0u; point < result.count; ++point)
+    {
+        JphBoxPoint contact = candidates[point == 0u ? first : second];
+        contact.pointA = box_center + jph_rotate(box_rotation, contact.pointA * scale);
+        contact.pointB = box_center + jph_rotate(box_rotation, contact.pointB * scale);
+        contact.depth *= scale;
+        result.points[point] = contact;
+    }
+    return result;
+}
+
 float jph_combine_material(float value_a, uint mode_a, float value_b, uint mode_b)
 {
     // The immutable model boundary validates the four supported modes.

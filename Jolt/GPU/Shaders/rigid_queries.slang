@@ -23,6 +23,25 @@ float3 query_box_face_normal(float3 point, float3 half_extent)
     return normal;
 }
 
+float query_entering_distance(float b, float a, float root, float c, float scale)
+{
+    // The same quadratic has two conditioned forms. The projection minus
+    // chord preserves distant hits; c/q preserves a small near-surface gap.
+    return root <= -0.5f * b ? (-b / a) * scale - (root / a) * scale
+                             : (c / (-b + root)) * scale;
+}
+
+float query_squared_radius_difference(float3 point, float radius, float scale)
+{
+    uint axis = abs(point.y) > abs(point.x) ? 1u : 0u;
+    if (abs(point.z) > abs(point[axis]))
+        axis = 2u;
+    float coordinate = abs(point[axis]);
+    float3 other = point / scale;
+    other[axis] = 0.0f;
+    return ((coordinate - radius) / scale) * (coordinate / scale + radius / scale) + dot(other, other);
+}
+
 bool query_sphere(float3 origin, float3 direction, float radius, float maximum,
                   out float distance, out float3 normal)
 {
@@ -32,23 +51,108 @@ bool query_sphere(float3 origin, float3 direction, float radius, float maximum,
     float scale = max(max(abs(origin.x), max(abs(origin.y), abs(origin.z))), radius);
     float3 scaled = origin / scale;
     float scaled_radius = radius / scale;
-    float c = dot(scaled, scaled) - scaled_radius * scaled_radius;
+    float c = query_squared_radius_difference(origin, radius, scale);
     if (c > 0.0f)
     {
         float b = dot(scaled, direction);
-        float discriminant = b * b - dot(direction, direction) * c;
+        float a = dot(direction, direction);
+        float3 perpendicular = scaled - direction * (b / a);
+        float discriminant = a * (scaled_radius * scaled_radius - dot(perpendicular, perpendicular));
         if (b >= 0.0f || discriminant < 0.0f)
             return false;
-        // Stable entering root: c / (-b + sqrt(b*b-a*c)).
-        distance = (c / (-b + sqrt(discriminant))) * scale;
+        float root = sqrt(discriminant);
+        distance = query_entering_distance(b, a, root, c, scale);
         if (distance > maximum)
             return false;
+        // Use the small entry residual, not origin + distance*direction:
+        // distant origins can erase the entire radius in that subtraction.
+        float3 entry = perpendicular - direction * (root / a);
+        float normal_scale = max(abs(entry.x), max(abs(entry.y), abs(entry.z)));
+        normal = normal_scale > 0.0f ? normalize(entry / normal_scale) : -normalize(direction);
+        return true;
     }
     float3 point = origin + direction * distance;
     float point_scale = max(abs(point.x), max(abs(point.y), abs(point.z)));
     if (point_scale > 0.0f)
         normal = normalize(point / point_scale);
     return true;
+}
+
+bool query_capsule(float3 origin, float3 direction, float half_height, float radius, float maximum,
+                   out float distance, out float3 normal)
+{
+    float3 core = float3(0.0f, clamp(origin.y, -half_height, half_height), 0.0f);
+    float3 radial = origin - core;
+    float radial_scale = max(max(abs(radial.x), max(abs(radial.y), abs(radial.z))), radius);
+    distance = 0.0f;
+    normal = float3(1.0f, 0.0f, 0.0f);
+    if (query_squared_radius_difference(radial, radius, radial_scale) <= 0.0f)
+    {
+        float normal_scale = max(abs(radial.x), max(abs(radial.y), abs(radial.z)));
+        if (normal_scale > 0.0f)
+            normal = normalize(radial / normal_scale);
+        return true;
+    }
+
+    bool found = false;
+    float closest = maximum;
+    // A capsule is the union of its finite cylinder and endpoint spheres.
+    // Starting outside that union, its first entering component is the true
+    // surface; internal sphere hemispheres cannot become an earlier hit.
+    for (uint end = 0u; end < 2u; ++end)
+    {
+        float center_y = end == 0u ? -half_height : half_height;
+        float candidate;
+        float3 candidate_normal;
+        if (query_sphere(origin - float3(0.0f, center_y, 0.0f), direction, radius,
+                         closest, candidate, candidate_normal))
+        {
+            closest = candidate;
+            normal = candidate_normal;
+            found = true;
+        }
+    }
+
+    float2 planar_origin = origin.xz;
+    float2 planar_direction = direction.xz;
+    float velocity_scale = max(abs(planar_direction.x), abs(planar_direction.y));
+    if (velocity_scale > 0.0f)
+    {
+        // Normalize direction and radial coordinates separately so a nearly
+        // axial ray does not disappear when its squared planar speed underflows.
+        float position_scale = max(max(abs(planar_origin.x), abs(planar_origin.y)), radius);
+        float2 offset = planar_origin / position_scale;
+        float2 velocity = planar_direction / velocity_scale;
+        float r = radius / position_scale;
+        float a = dot(velocity, velocity);
+        float b = dot(offset, velocity);
+        uint axis = abs(planar_origin.y) > abs(planar_origin.x) ? 1u : 0u;
+        float coordinate = abs(planar_origin[axis]);
+        float other = offset[1u - axis];
+        float c = ((coordinate - radius) / position_scale) * (coordinate / position_scale + r) + other * other;
+        if (c > 0.0f && b < 0.0f)
+        {
+            float2 perpendicular = offset - velocity * (b / a);
+            float discriminant = a * (r * r - dot(perpendicular, perpendicular));
+            if (discriminant >= 0.0f)
+            {
+                float root = sqrt(discriminant);
+                float candidate = query_entering_distance(b, a, root, c, position_scale) / velocity_scale;
+                float y = origin.y + direction.y * candidate;
+                if (candidate <= closest && y >= -half_height && y <= half_height)
+                {
+                    float2 surface = perpendicular - velocity * (root / a);
+                    float surface_scale = max(abs(surface.x), abs(surface.y));
+                    float2 outward = surface_scale > 0.0f ? surface / surface_scale : -velocity;
+                    normal = normalize(float3(outward.x, 0.0f, outward.y));
+                    closest = candidate;
+                    found = true;
+                }
+            }
+        }
+    }
+    distance = closest;
+    return found;
 }
 
 bool query_rounded_box(float3 origin, float3 direction, float4 geometry, float maximum,
@@ -208,6 +312,9 @@ void raycast_closest(uint3 tid : SV_DispatchThreadID)
                 found = query_sphere(local_origin, local_direction, shape.geometry.w, closest, distance, normal);
             else if (shape.meta.x == ShapeBox)
                 found = query_rounded_box(local_origin, local_direction, shape.geometry, closest, distance, normal);
+            else if (shape.meta.x == ShapeCapsule)
+                found = query_capsule(local_origin, local_direction, shape.geometry.y, shape.geometry.w,
+                                      closest, distance, normal);
             else
                 continue; // Only admitted geometry has a query implementation.
             if (found && (hit.meta.y == 0u || distance < closest))

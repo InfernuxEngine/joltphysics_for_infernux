@@ -135,6 +135,8 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
     float3 extent;
     if (shape.meta.x == ShapeSphere)
         extent = float3(geometry.w);
+    else if (shape.meta.x == ShapeCapsule)
+        extent = abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y + geometry.w;
     else
         extent = abs(jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f))) * geometry.x
                + abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y
@@ -208,11 +210,35 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
     float4 qa = jph_leaf_rotation(shape_a, sa);
     float4 qb = jph_leaf_rotation(shape_b, sb);
     float speculative_distance = sensor ? 0.0f : step_params.contact.x;
-    if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox)
+    if ((shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox) ||
+        shape_a.meta.x == ShapeCapsule || shape_b.meta.x == ShapeCapsule)
     {
-        JphBoxManifold manifold = jph_box_box(ca, qa, ga, cb, qb, gb, speculative_distance);
+        JphBoxManifold manifold;
+        bool flip = false;
+        if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox)
+            manifold = jph_box_box(ca, qa, ga, cb, qb, gb, speculative_distance);
+        else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeCapsule)
+            manifold = jph_capsule_capsule(ca, qa, ga.y, ga.w, cb, qb, gb.y, gb.w, speculative_distance);
+        else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeSphere)
+            manifold = jph_capsule_sphere(ca, qa, ga.y, ga.w, cb, gb.w, speculative_distance);
+        else if (shape_a.meta.x == ShapeSphere && shape_b.meta.x == ShapeCapsule)
+        {
+            manifold = jph_capsule_sphere(cb, qb, gb.y, gb.w, ca, ga.w, speculative_distance);
+            flip = true;
+        }
+        else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeBox)
+            manifold = jph_capsule_box(ca, qa, ga.y, ga.w, cb, qb, gb, speculative_distance);
+        else if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeCapsule)
+        {
+            manifold = jph_capsule_box(cb, qb, gb.y, gb.w, ca, qa, ga, speculative_distance);
+            flip = true;
+        }
+        else
+            return; // Unsupported leaf kinds are rejected at author admission.
         if (manifold.count == 0u)
             return;
+        if (flip)
+            manifold.normal = -manifold.normal;
         patch.leaves.z |= (sensor ? 0u : PatchActive) |
                           (manifold.penetration >= 0.0f ? PatchOverlapping : 0u);
         contact_patches[patch_index] = patch;
@@ -220,6 +246,12 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
             if (point < manifold.count)
             {
                 JphBoxPoint contact = manifold.points[point];
+                if (flip)
+                {
+                    float3 point_a = contact.pointA;
+                    contact.pointA = contact.pointB;
+                    contact.pointB = point_a;
+                }
                 result.meta = uint4(a, b, sensor ? 0u : 1u, contact.feature);
                 result.normalDepth = float4(manifold.normal, contact.depth);
                 result.localAnchorA = float4(jph_inverse_rotate(sa.rotation, contact.pointA - sa.positionCOM.xyz), 0.0f);
@@ -236,11 +268,13 @@ void collide_pairs(uint3 tid : SV_DispatchThreadID)
         jph_sphere_sphere(ca, ga.w, cb, gb.w, normal, penetration, pa, pb);
     else if (shape_a.meta.x == ShapeSphere && shape_b.meta.x == ShapeBox)
         jph_sphere_box(ca, ga.w, cb, qb, gb, normal, penetration, pa, pb, feature);
-    else
+    else if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeSphere)
     {
         jph_sphere_box(cb, gb.w, ca, qa, ga, normal, penetration, pb, pa, feature);
         normal = -normal;
     }
+    else
+        return;
     if (penetration < -speculative_distance)
         return;
     patch.leaves.z |= (sensor ? 0u : PatchActive) | (penetration >= 0.0f ? PatchOverlapping : 0u);
