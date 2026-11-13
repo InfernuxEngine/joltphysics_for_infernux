@@ -5,9 +5,9 @@
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Physics/Collision/ManifoldBetweenTwoFaces.h>
-#include <Jolt/Physics/Constraints/ContactConstraintManager.h>
 #include <Jolt/Geometry/ClipPoly.h>
 #ifdef JPH_DEBUG_RENDERER
+	#include <Jolt/Physics/Constraints/ContactConstraintManager.h>
 	#include <Jolt/Renderer/DebugRenderer.h>
 #endif // JPH_DEBUG_RENDERER
 
