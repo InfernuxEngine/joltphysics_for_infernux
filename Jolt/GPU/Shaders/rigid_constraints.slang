@@ -95,16 +95,35 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
     }
     uint4 header = joint_stream[0].value;
     uint status = 0u;
-    if (header.x != constraint_params.counts.y || header.y != 1u + JointAuthorWords * header.x)
+    if (header.x != constraint_params.counts.y || header.w != 0u ||
+        header.y < 1u + JointDirectoryWords * header.x || header.z < header.y)
     {
         cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
         return;
     }
-    uint author = 1u + JointAuthorWords * j;
+    uint author = 1u + JointDirectoryWords * j;
     uint4 e = joint_stream[author].value;
     uint world = joint_stream[author + 1u].value.z;
-    uint4 state = joint_stream[header.y + JointStateWords * j].value;
-    if (state.y != JointStatusSuccess || e.z > JointSwingTwist) status |= ConstraintBadJoint;
+    uint4 layout = joint_stream[author + 2u].value;
+    uint author_words = 0u, state_words = 0u;
+    switch (e.z)
+    {
+    case JointFixed: author_words = JointFixedAuthorWords; state_words = JointFixedStateWords; break;
+    case JointHinge: author_words = JointHingeAuthorWords; state_words = JointHingeStateWords; break;
+    case JointSlider: author_words = JointSliderAuthorWords; state_words = JointSliderStateWords; break;
+    case JointDistance: author_words = JointDistanceAuthorWords; state_words = JointDistanceStateWords; break;
+    case JointSwingTwist: author_words = JointSwingAuthorWords; state_words = JointSwingStateWords; break;
+    }
+    if (author_words == 0u || state_words == 0u || any(layout.zw != uint2(0u))
+        || layout.x < 1u + JointDirectoryWords * header.x || layout.x > header.y
+        || author_words > header.y - layout.x || layout.y < header.y || layout.y > header.z
+        || state_words > header.z - layout.y)
+    {
+        cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
+        return;
+    }
+    uint4 state = joint_stream[layout.y].value;
+    if (state.y != JointStatusSuccess) status |= ConstraintBadJoint;
     if (world >= constraint_params.counts.w || !cs_body(e.y, world)
         || (e.x != InvalidQueryBodySlot && !cs_body(e.x, world))) status |= ConstraintBadModel;
     uint a = ConstraintInvalid, b = ConstraintInvalid;

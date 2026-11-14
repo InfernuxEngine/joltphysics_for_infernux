@@ -20,7 +20,7 @@ struct JphSwingLimits
     float2 halfSwing;
 };
 
-JphSwingLimits jph_swing_limits(JointAuthor a)
+JphSwingLimits jph_swing_limits(JointSwingAuthor a)
 {
     JphSwingLimits c;
     c.flags = 0u;
@@ -137,7 +137,7 @@ bool jph_swing_ellipse(float2 radius, float2 point, out float2 closest, out floa
     return all(isfinite(closest));
 }
 
-bool jph_swing_clamp(JointAuthor a, JphSwingLimits c,
+bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
     inout float4 swing, inout float4 twist, out uint clamped, out float coneProjectionT)
 {
     clamped = 0u; coneProjectionT = 0.0f;
@@ -258,7 +258,7 @@ bool jph_swing_cone_axis(float4 world1, float4 swing, float4 clamped,
     return true;
 }
 
-float4 jph_swing_orientation(BodyState s1, BodyState s2, JointState state)
+float4 jph_swing_orientation(BodyState s1, BodyState s2, JointSwingState state)
 {
     return jph_quat_mul(jph_joint_conjugate(jph_quat_mul(s1.rotation, state.frame1)),
                         jph_quat_mul(s2.rotation, state.frame2));
@@ -266,7 +266,7 @@ float4 jph_swing_orientation(BodyState s1, BodyState s2, JointState state)
 
 // Both scalar K and apply paths use the shared projected principal inertia.
 float jph_swing_inverse_mass(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float3 axis,
-    inout JointState state)
+    inout JointSwingState state)
 {
     float k = dot(axis, jph_joint_inertia_sum(m1, s1, m2, s2, axis));
     if (k < 0.0f || !isfinite(k)) state.flags.y = JointStatusNumericalFailure;
@@ -274,7 +274,7 @@ float jph_swing_inverse_mass(BodyModel m1, BodyState s1, BodyModel m2, BodyState
 }
 
 float4 jph_swing_limit_setup(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
-    float3 axis, bool active, bool bilateral, inout float lambda, inout JointState state)
+    float3 axis, bool active, bool bilateral, inout float lambda, inout JointSwingState state)
 {
     if (!active || jph_swing_inverse_mass(m1, s1, m2, s2, axis, state) == 0.0f)
     { lambda = 0.0f; return float4(0.0f); }
@@ -283,7 +283,7 @@ float4 jph_swing_limit_setup(BodyModel m1, BodyState s1, BodyModel m2, BodyState
 
 float4 jph_swing_motor_setup(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
     float3 axis, uint mode, float stiffness, float damping, float cap, float friction,
-    float targetVelocity, float error, float dt, inout float lambda, inout JointState state)
+    float targetVelocity, float error, float dt, inout float lambda, inout JointSwingState state)
 {
     if ((mode == 0u && friction == 0.0f) || (mode == 2u && stiffness == 0.0f) ||
         (mode == 3u && stiffness == 0.0f && damping == 0.0f))
@@ -301,7 +301,7 @@ float4 jph_swing_motor_setup(BodyModel m1, BodyState s1, BodyModel m2, BodyState
     return setup;
 }
 
-void jph_swing_setup(JointAuthor a, inout JointState state,
+void jph_swing_setup(JointSwingAuthor a, inout JointSwingState state,
     BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
 {
     JphSwingLimits c = jph_swing_limits(a);
@@ -387,7 +387,7 @@ void jph_swing_setup(JointAuthor a, inout JointState state,
     state.angularMotorImpulse = float4(mx,my,mz,0.0f);
 }
 
-void jph_swing_warm(JointAuthor a, JointState state,
+void jph_swing_warm(JointSwingAuthor a, JointSwingState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
 {
     float4 world2 = jph_quat_mul(s2.rotation,state.frame2);
@@ -413,7 +413,7 @@ void jph_swing_motor_velocity(BodyModel m1, inout BodyState s1, BodyModel m2, in
 }
 
 void jph_swing_limit_velocity(BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
-    float4 axis, inout float total, inout JointState state)
+    float4 axis, inout float total, inout JointSwingState state)
 {
     if (axis.w == 0.0f) return;
     float k = jph_swing_inverse_mass(m1,s1,m2,s2,axis.xyz,state);
@@ -424,7 +424,7 @@ void jph_swing_limit_velocity(BodyModel m1, inout BodyState s1, BodyModel m2, in
     total = next;
 }
 
-void jph_swing_velocity(JointAuthor a, inout JointState state,
+void jph_swing_velocity(JointSwingAuthor a, inout JointSwingState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
 {
     float4 world2 = jph_quat_mul(s2.rotation,state.frame2);
@@ -441,12 +441,12 @@ void jph_swing_velocity(JointAuthor a, inout JointState state,
     float3 r1,r2;
     jph_joint_arms(a,state,s1,s2,r1,r2);
     float3 point = jph_joint_solve_point(m1,s1,r1,m2,s2,r2,
-        jph_point_velocity(m1,s1,r1)-jph_point_velocity(m2,s2,r2),state);
+        jph_point_velocity(m1,s1,r1)-jph_point_velocity(m2,s2,r2), state.flags.y);
     state.pointImpulse.xyz += point;
     jph_joint_apply_point(m1,s1,r1,m2,s2,r2,point,false);
 }
 
-void jph_swing_position(JointAuthor a, inout JointState state,
+void jph_swing_position(JointSwingAuthor a, inout JointSwingState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
 {
     float4 swing,twist;
@@ -460,14 +460,14 @@ void jph_swing_position(JointAuthor a, inout JointState state,
             jph_joint_conjugate(jph_quat_mul(state.frame1,jph_quat_mul(swing,twist))));
         float4 diff = jph_quat_mul(jph_quat_mul(s2.rotation,inverseInitial),jph_joint_conjugate(s1.rotation));
         float3 error = 2.0f*(diff.w < 0.0f ? -diff.xyz : diff.xyz);
-        float3 angular = jph_joint_solve_rotation(m1,s1,m2,s2,-baumgarte*error,state);
+        float3 angular = jph_joint_solve_rotation(m1,s1,m2,s2,-baumgarte*error, state.flags.y);
         if (state.flags.y != JointStatusSuccess) return;
         jph_joint_apply_angular(m1,s1,m2,s2,angular,true);
     }
     float3 r1,r2;
     jph_joint_arms(a,state,s1,s2,r1,r2);
     float3 u = s2.positionCOM.xyz-s1.positionCOM.xyz+r2-r1;
-    float3 point = jph_joint_solve_point(m1,s1,r1,m2,s2,r2,-baumgarte*u,state);
+    float3 point = jph_joint_solve_point(m1,s1,r1,m2,s2,r2,-baumgarte*u, state.flags.y);
     if (state.flags.y != JointStatusSuccess) return;
     jph_joint_apply_point(m1,s1,r1,m2,s2,r2,point,true);
 }

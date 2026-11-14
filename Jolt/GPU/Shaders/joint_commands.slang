@@ -11,56 +11,26 @@ StructuredBuffer<BodyState> body_states;
 StructuredBuffer<uint> joint_query_rows;
 RWStructuredBuffer<JointReadback> joint_motion;
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void update_joint_state(uint3 tid : SV_DispatchThreadID)
+void jph_update_joint_state(JointFixedAuthor a, inout JointFixedState state, uint flags)
 {
-    uint request = tid.x;
-    if (request >= joint_params.counts.z) return;
-    uint index = joint_query_rows[2u * request];
-    uint flags = joint_query_rows[2u * request + 1u];
-    JointAuthor a = jph_joint_load_author(index);
-    JointState state = jph_joint_load_state(index, a.bodies.z);
-    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
-    {
-        jph_joint_store_state(index, state, a.bodies.z);
-        return;
-    }
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    jph_joint_clear_impulses(state);
+}
+
+void jph_update_joint_state(JointHingeAuthor a, inout JointHingeState state, uint flags)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    // Cache physical rotor speed before clearing its warm reaction. Previous
+    // dt now lives in flags.z and must survive every author/mobility reset.
+    float old_armature = state.rotor.w;
+    float speed = old_armature > 0.0f ? state.rotor.x - state.rotor.y / old_armature : state.rotor.x;
     if ((flags & JointResetMobility) != 0u)
     {
-        // rotor.x contains the warm prediction; remove its old armature
-        // reaction before clearing rotor.y, as in the ordinary author reset.
-        float old_armature = asfloat(state.flags.z);
-        float speed = old_armature > 0.0f ? state.rotor.x - state.rotor.y / old_armature : state.rotor.x;
         jph_joint_clear_impulses(state);
-        if (a.bodies.z == JointHinge)
-        {
-            state.rotor.xz = float2(speed);
-            if (!isfinite(speed)) state.flags.y = JointStatusNumericalFailure;
-        }
-        // Frames, auto length, angle, armature and previous dt are retained.
-        jph_joint_store_state(index, state, a.bodies.z);
+        state.rotor.xz = float2(speed);
+        if (!isfinite(speed)) state.flags.y = JointStatusNumericalFailure;
         return;
     }
-    if (a.bodies.z == JointSwingTwist)
-    {
-        if ((flags & JointResetSwingLimits) != 0u) state.angularLimitImpulse = float4(0.0f);
-        if ((flags & JointResetSwingMotor) != 0u) state.angularMotorImpulse.yz = float2(0.0f);
-        if ((flags & JointResetTwistMotor) != 0u) state.angularMotorImpulse.x = 0.0f;
-        jph_joint_store_state(index, state, a.bodies.z);
-        return;
-    }
-    if (a.bodies.z == JointSlider || a.bodies.z == JointDistance)
-    {
-        jph_joint_clear_impulses(state);
-        state.rotor.xyz = float3(0.0f);
-        jph_joint_store_state(index, state, a.bodies.z);
-        return;
-    }
-    // Reset at the ordered author boundary, before a later body command.
-    // Deferring this until setup would collapse two distinct setter orders.
-    float old_armature = asfloat(state.flags.z);
-    float speed = old_armature > 0.0f ? state.rotor.x - state.rotor.y / old_armature : state.rotor.x;
     if ((flags & JointResetRotor) != 0u)
     {
         BodyState s1 = jph_joint_world_state();
@@ -69,10 +39,87 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
         speed = dot(jph_joint_axis(s1, state), s2.angularVelocity.xyz - s1.angularVelocity.xyz);
     }
     jph_joint_clear_impulses(state);
-    state.rotor.xyz = float3(speed, 0.0f, speed);
-    state.flags.z = asuint(a.passive.z);
+    state.rotor = float4(speed, 0.0f, speed, a.passive.z);
     if (!isfinite(speed)) state.flags.y = JointStatusNumericalFailure;
-    jph_joint_store_state(index, state, a.bodies.z);
+}
+
+void jph_update_joint_state(JointSliderAuthor a, inout JointSliderState state, uint flags)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    jph_joint_clear_impulses(state);
+}
+
+void jph_update_joint_state(JointDistanceAuthor a, inout JointDistanceState state, uint flags)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    jph_joint_clear_impulses(state);
+}
+
+void jph_update_joint_state(JointSwingAuthor a, inout JointSwingState state, uint flags)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if ((flags & JointResetMobility) != 0u)
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+    if ((flags & JointResetSwingLimits) != 0u) state.angularLimitImpulse = float4(0.0f);
+    if ((flags & JointResetSwingMotor) != 0u) state.angularMotorImpulse.yz = float2(0.0f);
+    if ((flags & JointResetTwistMotor) != 0u) state.angularMotorImpulse.x = 0.0f;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void update_joint_state(uint3 tid : SV_DispatchThreadID)
+{
+    uint request = tid.x;
+    if (request >= joint_params.counts.z) return;
+    uint index = joint_query_rows[2u * request];
+    uint flags = joint_query_rows[2u * request + 1u];
+    JointDirectory directory = jph_joint_load_directory(index);
+    switch (directory.bodies.z)
+    {
+    case JointFixed:
+    {
+        JointFixedAuthor author; jph_joint_load_author(directory, author);
+        JointFixedState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointHinge:
+    {
+        JointHingeAuthor author; jph_joint_load_author(directory, author);
+        JointHingeState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointSlider:
+    {
+        JointSliderAuthor author; jph_joint_load_author(directory, author);
+        JointSliderState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointDistance:
+    {
+        JointDistanceAuthor author; jph_joint_load_author(directory, author);
+        JointDistanceState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointSwingTwist:
+    {
+        JointSwingAuthor author; jph_joint_load_author(directory, author);
+        JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    }
 }
 
 [shader("compute")]
@@ -81,28 +128,141 @@ void initialize_joints(uint3 tid : SV_DispatchThreadID)
 {
     uint index = tid.x;
     if (index >= joint_params.counts.x) return;
+    JointDirectory directory = jph_joint_load_directory(index);
     uint old_index = joint_remap[index];
-    uint destination = joint_stream[0].value.y + JointStateWords * index;
     if (old_index != InvalidQueryBodySlot && old_index < joint_params.counts.y)
     {
-        uint source = old_joint_stream[0].value.y + JointStateWords * old_index;
-        // Copy GPU-owned state directly. Both resources are immutable to the
-        // CPU in these ranges; accepted topology decides the identity remap.
-        for (uint word = 0u; word < JointStateWords; ++word)
-            joint_stream[destination + word] = old_joint_stream[source + word];
-        return;
+        uint old_directory = 1u + JointDirectoryWords * old_index;
+        uint4 old_bodies = old_joint_stream[old_directory].value;
+        uint4 old_identity = old_joint_stream[old_directory + 1u].value;
+        uint old_state = old_joint_stream[old_directory + 2u].value.y;
+        if (old_bodies.z == directory.bodies.z && all(old_identity.xy == directory.identity.xy))
+        {
+            uint words = jph_joint_state_words(directory.bodies.z);
+            // Exact kind payload only. Frames/history and the new dt/armature
+            // lanes remain GPU-owned; no unused wide suffix exists anymore.
+            for (uint word = 0u; word < words; ++word)
+                joint_stream[directory.layout.y + word] = old_joint_stream[old_state + word];
+            return;
+        }
     }
-    JointAuthor a = jph_joint_load_author(index);
     BodyState s1 = jph_joint_world_state();
-    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x];
-    JointState state = jph_joint_initialize(a, s1, body_states[a.bodies.y]);
-    if (old_index != InvalidQueryBodySlot)
-        state.flags.y = JointStatusInvalid;
-    jph_joint_store_state(index, state, a.bodies.z);
-    // Initialize the unused suffix once, so remap copies never read undefined data.
-    if (a.bodies.z != JointSwingTwist)
-        for (uint word = 13u; word < JointStateWords; ++word)
-            joint_stream[destination + word].value = uint4(0u);
+    if (directory.bodies.x != InvalidQueryBodySlot) s1 = body_states[directory.bodies.x];
+    BodyState s2 = body_states[directory.bodies.y];
+    switch (directory.bodies.z)
+    {
+    case JointFixed:
+    {
+        JointFixedAuthor author; jph_joint_load_author(directory, author);
+        JointFixedState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointHinge:
+    {
+        JointHingeAuthor author; jph_joint_load_author(directory, author);
+        JointHingeState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointSlider:
+    {
+        JointSliderAuthor author; jph_joint_load_author(directory, author);
+        JointSliderState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointDistance:
+    {
+        JointDistanceAuthor author; jph_joint_load_author(directory, author);
+        JointDistanceState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointSwingTwist:
+    {
+        JointSwingAuthor author; jph_joint_load_author(directory, author);
+        JointSwingState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    }
+}
+
+void jph_read_joint_motion(JointHingeAuthor a, JointHingeState state, inout JointReadback result)
+{
+    if (state.flags.x == 0u) return;
+    result.status.x = state.flags.y;
+    if (state.flags.y != JointStatusSuccess) return;
+    BodyState s1 = jph_joint_world_state();
+    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+    BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+    float coordinate, velocity;
+    coordinate = jph_joint_angle(s1, s2, state);
+    float3 owner_axis = jph_rotate(jph_quat_mul(s2.rotation, state.frame2), float3(0.0f, 0.0f, 1.0f));
+    velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
+    if (isfinite(coordinate) && isfinite(velocity)) result.values.xy = float2(coordinate, velocity);
+    else result.status.x = JointStatusNumericalFailure;
+}
+
+void jph_read_joint_motion(JointSliderAuthor a, JointSliderState state, inout JointReadback result)
+{
+    if (state.flags.x == 0u) return;
+    result.status.x = state.flags.y;
+    if (state.flags.y != JointStatusSuccess) return;
+    BodyState s1 = jph_joint_world_state();
+    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+    BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+    float coordinate, velocity;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    float3 axis, n0, n1;
+    jph_slider_basis(s1, state, axis, n0, n1);
+    coordinate = dot(axis, u);
+    velocity = dot(axis, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
+        + dot(cross(r2, axis), s2.angularVelocity.xyz)
+        - dot(cross(r1 + u, axis), s1.angularVelocity.xyz);
+    if (isfinite(coordinate) && isfinite(velocity)) result.values.xy = float2(coordinate, velocity);
+    else result.status.x = JointStatusNumericalFailure;
+}
+
+void jph_read_joint_motion(JointDistanceAuthor a, JointDistanceState state, inout JointReadback result)
+{
+    if (state.flags.x == 0u) return;
+    result.status.x = state.flags.y;
+    if (state.flags.y != JointStatusSuccess) return;
+    BodyState s1 = jph_joint_world_state();
+    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+    BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+    float coordinate, velocity;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    coordinate = length(u);
+    float3 normal = coordinate > 0.0f ? u / coordinate : state.distanceReference.xyz;
+    velocity = dot(normal, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
+        + dot(cross(r2, normal), s2.angularVelocity.xyz)
+        - dot(cross(r1 + u, normal), s1.angularVelocity.xyz);
+    if (isfinite(coordinate) && isfinite(velocity)) result.values.xy = float2(coordinate, velocity);
+    else result.status.x = JointStatusNumericalFailure;
+}
+
+void jph_read_joint_motion(JointSwingAuthor a, JointSwingState state, inout JointReadback result)
+{
+    if (state.flags.x == 0u) return;
+    result.status.x = state.flags.y;
+    if (state.flags.y != JointStatusSuccess) return;
+    BodyState s1 = jph_joint_world_state();
+    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+    BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+    result.values = jph_swing_orientation(s1, s2, state);
+    if (!all(isfinite(result.values))) result.status.x = JointStatusNumericalFailure;
 }
 
 [shader("compute")]
@@ -117,57 +277,39 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
     uint index = joint_query_rows[row];
     if (index < joint_stream[0].value.x)
     {
-        JointAuthor a = jph_joint_load_author(index);
-        JointState state = jph_joint_load_state(index, a.bodies.z);
-        if (a.bodies.z == joint_params.counts.y && a.bodies.z >= JointHinge && a.bodies.z <= JointSwingTwist && state.flags.x != 0u)
+        JointDirectory directory = jph_joint_load_directory(index);
+        if (directory.bodies.z == joint_params.counts.y)
         {
-            result.status.x = state.flags.y;
-            if (state.flags.y == JointStatusSuccess)
+            switch (directory.bodies.z)
             {
-                BodyState s1 = jph_joint_world_state();
-                if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
-                BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
-                if (a.bodies.z == JointSwingTwist)
-                {
-                    result.values = jph_swing_orientation(s1, s2, state);
-                    if (!all(isfinite(result.values))) result.status.x = JointStatusNumericalFailure;
-                    joint_motion[row] = result;
-                    return;
-                }
-                float coordinate, velocity;
-                if (a.bodies.z == JointDistance)
-                {
-                    float3 r1, r2;
-                    jph_joint_arms(a, state, s1, s2, r1, r2);
-                    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-                    coordinate = length(u);
-                    float3 normal = coordinate > 0.0f ? u / coordinate : state.distanceReference.xyz;
-                    velocity = dot(normal, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
-                        + dot(cross(r2, normal), s2.angularVelocity.xyz)
-                        - dot(cross(r1 + u, normal), s1.angularVelocity.xyz);
-                }
-                else if (a.bodies.z == JointSlider)
-                {
-                    float3 r1, r2;
-                    jph_joint_arms(a, state, s1, s2, r1, r2);
-                    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-                    float3 axis, n0, n1;
-                    jph_slider_basis(s1, state, axis, n0, n1);
-                    coordinate = dot(axis, u);
-                    velocity = dot(axis, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
-                        + dot(cross(r2, axis), s2.angularVelocity.xyz)
-                        - dot(cross(r1 + u, axis), s1.angularVelocity.xyz);
-                }
-                else
-                {
-                    coordinate = jph_joint_angle(s1, s2, state);
-                    float3 owner_axis = jph_rotate(jph_quat_mul(s2.rotation, state.frame2), float3(0.0f, 0.0f, 1.0f));
-                    velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
-                }
-                if (isfinite(coordinate) && isfinite(velocity))
-                    result.values.xy = float2(coordinate, velocity);
-                else
-                    result.status.x = JointStatusNumericalFailure;
+            case JointHinge:
+            {
+                JointHingeAuthor author; jph_joint_load_author(directory, author);
+                JointHingeState runtime; jph_joint_load_state(directory, runtime);
+                jph_read_joint_motion(author, runtime, result);
+                break;
+            }
+            case JointSlider:
+            {
+                JointSliderAuthor author; jph_joint_load_author(directory, author);
+                JointSliderState runtime; jph_joint_load_state(directory, runtime);
+                jph_read_joint_motion(author, runtime, result);
+                break;
+            }
+            case JointDistance:
+            {
+                JointDistanceAuthor author; jph_joint_load_author(directory, author);
+                JointDistanceState runtime; jph_joint_load_state(directory, runtime);
+                jph_read_joint_motion(author, runtime, result);
+                break;
+            }
+            case JointSwingTwist:
+            {
+                JointSwingAuthor author; jph_joint_load_author(directory, author);
+                JointSwingState runtime; jph_joint_load_state(directory, runtime);
+                jph_read_joint_motion(author, runtime, result);
+                break;
+            }
             }
         }
     }
@@ -190,7 +332,7 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
         uint index = joint_params.counts.x + tid.x;
         if (joint_params.counts.w == 0u)
         {
-            uint runtime_word = joint_stream[0].value.y + JointStateWords * index;
+            uint runtime_word = joint_stream[1u + JointDirectoryWords * index + 2u].value.y;
             status = joint_stream[runtime_word].value.y;
             if (status != JointStatusSuccess)
                 first_failure = index;

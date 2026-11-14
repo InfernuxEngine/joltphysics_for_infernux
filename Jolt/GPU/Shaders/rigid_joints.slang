@@ -11,114 +11,189 @@
 
 RWStructuredBuffer<QueryRecordWord> joint_stream;
 
-JointAuthor jph_joint_load_author(uint index)
+// Header: count, author-end word, total words, zero. Each immutable
+// directory is exactly three words; payload extents come from the shared schema.
+JointDirectory jph_joint_load_directory(uint index)
 {
-    uint p = 1u + JointAuthorWords * index;
-    JointAuthor a;
-    a.bodies = joint_stream[p].value;
-    a.identity = joint_stream[p + 1u].value;
-    a.ownerAnchor = asfloat(joint_stream[p + 2u].value);
-    a.ownerAxis = asfloat(joint_stream[p + 3u].value);
-    a.ownerLocalAnchor = asfloat(joint_stream[p + 4u].value);
-    a.rootCOM1 = asfloat(joint_stream[p + 5u].value);
-    a.rootCOM2 = asfloat(joint_stream[p + 6u].value);
-    a.scale1 = asfloat(joint_stream[p + 7u].value);
-    a.scale2 = asfloat(joint_stream[p + 8u].value);
-    a.limits = asfloat(joint_stream[p + 9u].value);
-    a.motor = asfloat(joint_stream[p + 10u].value);
-    a.passive = asfloat(joint_stream[p + 11u].value);
-    a.connectedAnchor = asfloat(joint_stream[p + 12u].value);
-    a.connectedLocalAnchor = asfloat(joint_stream[p + 13u].value);
-    a.linearSpring = asfloat(joint_stream[p + 14u].value);
-    a.angularFrame = float4(0.0f);
-    a.angularLimits = float4(0.0f);
-    a.angularModes = uint4(0u);
-    a.angularSpring = float4(0.0f);
-    a.angularTorque = float4(0.0f);
-    a.angularTarget = float4(0.0f);
-    a.angularVelocity = float4(0.0f);
-    // Old kinds never read the angular author suffix.
-    if (a.bodies.z == JointSwingTwist)
-    {
-        a.angularFrame = asfloat(joint_stream[p + 15u].value);
-        a.angularLimits = asfloat(joint_stream[p + 16u].value);
-        a.angularModes = joint_stream[p + 17u].value;
-        a.angularSpring = asfloat(joint_stream[p + 18u].value);
-        a.angularTorque = asfloat(joint_stream[p + 19u].value);
-        a.angularTarget = asfloat(joint_stream[p + 20u].value);
-        a.angularVelocity = asfloat(joint_stream[p + 21u].value);
-    }
-    return a;
+    uint p = 1u + JointDirectoryWords * index;
+    JointDirectory directory;
+    directory.bodies = joint_stream[p].value;
+    directory.identity = joint_stream[p + 1u].value;
+    directory.layout = joint_stream[p + 2u].value;
+    return directory;
 }
 
-JointState jph_joint_load_state(uint index, uint kind)
+uint jph_joint_state_words(uint kind)
 {
-    uint p = joint_stream[0].value.y + JointStateWords * index;
-    JointState s;
-    s.flags = joint_stream[p].value;
-    s.frame1 = asfloat(joint_stream[p + 1u].value);
-    s.frame2 = asfloat(joint_stream[p + 2u].value);
-    s.anchor1 = asfloat(joint_stream[p + 3u].value);
-    s.anchor2 = asfloat(joint_stream[p + 4u].value);
-    s.collapsed1 = asfloat(joint_stream[p + 5u].value);
-    s.collapsed2 = asfloat(joint_stream[p + 6u].value);
-    s.pointImpulse = asfloat(joint_stream[p + 7u].value);
-    s.angularImpulse = asfloat(joint_stream[p + 8u].value);
-    s.axisImpulse = asfloat(joint_stream[p + 9u].value);
-    s.rotor = asfloat(joint_stream[p + 10u].value);
-    s.setup = asfloat(joint_stream[p + 11u].value);
-    s.distanceReference = asfloat(joint_stream[p + 12u].value);
-    s.angularLimitX = float4(0.0f);
-    s.angularLimitY = float4(0.0f);
-    s.angularLimitZ = float4(0.0f);
-    s.angularLimitImpulse = float4(0.0f);
-    s.angularMotorImpulse = float4(0.0f);
-    s.angularMotorSetupX = float4(0.0f);
-    s.angularMotorSetupY = float4(0.0f);
-    s.angularMotorSetupZ = float4(0.0f);
-    if (kind == JointSwingTwist)
+    switch (kind)
     {
-        s.angularLimitX = asfloat(joint_stream[p + 13u].value);
-        s.angularLimitY = asfloat(joint_stream[p + 14u].value);
-        s.angularLimitZ = asfloat(joint_stream[p + 15u].value);
-        s.angularLimitImpulse = asfloat(joint_stream[p + 16u].value);
-        s.angularMotorImpulse = asfloat(joint_stream[p + 17u].value);
-        s.angularMotorSetupX = asfloat(joint_stream[p + 18u].value);
-        s.angularMotorSetupY = asfloat(joint_stream[p + 19u].value);
-        s.angularMotorSetupZ = asfloat(joint_stream[p + 20u].value);
+    case JointFixed: return JointFixedStateWords;
+    case JointHinge: return JointHingeStateWords;
+    case JointSlider: return JointSliderStateWords;
+    case JointDistance: return JointDistanceStateWords;
+    case JointSwingTwist: return JointSwingStateWords;
+    default: return 0u;
     }
-    return s;
 }
 
-void jph_joint_store_state(uint index, JointState s, uint kind)
+void jph_joint_load_author(JointDirectory directory, out JointFixedAuthor a)
 {
-    // The only stores into this resource are in the runtime suffix.
-    uint p = joint_stream[0].value.y + JointStateWords * index;
-    joint_stream[p].value = s.flags;
-    joint_stream[p + 1u].value = asuint(s.frame1);
-    joint_stream[p + 2u].value = asuint(s.frame2);
-    joint_stream[p + 3u].value = asuint(s.anchor1);
-    joint_stream[p + 4u].value = asuint(s.anchor2);
-    joint_stream[p + 5u].value = asuint(s.collapsed1);
-    joint_stream[p + 6u].value = asuint(s.collapsed2);
-    joint_stream[p + 7u].value = asuint(s.pointImpulse);
-    joint_stream[p + 8u].value = asuint(s.angularImpulse);
-    joint_stream[p + 9u].value = asuint(s.axisImpulse);
-    joint_stream[p + 10u].value = asuint(s.rotor);
-    joint_stream[p + 11u].value = asuint(s.setup);
-    joint_stream[p + 12u].value = asuint(s.distanceReference);
-    // Old kinds never write the angular state suffix during solver iterations.
-    if (kind == JointSwingTwist)
-    {
-        joint_stream[p + 13u].value = asuint(s.angularLimitX);
-        joint_stream[p + 14u].value = asuint(s.angularLimitY);
-        joint_stream[p + 15u].value = asuint(s.angularLimitZ);
-        joint_stream[p + 16u].value = asuint(s.angularLimitImpulse);
-        joint_stream[p + 17u].value = asuint(s.angularMotorImpulse);
-        joint_stream[p + 18u].value = asuint(s.angularMotorSetupX);
-        joint_stream[p + 19u].value = asuint(s.angularMotorSetupY);
-        joint_stream[p + 20u].value = asuint(s.angularMotorSetupZ);
-    }
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_FIXED_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointFixedState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_FIXED_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_store_state(JointDirectory directory, JointFixedState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_FIXED_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
+}
+
+void jph_joint_load_author(JointDirectory directory, out JointHingeAuthor a)
+{
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_HINGE_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointHingeState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_HINGE_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_store_state(JointDirectory directory, JointHingeState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_HINGE_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
+}
+
+void jph_joint_load_author(JointDirectory directory, out JointSliderAuthor a)
+{
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_SLIDER_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointSliderState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_SLIDER_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_store_state(JointDirectory directory, JointSliderState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_SLIDER_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
+}
+
+void jph_joint_load_author(JointDirectory directory, out JointDistanceAuthor a)
+{
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_DISTANCE_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointDistanceState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_DISTANCE_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_store_state(JointDirectory directory, JointDistanceState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_DISTANCE_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
+}
+
+void jph_joint_load_author(JointDirectory directory, out JointSwingAuthor a)
+{
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_SWING_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointSwingState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_SWING_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_store_state(JointDirectory directory, JointSwingState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_SWING_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
 }
 
 float4 jph_joint_conjugate(float4 q) { return float4(-q.xyz, q.w); }
@@ -191,47 +266,206 @@ void jph_joint_unscale(float3 offset, float3 scale, float3 raw,
             collapsed[axis] = offset[axis];
 }
 
-JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
+JointFixedState jph_joint_initialize(JointFixedAuthor a, BodyState s1, BodyState s2)
 {
-    JointState s;
-    s.flags = uint4(1u, JointStatusSuccess, asuint(a.passive.z), 0u);
+    JointFixedState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
     float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
     if (a.bodies.x == InvalidQueryBodySlot)
     {
-        s.anchor1 = a.bodies.z == JointDistance ? a.connectedAnchor : float4(world_anchor, 0.0f);
+        s.anchor1 = float4(world_anchor, 0.0f);
         s.collapsed1 = float4(0.0f);
     }
     else
     {
-        float3 offset = a.bodies.z == JointDistance ? a.connectedAnchor.xyz
-            : jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
-        float3 raw = a.bodies.z == JointDistance ? a.connectedLocalAnchor.xyz : float3(0.0f);
+        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = float3(0.0f);
         jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
     }
     jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
     float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
-    if (a.bodies.z == JointHinge)
+
+    s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
+    s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
+    s.pointImpulse = float4(0.0f);
+    s.angularImpulse = float4(0.0f);
+
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.frame1))
+        && all(isfinite(s.frame2))
+        && all(isfinite(s.pointImpulse))
+        && all(isfinite(s.angularImpulse))))
+        s.flags.y = JointStatusNumericalFailure;
+    return s;
+}
+
+JointHingeState jph_joint_initialize(JointHingeAuthor a, BodyState s1, BodyState s2)
+{
+    JointHingeState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
+    if (a.bodies.x == InvalidQueryBodySlot)
+    {
+        s.anchor1 = float4(world_anchor, 0.0f);
+        s.collapsed1 = float4(0.0f);
+    }
+    else
+    {
+        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = float3(0.0f);
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
+    }
+    jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
+    float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
     {
         float3 z = normalize(jph_rotate(s2.rotation, a.ownerAxis.xyz));
         float3 x = jph_joint_perpendicular(z);
         world_frame = jph_joint_frame(x, cross(z, x), z);
     }
-    if (a.bodies.z == JointSlider)
-    {
-        float3 x = normalize(jph_rotate(s2.rotation, a.ownerAxis.xyz));
-        float3 y = jph_joint_perpendicular(x);
-        world_frame = jph_joint_frame(x, y, cross(x, y));
-    }
-    if (a.bodies.z == JointSwingTwist)
-        world_frame = normalize(jph_quat_mul(s2.rotation, a.angularFrame));
+
     s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
     s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
     s.pointImpulse = float4(0.0f);
     s.angularImpulse = float4(0.0f);
     s.axisImpulse = float4(0.0f);
-    s.rotor = float4(0.0f);
+    s.rotor = float4(0.0f, 0.0f, 0.0f, a.passive.z);
+    s.setup = float4(0.0f);
+
+    {
+        float3 axis = jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
+        s.rotor.x = dot(axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
+    }
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.frame1))
+        && all(isfinite(s.frame2))
+        && all(isfinite(s.pointImpulse))
+        && all(isfinite(s.angularImpulse))
+        && all(isfinite(s.axisImpulse))
+        && all(isfinite(s.rotor))
+        && all(isfinite(s.setup))))
+        s.flags.y = JointStatusNumericalFailure;
+    return s;
+}
+
+JointSliderState jph_joint_initialize(JointSliderAuthor a, BodyState s1, BodyState s2)
+{
+    JointSliderState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
+    if (a.bodies.x == InvalidQueryBodySlot)
+    {
+        s.anchor1 = float4(world_anchor, 0.0f);
+        s.collapsed1 = float4(0.0f);
+    }
+    else
+    {
+        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = float3(0.0f);
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
+    }
+    jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
+    float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    {
+        float3 x = normalize(jph_rotate(s2.rotation, a.ownerAxis.xyz));
+        float3 y = jph_joint_perpendicular(x);
+        world_frame = jph_joint_frame(x, y, cross(x, y));
+    }
+
+    s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
+    s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
+    s.pointImpulse = float4(0.0f);
+    s.angularImpulse = float4(0.0f);
+    s.axisImpulse = float4(0.0f);
+
+    s.setup = float4(0.0f);
+
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.frame1))
+        && all(isfinite(s.frame2))
+        && all(isfinite(s.pointImpulse))
+        && all(isfinite(s.angularImpulse))
+        && all(isfinite(s.axisImpulse))
+        && all(isfinite(s.setup))))
+        s.flags.y = JointStatusNumericalFailure;
+    return s;
+}
+
+JointDistanceState jph_joint_initialize(JointDistanceAuthor a, BodyState s1, BodyState s2)
+{
+    JointDistanceState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
+    if (a.bodies.x == InvalidQueryBodySlot)
+    {
+        s.anchor1 = a.connectedAnchor;
+        s.collapsed1 = float4(0.0f);
+    }
+    else
+    {
+        float3 offset = a.connectedAnchor.xyz;
+        float3 raw = a.connectedLocalAnchor.xyz;
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
+    }
+    jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
+    float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    s.axisImpulse = float4(0.0f);
+
     s.setup = float4(0.0f);
     s.distanceReference = float4(0.0f);
+
+    {
+        float3 connected_point = a.bodies.x == InvalidQueryBodySlot ? a.connectedAnchor.xyz
+            : s1.positionCOM.xyz + jph_rotate(s1.rotation, a.connectedAnchor.xyz - a.rootCOM1.xyz);
+        // Jolt retains +Y until the first positive-length properties calculation.
+        s.distanceReference = float4(0.0f, 1.0f, 0.0f, length(world_anchor - connected_point));
+    }
+
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.axisImpulse))
+        && all(isfinite(s.setup))
+        && all(isfinite(s.distanceReference))))
+        s.flags.y = JointStatusNumericalFailure;
+    return s;
+}
+
+JointSwingState jph_joint_initialize(JointSwingAuthor a, BodyState s1, BodyState s2)
+{
+    JointSwingState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
+    if (a.bodies.x == InvalidQueryBodySlot)
+    {
+        s.anchor1 = float4(world_anchor, 0.0f);
+        s.collapsed1 = float4(0.0f);
+    }
+    else
+    {
+        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = float3(0.0f);
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
+    }
+    jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
+    float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    world_frame = normalize(jph_quat_mul(s2.rotation, a.angularFrame));
+    s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
+    s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
+    s.pointImpulse = float4(0.0f);
+
     s.angularLimitX = float4(0.0f);
     s.angularLimitY = float4(0.0f);
     s.angularLimitZ = float4(0.0f);
@@ -240,38 +474,50 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
     s.angularMotorSetupX = float4(0.0f);
     s.angularMotorSetupY = float4(0.0f);
     s.angularMotorSetupZ = float4(0.0f);
-    if (a.bodies.z == JointDistance)
-    {
-        float3 connected_point = a.bodies.x == InvalidQueryBodySlot ? a.connectedAnchor.xyz
-            : s1.positionCOM.xyz + jph_rotate(s1.rotation, a.connectedAnchor.xyz - a.rootCOM1.xyz);
-        // Jolt retains +Y until the first positive-length properties calculation.
-        s.distanceReference = float4(0.0f, 1.0f, 0.0f, length(world_anchor - connected_point));
-    }
-    if (a.bodies.z == JointHinge)
-    {
-        float3 axis = jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
-        s.rotor.x = dot(axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
-    }
-    if (!all(isfinite(s.anchor1)) || !all(isfinite(s.anchor2)) ||
-        !all(isfinite(s.frame1)) || !all(isfinite(s.frame2)) ||
-        !all(isfinite(s.collapsed1)) || !all(isfinite(s.collapsed2)) || !all(isfinite(s.rotor))
-        || !all(isfinite(s.distanceReference)))
+
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.frame1))
+        && all(isfinite(s.frame2))
+        && all(isfinite(s.pointImpulse))
+        && all(isfinite(s.angularLimitX))
+        && all(isfinite(s.angularLimitY))
+        && all(isfinite(s.angularLimitZ))
+        && all(isfinite(s.angularLimitImpulse))
+        && all(isfinite(s.angularMotorImpulse))
+        && all(isfinite(s.angularMotorSetupX))
+        && all(isfinite(s.angularMotorSetupY))
+        && all(isfinite(s.angularMotorSetupZ))))
         s.flags.y = JointStatusNumericalFailure;
     return s;
 }
 
-float3 jph_joint_axis(BodyState s1, JointState s)
+float3 jph_joint_axis(BodyState s1, JointHingeState s)
 {
     return jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
 }
 
-float4 jph_joint_rotation_error(BodyState s1, BodyState s2, JointState s)
+float4 jph_joint_rotation_error(BodyState s1, BodyState s2, JointFixedState s)
 {
     float4 inverse_initial = jph_quat_mul(s.frame2, jph_joint_conjugate(s.frame1));
     return jph_quat_mul(jph_quat_mul(s2.rotation, inverse_initial), jph_joint_conjugate(s1.rotation));
 }
 
-float jph_joint_angle(BodyState s1, BodyState s2, JointState s)
+float4 jph_joint_rotation_error(BodyState s1, BodyState s2, JointHingeState s)
+{
+    float4 inverse_initial = jph_quat_mul(s.frame2, jph_joint_conjugate(s.frame1));
+    return jph_quat_mul(jph_quat_mul(s2.rotation, inverse_initial), jph_joint_conjugate(s1.rotation));
+}
+
+float4 jph_joint_rotation_error(BodyState s1, BodyState s2, JointSliderState s)
+{
+    float4 inverse_initial = jph_quat_mul(s.frame2, jph_joint_conjugate(s.frame1));
+    return jph_quat_mul(jph_quat_mul(s2.rotation, inverse_initial), jph_joint_conjugate(s1.rotation));
+}
+
+float jph_joint_angle(BodyState s1, BodyState s2, JointHingeState s)
 {
     float4 diff = jph_joint_rotation_error(s1, s2, s);
     // Quat::GetRotationAngle: signed twist, invariant under q -> -q.
@@ -288,7 +534,35 @@ float3 jph_joint_angular_velocity(BodyModel m, BodyState s)
     return jph_nonstatic(m) ? s.angularVelocity.xyz : float3(0.0f);
 }
 
-void jph_joint_arms(JointAuthor a, JointState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+void jph_joint_arms(JointFixedAuthor a, JointFixedState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+{
+    r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
+        jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
+    r2 = jph_rotate(s2.rotation, s.anchor2.xyz * a.scale2.xyz + s.collapsed2.xyz - a.rootCOM2.xyz);
+}
+
+void jph_joint_arms(JointHingeAuthor a, JointHingeState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+{
+    r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
+        jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
+    r2 = jph_rotate(s2.rotation, s.anchor2.xyz * a.scale2.xyz + s.collapsed2.xyz - a.rootCOM2.xyz);
+}
+
+void jph_joint_arms(JointSliderAuthor a, JointSliderState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+{
+    r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
+        jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
+    r2 = jph_rotate(s2.rotation, s.anchor2.xyz * a.scale2.xyz + s.collapsed2.xyz - a.rootCOM2.xyz);
+}
+
+void jph_joint_arms(JointDistanceAuthor a, JointDistanceState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+{
+    r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
+        jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
+    r2 = jph_rotate(s2.rotation, s.anchor2.xyz * a.scale2.xyz + s.collapsed2.xyz - a.rootCOM2.xyz);
+}
+
+void jph_joint_arms(JointSwingAuthor a, JointSwingState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
 {
     r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
         jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
@@ -367,12 +641,12 @@ JphPsdRange jph_joint_reachable(BodyModel m1, BodyState s1, float3 arm1,
     return jph_psd_finish(factors, dimension);
 }
 
-float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, JphPsdRange reachable, inout JointState state)
+float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, JphPsdRange reachable, inout uint status)
 {
     if (!reachable.valid || reachable.rank < 3u)
     {
         float3 result;
-        if (!jph_psd_solve3(c0, c1, c2, rhs, reachable, result)) state.flags.y = JointStatusNumericalFailure;
+        if (!jph_psd_solve3(c0, c1, c2, rhs, reachable, result)) status = JointStatusNumericalFailure;
         return result;
     }
     // Symmetric diagonal equilibration keeps unrelated units / large inertia
@@ -380,7 +654,7 @@ float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, JphPsdRange
     float3 diagonal = float3(c0.x, c1.y, c2.z);
     if (any(diagonal <= 0.0f) || !all(isfinite(diagonal)))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return float3(0.0f);
     }
     float3 d = rsqrt(diagonal);
@@ -395,28 +669,28 @@ float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, JphPsdRange
     float3 result = d * float3(dot(row0, scaled_rhs), dot(row1, scaled_rhs), dot(row2, scaled_rhs)) / det;
     if (!(det > 0.0f) || !all(isfinite(result)))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return float3(0.0f);
     }
     return result;
 }
 
 float3 jph_joint_solve_rotation(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
-                              float3 rhs, inout JointState state)
+                              float3 rhs, inout uint status)
 {
     return jph_joint_solve3(jph_joint_inertia_sum(m1, s1, m2, s2, float3(1.0f, 0.0f, 0.0f)),
         jph_joint_inertia_sum(m1, s1, m2, s2, float3(0.0f, 1.0f, 0.0f)),
         jph_joint_inertia_sum(m1, s1, m2, s2, float3(0.0f, 0.0f, 1.0f)), rhs,
-        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),state);
+        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),status);
 }
 
 float3 jph_joint_solve_point(BodyModel m1, BodyState s1, float3 r1, BodyModel m2, BodyState s2, float3 r2,
-                           float3 rhs, inout JointState state)
+                           float3 rhs, inout uint status)
 {
     return jph_joint_solve3(jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(1.0f, 0.0f, 0.0f)),
         jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(0.0f, 1.0f, 0.0f)),
         jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(0.0f, 0.0f, 1.0f)), rhs,
-        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state);
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),status);
 }
 
 void jph_joint_apply_angular(BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
@@ -463,7 +737,7 @@ void jph_joint_apply_point(BodyModel m1, inout BodyState s1, float3 r1,
         }
 }
 
-void jph_joint_swing_basis(BodyState s1, BodyState s2, JointState state,
+void jph_joint_swing_basis(BodyState s1, BodyState s2, JointHingeState state,
                           out float3 j0, out float3 j1, out float2 error)
 {
     float3 a1 = jph_joint_axis(s1, state);
@@ -483,12 +757,12 @@ void jph_joint_swing_basis(BodyState s1, BodyState s2, JointState state,
     error = float2(dot(a1, b2), dot(a1, c2));
 }
 
-float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, JphPsdRange reachable, inout JointState state)
+float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, JphPsdRange reachable, inout uint status)
 {
     if (!reachable.valid || reachable.rank < 2u)
     {
         float2 result;
-        if (!jph_psd_solve2(a,b,c,rhs,reachable,result)) state.flags.y = JointStatusNumericalFailure;
+        if (!jph_psd_solve2(a,b,c,rhs,reachable,result)) status = JointStatusNumericalFailure;
         return result;
     }
     float2 d = rsqrt(float2(a, c));
@@ -498,24 +772,24 @@ float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, JphPsdRange r
     float2 result = d * float2(scaled_rhs.x - off * scaled_rhs.y, scaled_rhs.y - off * scaled_rhs.x) / det;
     if (!(a > 0.0f && c > 0.0f && det > 0.0f) || !all(isfinite(result)))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return float2(0.0f);
     }
     return result;
 }
 
 float2 jph_joint_solve2(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
-                       float3 j0, float3 j1, float2 rhs, inout JointState state)
+                       float3 j0, float3 j1, float2 rhs, inout uint status)
 {
     float3 i0 = jph_joint_inertia_sum(m1, s1, m2, s2, j0);
     float3 i1 = jph_joint_inertia_sum(m1, s1, m2, s2, j1);
     return jph_joint_symmetric2(dot(j0, i0), dot(j0, i1), dot(j1, i1), rhs,
-        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,2u,j0,j1),state);
+        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,2u,j0,j1),status);
 }
 
 // Slider rows use the same body writer and phase schedule as Fixed/Hinge.
 // Mathematical source: SliderConstraint / DualAxisConstraintPart / AxisConstraintPart.
-void jph_slider_basis(BodyState s1, JointState state, out float3 axis, out float3 n0, out float3 n1)
+void jph_slider_basis(BodyState s1, JointSliderState state, out float3 axis, out float3 n0, out float3 n1)
 {
     float4 frame = jph_quat_mul(s1.rotation, state.frame1);
     axis = jph_rotate(frame, float3(1.0f, 0.0f, 0.0f));
@@ -523,7 +797,7 @@ void jph_slider_basis(BodyState s1, JointState state, out float3 axis, out float
     n1 = jph_rotate(frame, float3(0.0f, 0.0f, 1.0f));
 }
 
-void jph_slider_limit(JointAuthor a, float position, out float side, out float error)
+void jph_slider_limit(JointSliderAuthor a, float position, out float side, out float error)
 {
     side = 0.0f;
     error = 0.0f;
@@ -541,15 +815,15 @@ void jph_slider_limit(JointAuthor a, float position, out float side, out float e
 }
 
 float2 jph_slider_transverse(BodyModel m1, BodyState s1, float3 arm1,
-    BodyModel m2, BodyState s2, float3 r2, float3 n0, float3 n1, float2 rhs, inout JointState state)
+    BodyModel m2, BodyState s2, float3 r2, float3 n0, float3 n1, float2 rhs, inout uint status)
 {
     float3 k0 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n0);
     float3 k1 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n1);
     return jph_joint_symmetric2(dot(n0, k0), dot(n0, k1), dot(n1, k1), rhs,
-        jph_joint_reachable(m1,s1,arm1,m2,s2,r2,true,2u,n0,n1),state);
+        jph_joint_reachable(m1,s1,arm1,m2,s2,r2,true,2u,n0,n1),status);
 }
 
-void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
+void jph_slider_solve_velocity(JointSliderAuthor a, inout JointSliderState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
 {
     float3 r1, r2;
@@ -560,12 +834,12 @@ void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
     jph_slider_basis(s1, state, axis, n0, n1);
     float3 relative = jph_point_velocity(m1, s1, arm1) - jph_point_velocity(m2, s2, r2);
     float2 transverse = jph_slider_transverse(m1, s1, arm1, m2, s2, r2, n0, n1,
-        float2(dot(n0, relative), dot(n1, relative)), state);
+        float2(dot(n0, relative), dot(n1, relative)), state.flags.y);
     if (state.flags.y != JointStatusSuccess) return;
     state.pointImpulse.xy += transverse;
     jph_joint_apply_point(m1, s1, arm1, m2, s2, r2, n0 * transverse.x + n1 * transverse.y, false);
     float3 angular = jph_joint_solve_rotation(m1, s1, m2, s2,
-        jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2), state);
+        jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2), state.flags.y);
     if (state.flags.y != JointStatusSuccess) return;
     state.angularImpulse.xyz += angular;
     jph_joint_apply_angular(m1, s1, m2, s2, angular, false);
@@ -588,7 +862,7 @@ void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
     }
 }
 
-void jph_slider_solve_position(JointAuthor a, inout JointState state,
+void jph_slider_solve_position(JointSliderAuthor a, inout JointSliderState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
 {
     float3 r1, r2;
@@ -597,12 +871,12 @@ void jph_slider_solve_position(JointAuthor a, inout JointState state,
     float3 axis, n0, n1;
     jph_slider_basis(s1, state, axis, n0, n1);
     float2 transverse = jph_slider_transverse(m1, s1, r1 + u, m2, s2, r2, n0, n1,
-        -baumgarte * float2(dot(n0, u), dot(n1, u)), state);
+        -baumgarte * float2(dot(n0, u), dot(n1, u)), state.flags.y);
     if (state.flags.y != JointStatusSuccess) return;
     jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2, n0 * transverse.x + n1 * transverse.y, true);
     float4 diff = jph_joint_rotation_error(s1, s2, state);
     float3 error = 2.0f * (diff.w < 0.0f ? -diff.xyz : diff.xyz);
-    float3 angular = jph_joint_solve_rotation(m1, s1, m2, s2, -baumgarte * error, state);
+    float3 angular = jph_joint_solve_rotation(m1, s1, m2, s2, -baumgarte * error, state.flags.y);
     if (state.flags.y != JointStatusSuccess) return;
     jph_joint_apply_angular(m1, s1, m2, s2, angular, true);
     // Rotation correction changes both material points and the reference basis.
@@ -625,7 +899,7 @@ void jph_slider_solve_position(JointAuthor a, inout JointState state,
 }
 
 // DistanceConstraint + AxisConstraintPart, StiffnessAndDamping limit mode.
-void jph_distance_limit(JointAuthor a, JointState state, float coordinate,
+void jph_distance_limit(JointDistanceAuthor a, JointDistanceState state, float coordinate,
     out float side, out float error)
 {
     float minimum = (a.bodies.w & JointAutoDistance) != 0u ? state.distanceReference.w : a.limits.x;
@@ -649,7 +923,7 @@ void jph_distance_limit(JointAuthor a, JointState state, float coordinate,
     }
 }
 
-float jph_distance_geometry(JointAuthor a, inout JointState state, BodyState s1, BodyState s2,
+float jph_distance_geometry(JointDistanceAuthor a, inout JointDistanceState state, BodyState s1, BodyState s2,
     out float3 arm1, out float3 r2)
 {
     float3 r1;
@@ -665,7 +939,7 @@ float jph_distance_geometry(JointAuthor a, inout JointState state, BodyState s1,
 }
 
 float jph_distance_inverse_mass(BodyModel m1, BodyState s1, float3 arm1,
-    BodyModel m2, BodyState s2, float3 r2, inout JointState state)
+    BodyModel m2, BodyState s2, float3 r2, inout JointDistanceState state)
 {
     float3 n = state.distanceReference.xyz;
     float k = dot(n, jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n));
@@ -673,7 +947,7 @@ float jph_distance_inverse_mass(BodyModel m1, BodyState s1, float3 arm1,
     return k;
 }
 
-void jph_distance_setup(JointAuthor a, inout JointState state,
+void jph_distance_setup(JointDistanceAuthor a, inout JointDistanceState state,
     BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
 {
     float3 arm1, r2;
@@ -681,10 +955,9 @@ void jph_distance_setup(JointAuthor a, inout JointState state,
     float side, error;
     jph_distance_limit(a, state, coordinate, side, error);
     state.setup = float4(state.setup.x, 0.0f, 0.0f, side);
-    state.pointImpulse = float4(0.0f);
-    state.angularImpulse = float4(0.0f);
+
     state.axisImpulse.yzw = float3(0.0f);
-    state.rotor.xyz = float3(0.0f);
+
     // An interior row is inactive before inverse-mass evaluation in Jolt.
     float k = side == 0.0f ? 0.0f : jph_distance_inverse_mass(m1, s1, arm1, m2, s2, r2, state);
     if (side == 0.0f || k == 0.0f)
@@ -702,7 +975,7 @@ void jph_distance_setup(JointAuthor a, inout JointState state,
         state.flags.y = JointStatusNumericalFailure;
 }
 
-void jph_distance_solve_velocity(JointAuthor a, inout JointState state,
+void jph_distance_solve_velocity(JointDistanceAuthor a, inout JointDistanceState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
 {
     if (state.setup.w == 0.0f) return;
@@ -727,7 +1000,7 @@ void jph_distance_solve_velocity(JointAuthor a, inout JointState state,
     jph_joint_apply_point(m1, s1, arm1, m2, s2, r2, n * (next - old), false);
 }
 
-void jph_distance_solve_position(JointAuthor a, inout JointState state,
+void jph_distance_solve_position(JointDistanceAuthor a, inout JointDistanceState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
 {
     if (a.linearSpring.x > 0.0f) return;
@@ -755,7 +1028,7 @@ void jph_distance_solve_position(JointAuthor a, inout JointState state,
         state.distanceReference.xyz * (-baumgarte * error / k), true);
 }
 
-void jph_joint_limit(JointAuthor a, float angle, out float side, out float error)
+void jph_joint_limit(JointHingeAuthor a, float angle, out float side, out float error)
 {
     side = 0.0f;
     error = 0.0f;
@@ -771,83 +1044,163 @@ void jph_joint_limit(JointAuthor a, float angle, out float side, out float error
     }
 }
 
-bool jph_joint_drive_active(JointAuthor a)
+bool jph_joint_drive_active(JointHingeAuthor a)
 {
     return ((a.bodies.w & JointMotorEnabled) != 0u && (a.motor.y > 0.0f || a.motor.z > 0.0f))
         || any(a.passive.xyz > 0.0f);
 }
 
-void jph_joint_clear_impulses(inout JointState state)
+void jph_joint_clear_impulses(inout JointFixedState state)
+{
+    state.pointImpulse = float4(0.0f);
+    state.angularImpulse = float4(0.0f);
+}
+
+void jph_joint_clear_impulses(inout JointHingeState state)
 {
     state.pointImpulse = float4(0.0f);
     state.angularImpulse = float4(0.0f);
     state.axisImpulse = float4(0.0f);
     state.rotor.y = 0.0f;
+}
+
+void jph_joint_clear_impulses(inout JointSliderState state)
+{
+    state.pointImpulse = float4(0.0f);
+    state.angularImpulse = float4(0.0f);
+    state.axisImpulse = float4(0.0f);
+}
+
+void jph_joint_clear_impulses(inout JointDistanceState state)
+{
+    state.axisImpulse = float4(0.0f);
+}
+
+void jph_joint_clear_impulses(inout JointSwingState state)
+{
+    state.pointImpulse = float4(0.0f);
     state.angularLimitImpulse = float4(0.0f);
     state.angularMotorImpulse = float4(0.0f);
 }
 
 #include "rigid_swing_twist.slang"
 
-float3 jph_joint_project_range(JphPsdRange range, float3 impulse, uint dimension, inout JointState state)
+float3 jph_joint_project_range(JphPsdRange range, float3 impulse, uint dimension, inout uint status)
 {
-    if (!range.valid) { state.flags.y = JointStatusNumericalFailure; return float3(0.0f); }
+    if (!range.valid) { status = JointStatusNumericalFailure; return float3(0.0f); }
     if (range.rank == dimension) return impulse;
     float3 result = float3(0.0f);
     for (uint i = 0u; i < range.rank; ++i) result += range.axis[i] * dot(range.axis[i], impulse);
     return result;
 }
 
-void jph_joint_project_warm(JointAuthor a, inout JointState state,
+void jph_joint_project_warm(JointFixedAuthor a, inout JointFixedState state,
     BodyModel m1, BodyState s1, BodyModel m2, BodyState s2)
 {
     if (all(m1.mass.yz == float2(0.0f)) && all(m2.mass.yz == float2(0.0f))) return;
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
-    if (a.bodies.z == JointDistance) return; // Scalar setup already clears K=0.
-    if (a.bodies.z == JointSlider)
-    {
-        float3 axis, n0, n1;
-        jph_slider_basis(s1, state, axis, n0, n1);
-        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-        state.pointImpulse.xy = jph_joint_project_range(
-            jph_joint_reachable(m1,s1,r1+u,m2,s2,r2,true,2u,n0,n1),
-            float3(state.pointImpulse.xy,0.0f),2u,state).xy;
-        if (dot(axis,jph_joint_point_response(m1,s1,r1+u,m2,s2,r2,axis)) == 0.0f)
-        { state.axisImpulse.x = 0.0f; state.setup.w = 0.0f; }
-    }
-    else state.pointImpulse.xyz = jph_joint_project_range(
-        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state.pointImpulse.xyz,3u,state);
-    if (a.bodies.z == JointFixed || a.bodies.z == JointSlider)
-        state.angularImpulse.xyz = jph_joint_project_range(
+     // Scalar setup already clears K=0.
+    state.pointImpulse.xyz = jph_joint_project_range(
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state.pointImpulse.xyz,3u, state.flags.y);
+    state.angularImpulse.xyz = jph_joint_project_range(
             jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),
-            state.angularImpulse.xyz,3u,state);
-    else if (a.bodies.z == JointHinge)
+            state.angularImpulse.xyz,3u, state.flags.y);
+}
+
+void jph_joint_project_warm(JointHingeAuthor a, inout JointHingeState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2)
+{
+    if (all(m1.mass.yz == float2(0.0f)) && all(m2.mass.yz == float2(0.0f))) return;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+     // Scalar setup already clears K=0.
+    state.pointImpulse.xyz = jph_joint_project_range(
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state.pointImpulse.xyz,3u, state.flags.y);
     {
         float3 j0,j1; float2 error;
         jph_joint_swing_basis(s1,s2,state,j0,j1,error);
         state.angularImpulse.xy = jph_joint_project_range(
             jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,2u,j0,j1),
-            float3(state.angularImpulse.xy,0.0f),2u,state).xy;
+            float3(state.angularImpulse.xy,0.0f),2u, state.flags.y).xy;
         float3 axis = jph_joint_axis(s1,state);
         if (dot(axis,jph_joint_inertia_sum(m1,s1,m2,s2,axis)) == 0.0f)
         { state.axisImpulse = float4(0.0f); state.setup.w = 0.0f; state.rotor.y = 0.0f; }
     }
 }
 
-void jph_joint_setup(JointAuthor a, inout JointState state,
+void jph_joint_project_warm(JointSliderAuthor a, inout JointSliderState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2)
+{
+    if (all(m1.mass.yz == float2(0.0f)) && all(m2.mass.yz == float2(0.0f))) return;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+     // Scalar setup already clears K=0.
+    {
+        float3 axis, n0, n1;
+        jph_slider_basis(s1, state, axis, n0, n1);
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        state.pointImpulse.xy = jph_joint_project_range(
+            jph_joint_reachable(m1,s1,r1+u,m2,s2,r2,true,2u,n0,n1),
+            float3(state.pointImpulse.xy,0.0f),2u, state.flags.y).xy;
+        if (dot(axis,jph_joint_point_response(m1,s1,r1+u,m2,s2,r2,axis)) == 0.0f)
+        { state.axisImpulse.x = 0.0f; state.setup.w = 0.0f; }
+    }
+    state.angularImpulse.xyz = jph_joint_project_range(
+            jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),
+            state.angularImpulse.xyz,3u, state.flags.y);
+}
+
+void jph_joint_project_warm(JointSwingAuthor a, inout JointSwingState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2)
+{
+    if (all(m1.mass.yz == float2(0.0f)) && all(m2.mass.yz == float2(0.0f))) return;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+     // Scalar setup already clears K=0.
+    state.pointImpulse.xyz = jph_joint_project_range(
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state.pointImpulse.xyz,3u, state.flags.y);
+
+}
+
+void jph_joint_setup(JointFixedAuthor a, inout JointFixedState state,
                      BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
                      float dt, bool warm_start)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
         return;
-    float ratio = state.rotor.w > 0.0f ? dt / state.rotor.w : 0.0f;
+    float previous_dt = asfloat(state.flags.z);
+    float ratio = previous_dt > 0.0f ? dt / previous_dt : 0.0f;
     if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
     {
         jph_joint_clear_impulses(state);
         return;
     }
-    if (a.bodies.z == JointHinge)
+
+    if (!warm_start)
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+    state.pointImpulse *= ratio;
+    state.angularImpulse *= ratio;
+
+    jph_joint_project_warm(a,state,m1,s1,m2,s2);
+}
+
+void jph_joint_setup(JointHingeAuthor a, inout JointHingeState state,
+                     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
+                     float dt, bool warm_start)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
+        return;
+    float previous_dt = asfloat(state.flags.z);
+    float ratio = previous_dt > 0.0f ? dt / previous_dt : 0.0f;
+    if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
     {
         float3 axis = jph_joint_axis(s1, state);
         state.rotor.z = a.passive.z > 0.0f ? state.rotor.x - state.rotor.y / a.passive.z : 0.0f;
@@ -870,7 +1223,34 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
             state.rotor.xy = float2(0.0f);
         }
     }
-    if (a.bodies.z == JointSlider)
+
+    if (!warm_start)
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+    state.pointImpulse *= ratio;
+    state.angularImpulse *= ratio;
+    state.axisImpulse *= ratio;
+    state.rotor.y *= ratio;
+
+    jph_joint_project_warm(a,state,m1,s1,m2,s2);
+}
+
+void jph_joint_setup(JointSliderAuthor a, inout JointSliderState state,
+                     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
+                     float dt, bool warm_start)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
+        return;
+    float previous_dt = asfloat(state.flags.z);
+    float ratio = previous_dt > 0.0f ? dt / previous_dt : 0.0f;
+    if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+
     {
         float3 r1, r2;
         jph_joint_arms(a, state, s1, s2, r1, r2);
@@ -883,12 +1263,9 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
         if (state.setup.w == 0.0f) state.axisImpulse.x = 0.0f;
         state.pointImpulse.zw = float2(0.0f);
         state.axisImpulse.yzw = float3(0.0f);
-        state.rotor.xyz = float3(0.0f);
+
     }
-    if (a.bodies.z == JointDistance)
-        jph_distance_setup(a, state, m1, s1, m2, s2, dt);
-    if (a.bodies.z == JointSwingTwist)
-        jph_swing_setup(a, state, m1, s1, m2, s2, dt);
+
     if (!warm_start)
     {
         jph_joint_clear_impulses(state);
@@ -897,8 +1274,58 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
     state.pointImpulse *= ratio;
     state.angularImpulse *= ratio;
     state.axisImpulse *= ratio;
-    state.rotor.y *= ratio;
-    if (a.bodies.z == JointSwingTwist)
+
+    jph_joint_project_warm(a,state,m1,s1,m2,s2);
+}
+
+void jph_joint_setup(JointDistanceAuthor a, inout JointDistanceState state,
+                     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
+                     float dt, bool warm_start)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
+        return;
+    float previous_dt = asfloat(state.flags.z);
+    float ratio = previous_dt > 0.0f ? dt / previous_dt : 0.0f;
+    if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+
+    jph_distance_setup(a, state, m1, s1, m2, s2, dt);
+
+    if (!warm_start)
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+
+    state.axisImpulse *= ratio;
+
+}
+
+void jph_joint_setup(JointSwingAuthor a, inout JointSwingState state,
+                     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
+                     float dt, bool warm_start)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
+        return;
+    float previous_dt = asfloat(state.flags.z);
+    float ratio = previous_dt > 0.0f ? dt / previous_dt : 0.0f;
+    if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+
+    jph_swing_setup(a, state, m1, s1, m2, s2, dt);
+    if (!warm_start)
+    {
+        jph_joint_clear_impulses(state);
+        return;
+    }
+    state.pointImpulse *= ratio;
+
     {
         state.angularLimitImpulse *= ratio;
         state.angularMotorImpulse *= ratio;
@@ -906,42 +1333,32 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
     jph_joint_project_warm(a,state,m1,s1,m2,s2);
 }
 
-void jph_joint_warm_start(JointAuthor a, JointState state,
+void jph_joint_warm_start(JointFixedAuthor a, JointFixedState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
-    if (a.bodies.z == JointSwingTwist)
-    {
-        jph_swing_warm(a, state, m1, s1, m2, s2);
-        return;
-    }
+
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
-    if (a.bodies.z == JointSlider)
-    {
-        float3 axis, n0, n1;
-        jph_slider_basis(s1, state, axis, n0, n1);
-        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
-            n0 * state.pointImpulse.x + n1 * state.pointImpulse.y + axis * state.axisImpulse.x, false);
-        jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
-        return;
-    }
-    if (a.bodies.z == JointDistance)
-    {
-        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
-            state.distanceReference.xyz * state.axisImpulse.x, false);
-        return;
-    }
-    if (a.bodies.z == JointFixed)
+
     {
         jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
         jph_joint_apply_point(m1, s1, r1, m2, s2, r2, state.pointImpulse.xyz, false);
     }
-    else
+}
+
+void jph_joint_warm_start(JointHingeAuthor a, JointHingeState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+
     {
         float3 j0, j1;
         float2 error;
@@ -954,16 +1371,66 @@ void jph_joint_warm_start(JointAuthor a, JointState state,
     }
 }
 
+void jph_joint_warm_start(JointSliderAuthor a, JointSliderState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    {
+        float3 axis, n0, n1;
+        jph_slider_basis(s1, state, axis, n0, n1);
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
+            n0 * state.pointImpulse.x + n1 * state.pointImpulse.y + axis * state.axisImpulse.x, false);
+        jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
+        return;
+    }
+}
+
+void jph_joint_warm_start(JointDistanceAuthor a, JointDistanceState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+
+    {
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
+            state.distanceReference.xyz * state.axisImpulse.x, false);
+        return;
+    }
+}
+
+void jph_joint_warm_start(JointSwingAuthor a, JointSwingState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+    {
+        jph_swing_warm(a, state, m1, s1, m2, s2);
+        return;
+    }
+}
+
 struct JphJointDriveImpulse { float motor, passive, total, rotor, velocity; };
 
 void jph_joint_apply_drive_velocity(BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
-    float3 axis, float3 response1, float3 response2, float k1, float k2, float velocity, inout JointState state)
+    float3 axis, float3 response1, float3 response2, float k1, float k2, float velocity, inout uint status)
 {
     float k = k1 + k2;
     if (!(k > 0.0f) || k1 < 0.0f || k2 < 0.0f || !isfinite(k)
         || !isfinite(velocity) || !all(isfinite(response1)) || !all(isfinite(response2)))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return;
     }
     float3 w1 = jph_joint_angular_velocity(m1, s1);
@@ -991,7 +1458,7 @@ void jph_joint_apply_drive_velocity(BodyModel m1, inout BodyState s1, BodyModel 
     if (!isfinite(common) || !isfinite(next_u) || !isfinite(next_v)
         || !all(isfinite(next1)) || !all(isfinite(next2)))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return;
     }
     if (jph_dynamic(m1) && k1 > 0.0f) s1.angularVelocity.xyz = next1;
@@ -1000,7 +1467,7 @@ void jph_joint_apply_drive_velocity(BodyModel m1, inout BodyState s1, BodyModel 
 
 JphJointDriveImpulse jph_joint_drive(float free_velocity, float k, float gamma, float bias,
     float min_motor, float max_motor, float damping, float friction, float armature, float old_speed,
-    inout JointState state)
+    inout uint status)
 {
     // ConstraintPart/DriveImpulse.h. Keep the stable net-impulse expression:
     // independent co-linear motor/passive rows undo one another on light links.
@@ -1023,7 +1490,7 @@ JphJointDriveImpulse jph_joint_drive(float free_velocity, float k, float gamma, 
         || !all(isfinite(float4(min_motor, max_motor, shifted, at_rest)))
         || !all(isfinite(float4(friction_bound, b, motor_rhs, motor_denominator))))
     {
-        state.flags.y = JointStatusNumericalFailure;
+        status = JointStatusNumericalFailure;
         return result;
     }
     if (abs(at_rest) <= friction_bound)
@@ -1045,35 +1512,36 @@ JphJointDriveImpulse jph_joint_drive(float free_velocity, float k, float gamma, 
     return result;
 }
 
-void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
+void jph_joint_solve_velocity(JointFixedAuthor a, inout JointFixedState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float dt)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
-    if (a.bodies.z == JointSwingTwist)
-    {
-        jph_swing_velocity(a, state, m1, s1, m2, s2);
-        return;
-    }
-    if (a.bodies.z == JointDistance)
-    {
-        jph_distance_solve_velocity(a, state, m1, s1, m2, s2);
-        return;
-    }
-    if (a.bodies.z == JointSlider)
-    {
-        jph_slider_solve_velocity(a, state, m1, s1, m2, s2);
-        return;
-    }
-    if (a.bodies.z == JointFixed)
+
     {
         float3 lambda = jph_joint_solve_rotation(m1, s1, m2, s2,
-            jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2), state);
+            jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2), state.flags.y);
         state.angularImpulse.xyz += lambda;
         jph_joint_apply_angular(m1, s1, m2, s2, lambda, false);
     }
-    else if (jph_joint_drive_active(a))
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 point_lambda = jph_joint_solve_point(m1, s1, r1, m2, s2, r2,
+        jph_point_velocity(m1, s1, r1) - jph_point_velocity(m2, s2, r2), state.flags.y);
+    state.pointImpulse.xyz += point_lambda;
+    jph_joint_apply_point(m1, s1, r1, m2, s2, r2, point_lambda, false);
+
+}
+
+void jph_joint_solve_velocity(JointHingeAuthor a, inout JointHingeState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float dt)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    if (jph_joint_drive_active(a))
     {
         float3 axis = jph_joint_axis(s1, state);
         float3 response1 = jph_inverse_inertia(m1, s1, axis);
@@ -1086,7 +1554,7 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
             bool driven = (a.bodies.w & JointMotorEnabled) != 0u && (a.motor.y > 0.0f || a.motor.z > 0.0f);
             float torque = driven ? dt * a.motor.w : 0.0f;
             JphJointDriveImpulse solved = jph_joint_drive(free_velocity, k, state.setup.y, state.setup.z,
-                -torque, torque, dt * a.passive.x, dt * a.passive.y, a.passive.z, state.rotor.z, state);
+                -torque, torque, dt * a.passive.x, dt * a.passive.y, a.passive.z, state.rotor.z, state.flags.y);
             if (state.flags.y != JointStatusSuccess) return;
             if (!isfinite(solved.motor) || !isfinite(solved.passive) || !isfinite(solved.total)
                 || !isfinite(solved.rotor) || !isfinite(solved.velocity))
@@ -1097,7 +1565,7 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
             state.axisImpulse.yzw = float3(solved.motor, solved.passive, solved.total);
             state.rotor.y = solved.rotor;
             jph_joint_apply_drive_velocity(m1, s1, m2, s2, axis, response1, response2, k1, k2,
-                solved.velocity, state);
+                solved.velocity, state.flags.y);
             if (state.flags.y != JointStatusSuccess) return;
         }
         else if (k == 0.0f && k1 == 0.0f && k2 == 0.0f)
@@ -1114,16 +1582,15 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
     float3 point_lambda = jph_joint_solve_point(m1, s1, r1, m2, s2, r2,
-        jph_point_velocity(m1, s1, r1) - jph_point_velocity(m2, s2, r2), state);
+        jph_point_velocity(m1, s1, r1) - jph_point_velocity(m2, s2, r2), state.flags.y);
     state.pointImpulse.xyz += point_lambda;
     jph_joint_apply_point(m1, s1, r1, m2, s2, r2, point_lambda, false);
-    if (a.bodies.z == JointHinge)
     {
         float3 j0, j1;
         float2 error;
         jph_joint_swing_basis(s1, s2, state, j0, j1, error);
         float3 dw = jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2);
-        float2 lambda = jph_joint_solve2(m1, s1, m2, s2, j0, j1, float2(dot(j0, dw), dot(j1, dw)), state);
+        float2 lambda = jph_joint_solve2(m1, s1, m2, s2, j0, j1, float2(dot(j0, dw), dot(j1, dw)), state.flags.y);
         state.angularImpulse.xy += lambda;
         jph_joint_apply_angular(m1, s1, m2, s2, j0 * lambda.x + j1 * lambda.y, false);
         if (state.setup.w != 0.0f)
@@ -1143,45 +1610,85 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
     }
 }
 
-void jph_joint_solve_position(JointAuthor a, inout JointState state,
+void jph_joint_solve_velocity(JointSliderAuthor a, inout JointSliderState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float dt)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    {
+        jph_slider_solve_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
+
+}
+
+void jph_joint_solve_velocity(JointDistanceAuthor a, inout JointDistanceState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float dt)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    {
+        jph_distance_solve_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
+
+}
+
+void jph_joint_solve_velocity(JointSwingAuthor a, inout JointSwingState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float dt)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+    {
+        jph_swing_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
+
+}
+
+void jph_joint_solve_position(JointFixedAuthor a, inout JointFixedState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
-    if (a.bodies.z == JointSwingTwist)
-    {
-        jph_swing_position(a, state, m1, s1, m2, s2, baumgarte);
-        return;
-    }
-    if (a.bodies.z == JointDistance)
-    {
-        jph_distance_solve_position(a, state, m1, s1, m2, s2, baumgarte);
-        return;
-    }
-    if (a.bodies.z == JointSlider)
-    {
-        jph_slider_solve_position(a, state, m1, s1, m2, s2, baumgarte);
-        return;
-    }
-    if (a.bodies.z == JointFixed)
+
     {
         float4 diff = jph_joint_rotation_error(s1, s2, state);
         float3 error = 2.0f * (diff.w < 0.0f ? -diff.xyz : diff.xyz);
-        float3 lambda = jph_joint_solve_rotation(m1, s1, m2, s2, -baumgarte * error, state);
+        float3 lambda = jph_joint_solve_rotation(m1, s1, m2, s2, -baumgarte * error, state.flags.y);
         jph_joint_apply_angular(m1, s1, m2, s2, lambda, true);
     }
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
     float3 separation = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
-    float3 point_lambda = jph_joint_solve_point(m1, s1, r1, m2, s2, r2, -baumgarte * separation, state);
+    float3 point_lambda = jph_joint_solve_point(m1, s1, r1, m2, s2, r2, -baumgarte * separation, state.flags.y);
     jph_joint_apply_point(m1, s1, r1, m2, s2, r2, point_lambda, true);
-    if (a.bodies.z == JointHinge)
+
+}
+
+void jph_joint_solve_position(JointHingeAuthor a, inout JointHingeState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 separation = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    float3 point_lambda = jph_joint_solve_point(m1, s1, r1, m2, s2, r2, -baumgarte * separation, state.flags.y);
+    jph_joint_apply_point(m1, s1, r1, m2, s2, r2, point_lambda, true);
     {
         float3 j0, j1;
         float2 error;
         jph_joint_swing_basis(s1, s2, state, j0, j1, error);
-        float2 lambda = jph_joint_solve2(m1, s1, m2, s2, j0, j1, -baumgarte * error, state);
+        float2 lambda = jph_joint_solve2(m1, s1, m2, s2, j0, j1, -baumgarte * error, state.flags.y);
         jph_joint_apply_angular(m1, s1, m2, s2, j0 * lambda.x + j1 * lambda.y, true);
         float side, angle_error;
         jph_joint_limit(a, jph_joint_angle(s1, s2, state), side, angle_error);
@@ -1195,32 +1702,134 @@ void jph_joint_solve_position(JointAuthor a, inout JointState state,
     }
 }
 
+void jph_joint_solve_position(JointSliderAuthor a, inout JointSliderState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    {
+        jph_slider_solve_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
+
+}
+
+void jph_joint_solve_position(JointDistanceAuthor a, inout JointDistanceState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+
+    {
+        jph_distance_solve_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
+
+}
+
+void jph_joint_solve_position(JointSwingAuthor a, inout JointSwingState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
+        (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
+        return;
+    {
+        jph_swing_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
+
+}
+
 bool jph_joint_finite(BodyState state)
 {
     return all(isfinite(state.positionCOM)) && all(isfinite(state.rotation))
         && all(isfinite(state.linearVelocity)) && all(isfinite(state.angularVelocity));
 }
 
-bool jph_joint_state_finite(JointState state, uint kind)
+bool jph_joint_state_finite(JointFixedState state)
 {
-    return all(isfinite(state.pointImpulse)) && all(isfinite(state.angularImpulse))
-        && all(isfinite(state.axisImpulse)) && all(isfinite(state.rotor)) && all(isfinite(state.setup))
-        && all(isfinite(state.distanceReference))
-        && (kind != JointSwingTwist || (all(isfinite(state.angularLimitX))
-            && all(isfinite(state.angularLimitY))
-            && all(isfinite(state.angularLimitZ))
-            && all(isfinite(state.angularLimitImpulse))
-            && all(isfinite(state.angularMotorImpulse))
-            && all(isfinite(state.angularMotorSetupX))
-            && all(isfinite(state.angularMotorSetupY))
-            && all(isfinite(state.angularMotorSetupZ))));
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.frame1))
+        && all(isfinite(state.frame2))
+        && all(isfinite(state.pointImpulse))
+        && all(isfinite(state.angularImpulse));
+}
+
+bool jph_joint_state_finite(JointHingeState state)
+{
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.frame1))
+        && all(isfinite(state.frame2))
+        && all(isfinite(state.pointImpulse))
+        && all(isfinite(state.angularImpulse))
+        && all(isfinite(state.axisImpulse))
+        && all(isfinite(state.rotor))
+        && all(isfinite(state.setup));
+}
+
+bool jph_joint_state_finite(JointSliderState state)
+{
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.frame1))
+        && all(isfinite(state.frame2))
+        && all(isfinite(state.pointImpulse))
+        && all(isfinite(state.angularImpulse))
+        && all(isfinite(state.axisImpulse))
+        && all(isfinite(state.setup));
+}
+
+bool jph_joint_state_finite(JointDistanceState state)
+{
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.axisImpulse))
+        && all(isfinite(state.setup))
+        && all(isfinite(state.distanceReference));
+}
+
+bool jph_joint_state_finite(JointSwingState state)
+{
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.frame1))
+        && all(isfinite(state.frame2))
+        && all(isfinite(state.pointImpulse))
+        && all(isfinite(state.angularLimitX))
+        && all(isfinite(state.angularLimitY))
+        && all(isfinite(state.angularLimitZ))
+        && all(isfinite(state.angularLimitImpulse))
+        && all(isfinite(state.angularMotorImpulse))
+        && all(isfinite(state.angularMotorSetupX))
+        && all(isfinite(state.angularMotorSetupY))
+        && all(isfinite(state.angularMotorSetupZ));
 }
 
 bool jph_joint_suppresses_pair(WorldRange world, uint body1, uint body2)
 {
     for (uint local = 0u; local < world.leaves.w; ++local)
     {
-        JointAuthor a = jph_joint_load_author(world.leaves.z + local);
+        JointDirectory a = jph_joint_load_directory(world.leaves.z + local);
         if ((a.bodies.w & (JointEnabled | JointCollisionEnabled)) == JointEnabled &&
             ((a.bodies.x == body1 && a.bodies.y == body2) || (a.bodies.x == body2 && a.bodies.y == body1)))
             return true;

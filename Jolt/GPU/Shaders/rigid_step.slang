@@ -16,7 +16,6 @@ RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 
-
 bool jph_selected_range(uint index, uint base, uint count)
 {
     return index >= base && index - base < count;
@@ -30,7 +29,7 @@ bool jph_selected_body(uint index)
     if (!jph_selected_body_slot(index)) return false;
     return body_models[index].meta.w == step_params.selection.x;
 }
-bool jph_selected_joint(uint index, JointAuthor author)
+bool jph_selected_joint(uint index, JointDirectory author)
 {
     return jph_selected_range(index, step_params.selection.w, step_params.selectedCounts.z)
         && author.identity.z == step_params.selection.x && jph_selected_body_slot(author.bodies.y)
@@ -39,7 +38,7 @@ bool jph_selected_joint(uint index, JointAuthor author)
 
 #include "island_owner_schedule.slang"
 
-void jph_joint_models(JointAuthor author, out BodyModel m1, out BodyModel m2)
+void jph_joint_models(JointDirectory author, out BodyModel m1, out BodyModel m2)
 {
     m1 = jph_joint_world_model();
     if (author.bodies.x != InvalidQueryBodySlot)
@@ -47,7 +46,7 @@ void jph_joint_models(JointAuthor author, out BodyModel m1, out BodyModel m2)
     m2 = jph_effective_model(body_models[author.bodies.y], kinematic_targets[author.bodies.y]);
 }
 
-void jph_joint_states(JointAuthor author, out BodyState s1, out BodyState s2)
+void jph_joint_states(JointDirectory author, out BodyState s1, out BodyState s2)
 {
     s1 = jph_joint_world_state();
     if (author.bodies.x != InvalidQueryBodySlot)
@@ -55,7 +54,7 @@ void jph_joint_states(JointAuthor author, out BodyState s1, out BodyState s2)
     s2 = body_states[author.bodies.y];
 }
 
-void jph_joint_bodies(JointAuthor author, out BodyModel m1, out BodyState s1,
+void jph_joint_bodies(JointDirectory author, out BodyModel m1, out BodyState s1,
     out BodyModel m2, out BodyState s2)
 {
     jph_joint_models(author, m1, m2);
@@ -64,12 +63,8 @@ void jph_joint_bodies(JointAuthor author, out BodyModel m1, out BodyState s1,
 
 // One island lane alone owns every Dynamic endpoint of its numerical rows.
 // All-stream SetupJoints/FinishJoints retain independent runtime maintenance.
-void jph_step_joint(uint index, uint phase)
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointFixedAuthor author, JointFixedState runtime)
 {
-    JointAuthor author = jph_joint_load_author(index);
-    if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
-        || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
-    JointState runtime = jph_joint_load_state(index, author.bodies.z);
     // Inner solver early returns must never be followed by stale full-state
     // stores from an inactive joint assigned outside another island's owner.
     // SetupJoints still checks the complete accepted stream before graph build;
@@ -78,16 +73,16 @@ void jph_step_joint(uint index, uint phase)
         || (author.bodies.w & JointEnabled) == 0u)
         return;
     BodyModel m1, m2;
-    jph_joint_models(author, m1, m2);
+    jph_joint_models(directory, m1, m2);
     if (!jph_resident(m1) || !jph_resident(m2))
     {
         jph_joint_clear_impulses(runtime);
-        jph_joint_store_state(index, runtime, author.bodies.z);
+        jph_joint_store_state(directory, runtime);
         return;
     }
     if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
     BodyState s1, s2;
-    jph_joint_states(author, s1, s2);
+    jph_joint_states(directory, s1, s2);
     BodyState old1 = s1, old2 = s2;
     if (phase == 1u)
         jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
@@ -96,7 +91,7 @@ void jph_step_joint(uint index, uint phase)
     else
         jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
     if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
-        || !jph_joint_state_finite(runtime, author.bodies.z))
+        || !jph_joint_state_finite(runtime))
     {
         if (runtime.flags.y == JointStatusSuccess)
             runtime.flags.y = JointStatusNumericalFailure;
@@ -105,7 +100,212 @@ void jph_step_joint(uint index, uint phase)
     }
     if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
     if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
-    jph_joint_store_state(index, runtime, author.bodies.z);
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointHingeAuthor author, JointHingeState runtime)
+{
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
+    BodyModel m1, m2;
+    jph_joint_models(directory, m1, m2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        jph_joint_clear_impulses(runtime);
+        jph_joint_store_state(directory, runtime);
+        return;
+    }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(directory, s1, s2);
+    BodyState old1 = s1, old2 = s2;
+    if (phase == 1u)
+        jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+    else if (phase == 2u)
+        jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+    else
+        jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+    if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
+        || !jph_joint_state_finite(runtime))
+    {
+        if (runtime.flags.y == JointStatusSuccess)
+            runtime.flags.y = JointStatusNumericalFailure;
+        s1 = old1;
+        s2 = old2;
+    }
+    if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+    if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointSliderAuthor author, JointSliderState runtime)
+{
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
+    BodyModel m1, m2;
+    jph_joint_models(directory, m1, m2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        jph_joint_clear_impulses(runtime);
+        jph_joint_store_state(directory, runtime);
+        return;
+    }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(directory, s1, s2);
+    BodyState old1 = s1, old2 = s2;
+    if (phase == 1u)
+        jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+    else if (phase == 2u)
+        jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+    else
+        jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+    if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
+        || !jph_joint_state_finite(runtime))
+    {
+        if (runtime.flags.y == JointStatusSuccess)
+            runtime.flags.y = JointStatusNumericalFailure;
+        s1 = old1;
+        s2 = old2;
+    }
+    if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+    if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointDistanceAuthor author, JointDistanceState runtime)
+{
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
+    BodyModel m1, m2;
+    jph_joint_models(directory, m1, m2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        jph_joint_clear_impulses(runtime);
+        jph_joint_store_state(directory, runtime);
+        return;
+    }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(directory, s1, s2);
+    BodyState old1 = s1, old2 = s2;
+    if (phase == 1u)
+        jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+    else if (phase == 2u)
+        jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+    else
+        jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+    if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
+        || !jph_joint_state_finite(runtime))
+    {
+        if (runtime.flags.y == JointStatusSuccess)
+            runtime.flags.y = JointStatusNumericalFailure;
+        s1 = old1;
+        s2 = old2;
+    }
+    if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+    if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointSwingAuthor author, JointSwingState runtime)
+{
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
+    BodyModel m1, m2;
+    jph_joint_models(directory, m1, m2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        jph_joint_clear_impulses(runtime);
+        jph_joint_store_state(directory, runtime);
+        return;
+    }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(directory, s1, s2);
+    BodyState old1 = s1, old2 = s2;
+    if (phase == 1u)
+        jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+    else if (phase == 2u)
+        jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+    else
+        jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+    if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
+        || !jph_joint_state_finite(runtime))
+    {
+        if (runtime.flags.y == JointStatusSuccess)
+            runtime.flags.y = JointStatusNumericalFailure;
+        s1 = old1;
+        s2 = old2;
+    }
+    if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+    if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_step_joint(uint index, uint phase)
+{
+    JointDirectory directory = jph_joint_load_directory(index);
+    if (!jph_selected_joint(index, directory) || !jph_selected_body(directory.bodies.y)
+        || (directory.bodies.x != InvalidQueryBodySlot && !jph_selected_body(directory.bodies.x))) return;
+    switch (directory.bodies.z)
+    {
+    case JointFixed:
+    {
+        JointFixedAuthor author; jph_joint_load_author(directory, author);
+        JointFixedState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    case JointHinge:
+    {
+        JointHingeAuthor author; jph_joint_load_author(directory, author);
+        JointHingeState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    case JointSlider:
+    {
+        JointSliderAuthor author; jph_joint_load_author(directory, author);
+        JointSliderState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    case JointDistance:
+    {
+        JointDistanceAuthor author; jph_joint_load_author(directory, author);
+        JointDistanceState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    case JointSwingTwist:
+    {
+        JointSwingAuthor author; jph_joint_load_author(directory, author);
+        JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    }
 }
 
 void jph_step_island_joints(uint island_lane, uint phase)
@@ -116,20 +316,11 @@ void jph_step_island_joints(uint island_lane, uint phase)
         jph_step_joint(jph_island_joint_source(begin, local), phase);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void setup_joints(uint3 tid : SV_DispatchThreadID)
+void jph_setup_joint_typed(JointDirectory directory, JointFixedAuthor author, JointFixedState runtime)
 {
-    if (tid.x >= stage_work.range.y) return;
-    uint index = stage_work.range.x + tid.x;
-    if (index >= joint_stream[0].value.x) return;
-    JointAuthor author = jph_joint_load_author(index);
-    if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
-        || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
-    JointState runtime = jph_joint_load_state(index, author.bodies.z);
     BodyModel m1, m2;
     BodyState s1, s2;
-    jph_joint_bodies(author, m1, s1, m2, s2);
+    jph_joint_bodies(directory, m1, s1, m2, s2);
     if (!jph_resident(m1) || !jph_resident(m2))
         jph_joint_clear_impulses(runtime);
     else
@@ -139,10 +330,140 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
         jph_joint_setup(author, runtime, m1, s1, m2, s2,
             step_params.gravityDt.w, step_params.counts.w != 0u);
         if (runtime.flags.y == JointStatusSuccess
-            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime, author.bodies.z)))
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
             runtime.flags.y = JointStatusNumericalFailure;
     }
-    jph_joint_store_state(index, runtime, author.bodies.z);
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_setup_joint_typed(JointDirectory directory, JointHingeAuthor author, JointHingeState runtime)
+{
+    BodyModel m1, m2;
+    BodyState s1, s2;
+    jph_joint_bodies(directory, m1, s1, m2, s2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+        jph_joint_clear_impulses(runtime);
+    else
+    {
+        // This stage stores runtime only. All global setup units precede any
+        // warm unit, so shared endpoints are read before warm impulses change w.
+        jph_joint_setup(author, runtime, m1, s1, m2, s2,
+            step_params.gravityDt.w, step_params.counts.w != 0u);
+        if (runtime.flags.y == JointStatusSuccess
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            runtime.flags.y = JointStatusNumericalFailure;
+    }
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_setup_joint_typed(JointDirectory directory, JointSliderAuthor author, JointSliderState runtime)
+{
+    BodyModel m1, m2;
+    BodyState s1, s2;
+    jph_joint_bodies(directory, m1, s1, m2, s2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+        jph_joint_clear_impulses(runtime);
+    else
+    {
+        // This stage stores runtime only. All global setup units precede any
+        // warm unit, so shared endpoints are read before warm impulses change w.
+        jph_joint_setup(author, runtime, m1, s1, m2, s2,
+            step_params.gravityDt.w, step_params.counts.w != 0u);
+        if (runtime.flags.y == JointStatusSuccess
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            runtime.flags.y = JointStatusNumericalFailure;
+    }
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_setup_joint_typed(JointDirectory directory, JointDistanceAuthor author, JointDistanceState runtime)
+{
+    BodyModel m1, m2;
+    BodyState s1, s2;
+    jph_joint_bodies(directory, m1, s1, m2, s2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+        jph_joint_clear_impulses(runtime);
+    else
+    {
+        // This stage stores runtime only. All global setup units precede any
+        // warm unit, so shared endpoints are read before warm impulses change w.
+        jph_joint_setup(author, runtime, m1, s1, m2, s2,
+            step_params.gravityDt.w, step_params.counts.w != 0u);
+        if (runtime.flags.y == JointStatusSuccess
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            runtime.flags.y = JointStatusNumericalFailure;
+    }
+    jph_joint_store_state(directory, runtime);
+}
+
+void jph_setup_joint_typed(JointDirectory directory, JointSwingAuthor author, JointSwingState runtime)
+{
+    BodyModel m1, m2;
+    BodyState s1, s2;
+    jph_joint_bodies(directory, m1, s1, m2, s2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+        jph_joint_clear_impulses(runtime);
+    else
+    {
+        // This stage stores runtime only. All global setup units precede any
+        // warm unit, so shared endpoints are read before warm impulses change w.
+        jph_joint_setup(author, runtime, m1, s1, m2, s2,
+            step_params.gravityDt.w, step_params.counts.w != 0u);
+        if (runtime.flags.y == JointStatusSuccess
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            runtime.flags.y = JointStatusNumericalFailure;
+    }
+    jph_joint_store_state(directory, runtime);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void setup_joints(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    if (index >= joint_stream[0].value.x) return;
+    JointDirectory directory = jph_joint_load_directory(index);
+    if (!jph_selected_joint(index, directory) || !jph_selected_body(directory.bodies.y)
+        || (directory.bodies.x != InvalidQueryBodySlot && !jph_selected_body(directory.bodies.x))) return;
+    switch (directory.bodies.z)
+    {
+    case JointFixed:
+    {
+        JointFixedAuthor author; jph_joint_load_author(directory, author);
+        JointFixedState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    case JointHinge:
+    {
+        JointHingeAuthor author; jph_joint_load_author(directory, author);
+        JointHingeState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    case JointSlider:
+    {
+        JointSliderAuthor author; jph_joint_load_author(directory, author);
+        JointSliderState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    case JointDistance:
+    {
+        JointDistanceAuthor author; jph_joint_load_author(directory, author);
+        JointDistanceState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    case JointSwingTwist:
+    {
+        JointSwingAuthor author; jph_joint_load_author(directory, author);
+        JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    }
 }
 
 [shader("compute")]
@@ -173,11 +494,13 @@ void finish_joints(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
     if (index >= joint_stream[0].value.x) return;
-    JointAuthor author = jph_joint_load_author(index);
-    if (!jph_selected_joint(index, author)) return;
-    JointState runtime = jph_joint_load_state(index, author.bodies.z);
-    runtime.rotor.w = step_params.gravityDt.w;
-    jph_joint_store_state(index, runtime, author.bodies.z);
+    JointDirectory directory = jph_joint_load_directory(index);
+    if (!jph_selected_joint(index, directory)) return;
+    // All actual payloads share the first flags word. Previous dt belongs to
+    // flags.z; Hinge rotor.w retains its cached physical armature.
+    uint4 flags = joint_stream[directory.layout.y].value;
+    flags.z = asuint(step_params.gravityDt.w);
+    joint_stream[directory.layout.y].value = flags;
 }
 
 // Only the primitive geometry uses this local pose. Body state, principal

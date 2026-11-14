@@ -13,6 +13,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <variant>
+#include <utility>
+#include <stdexcept>
 
 namespace JPH { namespace GPU {
 
@@ -184,65 +187,125 @@ JPH_GPU_CONSTANT(JointResetSwingLimits, 4);
 JPH_GPU_CONSTANT(JointResetSwingMotor, 8);
 JPH_GPU_CONSTANT(JointResetTwistMotor, 16);
 JPH_GPU_CONSTANT(JointResetMobility, 32);
-JPH_GPU_CONSTANT(JointAuthorWords, 22);
-JPH_GPU_CONSTANT(JointStateWords, 21);
 JPH_GPU_CONSTANT(JointStatusSuccess, 0);
 JPH_GPU_CONSTANT(JointStatusInvalid, 1);
 JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
-
-// One stream of 16-byte QueryRecordWords: header (count, 1+JointAuthorWords*count,0,0),
-// count author records, then count runtime records. CPU uploads only the
-// header/author prefix; device stores address only the runtime suffix.
-struct JPH_GPU_ALIGN JointAuthor
-{
-    JPH_GPU_UINT4 bodies; // Connected slot (or InvalidQueryBodySlot), owner, type, flags.
-    JPH_GPU_UINT4 identity; // Stable joint identity low/high, world index, zero.
-    JPH_GPU_FLOAT4 ownerAnchor; // Affine-baked offset from the owner's origin.
-    JPH_GPU_FLOAT4 ownerAxis; // Unit hinge/slider axis in the owner's rotation frame.
-    JPH_GPU_FLOAT4 ownerLocalAnchor; // Raw authored anchor, retained on collapsed axes.
-    JPH_GPU_FLOAT4 rootCOM1;
-    JPH_GPU_FLOAT4 rootCOM2;
-    JPH_GPU_FLOAT4 scale1;
-    JPH_GPU_FLOAT4 scale2;
-    JPH_GPU_FLOAT4 limits; // Hinge radians or Slider metres: minimum/maximum, zero, zero.
-    JPH_GPU_FLOAT4 motor; // Target radians, stiffness, damping, maximum torque.
-    JPH_GPU_FLOAT4 passive; // Viscous damping, dry friction torque, armature, zero.
-    JPH_GPU_FLOAT4 connectedAnchor; // Distance: affine-baked connected offset, or absolute world point.
-    JPH_GPU_FLOAT4 connectedLocalAnchor; // Distance raw local anchor, including collapsed axes.
-    JPH_GPU_FLOAT4 linearSpring; // Distance: stiffness N/m, damping N s/m, zero, zero.
-    JPH_GPU_FLOAT4 angularFrame; // Owner constraint frame quaternion: columns X, Z cross X, Z.
-    JPH_GPU_FLOAT4 angularLimits; // Twist min/max, swing Y/Z half-angle, radians.
-    JPH_GPU_UINT4 angularModes; // Cone/Pyramid, swing mode, twist mode, zero.
-    JPH_GPU_FLOAT4 angularSpring; // Swing stiffness/damping, twist stiffness/damping, SI.
-    JPH_GPU_FLOAT4 angularTorque; // Swing cap, twist cap, Off friction torque, zero.
-    JPH_GPU_FLOAT4 angularTarget; // Relative constraint-space target quaternion XYZW.
-    JPH_GPU_FLOAT4 angularVelocity; // Owner constraint-space angular velocity rad/s, zero.
+#include "JointPayloadFields.inl"
+#define JPH_PAYLOAD_F(name) JPH_GPU_FLOAT4 name;
+#define JPH_PAYLOAD_U(name) JPH_GPU_UINT4 name;
+// Header: (count, authorEndWord, totalWordCount, 0).
+// Directory layout: (authorWordOffset, runtimeWordOffset, 0, 0).
+// Runtime flags: (initialized, status, precedingDt float bits, kind flags).
+// Hinge rotor.w is the cached accepted armature; other kinds have no rotor.
+struct JPH_GPU_ALIGN JointDirectory { JPH_GPU_UINT4 bodies; JPH_GPU_UINT4 identity; JPH_GPU_UINT4 layout; };
+JPH_GPU_CONSTANT(JointDirectoryWords, 3);
+struct JPH_GPU_ALIGN JointFixedAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_FIXED_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
-
-struct JPH_GPU_ALIGN JointState
-{
-    JPH_GPU_UINT4 flags; // Initialized, numerical status, last armature float bits, zero.
-    JPH_GPU_FLOAT4 frame1;
-    JPH_GPU_FLOAT4 frame2;
-    JPH_GPU_FLOAT4 anchor1; // Unscaled body-origin anchor; world point for world endpoint.
-    JPH_GPU_FLOAT4 anchor2;
-    JPH_GPU_FLOAT4 collapsed1; // Origin offset on axes whose author scale was zero.
-    JPH_GPU_FLOAT4 collapsed2;
-    JPH_GPU_FLOAT4 pointImpulse; // Fixed/Hinge world xyz; Slider transverse basis xy.
-    JPH_GPU_FLOAT4 angularImpulse; // Fixed/Slider world xyz impulse, or Hinge swing basis xy.
-    JPH_GPU_FLOAT4 axisImpulse; // Limit, motor, passive, total drive impulse.
-    JPH_GPU_FLOAT4 rotor; // Stored speed, rotor impulse, frozen old speed, preceding dt.
-    JPH_GPU_FLOAT4 setup; // Scalar coordinate, softness, bias, active limit side.
-    JPH_GPU_FLOAT4 distanceReference; // Distance: persistent normal.xyz, captured auto length.w.
-    JPH_GPU_FLOAT4 angularLimitX; // Twist world axis.xyz; inactive/unilateral/bilateral mode.w.
-    JPH_GPU_FLOAT4 angularLimitY; // Swing Y world axis.xyz and mode.w.
-    JPH_GPU_FLOAT4 angularLimitZ; // Swing Z world axis.xyz and mode.w.
-    JPH_GPU_FLOAT4 angularLimitImpulse; // Limit impulse X/Y/Z, zero.
-    JPH_GPU_FLOAT4 angularMotorImpulse; // Motor impulse X/Y/Z, zero.
-    JPH_GPU_FLOAT4 angularMotorSetupX; // Effective mass, gamma, bias, dt times torque cap.
-    JPH_GPU_FLOAT4 angularMotorSetupY; // Effective mass, gamma, bias, dt times torque cap.
-    JPH_GPU_FLOAT4 angularMotorSetupZ; // Effective mass, gamma, bias, dt times torque cap.
+JPH_GPU_CONSTANT(JointFixedAuthorWords, 6);
+struct JPH_GPU_ALIGN JointFixedState {
+    JPH_FIXED_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
+JPH_GPU_CONSTANT(JointFixedStateWords, 9);
+struct JPH_GPU_ALIGN JointHingeAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_HINGE_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointHingeAuthorWords, 10);
+struct JPH_GPU_ALIGN JointHingeState {
+    JPH_HINGE_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointHingeStateWords, 12);
+struct JPH_GPU_ALIGN JointSliderAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_SLIDER_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSliderAuthorWords, 8);
+struct JPH_GPU_ALIGN JointSliderState {
+    JPH_SLIDER_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSliderStateWords, 11);
+struct JPH_GPU_ALIGN JointDistanceAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_DISTANCE_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointDistanceAuthorWords, 10);
+struct JPH_GPU_ALIGN JointDistanceState {
+    JPH_DISTANCE_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointDistanceStateWords, 8);
+struct JPH_GPU_ALIGN JointSwingAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_SWING_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSwingAuthorWords, 13);
+struct JPH_GPU_ALIGN JointSwingState {
+    JPH_SWING_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSwingStateWords, 16);
+#undef JPH_PAYLOAD_F
+#undef JPH_PAYLOAD_U
+#ifdef __cplusplus
+// Accessor availability is derived from the same field schema as the typed
+// records; no second list of author field declarations is maintained here.
+#define JPH_AUTHOR_TRAIT(name) \
+    template<class T,class=void> struct JointHas_##name : std::false_type {}; \
+    template<class T> struct JointHas_##name<T,std::void_t<decltype(std::declval<T>().name)>> : std::true_type {};
+JPH_ALL_AUTHOR_FIELDS(JPH_AUTHOR_TRAIT,JPH_AUTHOR_TRAIT)
+#undef JPH_AUTHOR_TRAIT
+struct JointAuthor
+{
+    UInt4 bodies{}, identity{};
+    using Payload = std::variant<JointFixedAuthor, JointHingeAuthor, JointSliderAuthor, JointDistanceAuthor, JointSwingAuthor>;
+    Payload payload = JointFixedAuthor{};
+    explicit JointAuthor(std::uint32_t kind = JointFixed) { SetKind(kind); }
+    void SetKind(std::uint32_t kind) {
+        bodies.z = kind;
+        switch (kind) {
+        case JointFixed: payload.emplace<JointFixedAuthor>(); break;
+        case JointHinge: payload.emplace<JointHingeAuthor>(); break;
+        case JointSlider: payload.emplace<JointSliderAuthor>(); break;
+        case JointDistance: payload.emplace<JointDistanceAuthor>(); break;
+        case JointSwingTwist: payload.emplace<JointSwingAuthor>(); break;
+        default: throw std::invalid_argument("Unknown joint payload kind");
+        }
+    }
+    bool HasMatchingKind() const noexcept {
+        switch (bodies.z) {
+        case JointFixed: return std::holds_alternative<JointFixedAuthor>(payload);
+        case JointHinge: return std::holds_alternative<JointHingeAuthor>(payload);
+        case JointSlider: return std::holds_alternative<JointSliderAuthor>(payload);
+        case JointDistance: return std::holds_alternative<JointDistanceAuthor>(payload);
+        case JointSwingTwist: return std::holds_alternative<JointSwingAuthor>(payload);
+        default: return false;
+        }
+    }
+#define JPH_AUTHOR_ACCESS(type,name) \
+    type &name() { return std::visit([](auto &p) -> type & { \
+        if constexpr (JointHas_##name<std::decay_t<decltype(p)>>::value) return p.name; \
+        else throw std::logic_error("Field is absent from this joint kind: " #name); }, payload); } \
+    const type &name() const { static constexpr type zero{}; \
+        return std::visit([](const auto &p) -> const type & { \
+        if constexpr (JointHas_##name<std::decay_t<decltype(p)>>::value) return p.name; else return zero; }, payload); }
+#define JPH_AUTHOR_ACCESS_F(name) JPH_AUTHOR_ACCESS(Float4,name)
+#define JPH_AUTHOR_ACCESS_U(name) JPH_AUTHOR_ACCESS(UInt4,name)
+    JPH_ALL_AUTHOR_FIELDS(JPH_AUTHOR_ACCESS_F,JPH_AUTHOR_ACCESS_U)
+#undef JPH_AUTHOR_ACCESS_F
+#undef JPH_AUTHOR_ACCESS_U
+#undef JPH_AUTHOR_ACCESS
+};
+#endif
 
 // Typed joint output: scalar coordinate/velocity or full XYZW quaternion.
 struct JPH_GPU_ALIGN JointReadback
@@ -603,17 +666,123 @@ JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 32);
-JPH_GPU_CHECK_TYPE(JointAuthor, JointAuthorWords * 16);
-JPH_GPU_CHECK_TYPE(JointState, JointStateWords * 16);
+JPH_GPU_CHECK_TYPE(JointDirectory, 48);
+JPH_GPU_CHECK_TYPE(JointFixedAuthor, 96);
+JPH_GPU_CHECK_TYPE(JointFixedState, 144);
+JPH_GPU_CHECK_TYPE(JointHingeAuthor, 160);
+JPH_GPU_CHECK_TYPE(JointHingeState, 192);
+JPH_GPU_CHECK_TYPE(JointSliderAuthor, 128);
+JPH_GPU_CHECK_TYPE(JointSliderState, 176);
+JPH_GPU_CHECK_TYPE(JointDistanceAuthor, 160);
+JPH_GPU_CHECK_TYPE(JointDistanceState, 128);
+JPH_GPU_CHECK_TYPE(JointSwingAuthor, 208);
+JPH_GPU_CHECK_TYPE(JointSwingState, 256);
 JPH_GPU_CHECK_TYPE(JointReadback, 32);
 JPH_GPU_CHECK_TYPE(JointParams, 16);
-static_assert(offsetof(JointAuthor, ownerAnchor) == 32 && offsetof(JointAuthor, connectedAnchor) == 192
-              && offsetof(JointAuthor, linearSpring) == 224);
+static_assert(offsetof(JointFixedAuthor, ownerAnchor) == 0);
+static_assert(offsetof(JointFixedAuthor, ownerLocalAnchor) == 16);
+static_assert(offsetof(JointFixedAuthor, rootCOM1) == 32);
+static_assert(offsetof(JointFixedAuthor, rootCOM2) == 48);
+static_assert(offsetof(JointFixedAuthor, scale1) == 64);
+static_assert(offsetof(JointFixedAuthor, scale2) == 80);
+static_assert(offsetof(JointHingeAuthor, ownerAnchor) == 0);
+static_assert(offsetof(JointHingeAuthor, ownerLocalAnchor) == 16);
+static_assert(offsetof(JointHingeAuthor, rootCOM1) == 32);
+static_assert(offsetof(JointHingeAuthor, rootCOM2) == 48);
+static_assert(offsetof(JointHingeAuthor, scale1) == 64);
+static_assert(offsetof(JointHingeAuthor, scale2) == 80);
+static_assert(offsetof(JointHingeAuthor, ownerAxis) == 96);
+static_assert(offsetof(JointHingeAuthor, limits) == 112);
+static_assert(offsetof(JointHingeAuthor, motor) == 128);
+static_assert(offsetof(JointHingeAuthor, passive) == 144);
+static_assert(offsetof(JointSliderAuthor, ownerAnchor) == 0);
+static_assert(offsetof(JointSliderAuthor, ownerLocalAnchor) == 16);
+static_assert(offsetof(JointSliderAuthor, rootCOM1) == 32);
+static_assert(offsetof(JointSliderAuthor, rootCOM2) == 48);
+static_assert(offsetof(JointSliderAuthor, scale1) == 64);
+static_assert(offsetof(JointSliderAuthor, scale2) == 80);
+static_assert(offsetof(JointSliderAuthor, ownerAxis) == 96);
+static_assert(offsetof(JointSliderAuthor, limits) == 112);
+static_assert(offsetof(JointDistanceAuthor, ownerAnchor) == 0);
+static_assert(offsetof(JointDistanceAuthor, ownerLocalAnchor) == 16);
+static_assert(offsetof(JointDistanceAuthor, rootCOM1) == 32);
+static_assert(offsetof(JointDistanceAuthor, rootCOM2) == 48);
+static_assert(offsetof(JointDistanceAuthor, scale1) == 64);
+static_assert(offsetof(JointDistanceAuthor, scale2) == 80);
+static_assert(offsetof(JointDistanceAuthor, connectedAnchor) == 96);
+static_assert(offsetof(JointDistanceAuthor, connectedLocalAnchor) == 112);
+static_assert(offsetof(JointDistanceAuthor, limits) == 128);
+static_assert(offsetof(JointDistanceAuthor, linearSpring) == 144);
+static_assert(offsetof(JointSwingAuthor, ownerAnchor) == 0);
+static_assert(offsetof(JointSwingAuthor, ownerLocalAnchor) == 16);
+static_assert(offsetof(JointSwingAuthor, rootCOM1) == 32);
+static_assert(offsetof(JointSwingAuthor, rootCOM2) == 48);
+static_assert(offsetof(JointSwingAuthor, scale1) == 64);
+static_assert(offsetof(JointSwingAuthor, scale2) == 80);
+static_assert(offsetof(JointSwingAuthor, angularFrame) == 96);
+static_assert(offsetof(JointSwingAuthor, angularLimits) == 112);
+static_assert(offsetof(JointSwingAuthor, angularModes) == 128);
+static_assert(offsetof(JointSwingAuthor, angularSpring) == 144);
+static_assert(offsetof(JointSwingAuthor, angularTorque) == 160);
+static_assert(offsetof(JointSwingAuthor, angularTarget) == 176);
+static_assert(offsetof(JointSwingAuthor, angularVelocity) == 192);
+static_assert(offsetof(JointFixedState, flags) == 0);
+static_assert(offsetof(JointFixedState, anchor1) == 16);
+static_assert(offsetof(JointFixedState, anchor2) == 32);
+static_assert(offsetof(JointFixedState, collapsed1) == 48);
+static_assert(offsetof(JointFixedState, collapsed2) == 64);
+static_assert(offsetof(JointFixedState, frame1) == 80);
+static_assert(offsetof(JointFixedState, frame2) == 96);
+static_assert(offsetof(JointFixedState, pointImpulse) == 112);
+static_assert(offsetof(JointFixedState, angularImpulse) == 128);
+static_assert(offsetof(JointHingeState, flags) == 0);
+static_assert(offsetof(JointHingeState, anchor1) == 16);
+static_assert(offsetof(JointHingeState, anchor2) == 32);
+static_assert(offsetof(JointHingeState, collapsed1) == 48);
+static_assert(offsetof(JointHingeState, collapsed2) == 64);
+static_assert(offsetof(JointHingeState, frame1) == 80);
+static_assert(offsetof(JointHingeState, frame2) == 96);
+static_assert(offsetof(JointHingeState, pointImpulse) == 112);
+static_assert(offsetof(JointHingeState, angularImpulse) == 128);
+static_assert(offsetof(JointHingeState, axisImpulse) == 144);
+static_assert(offsetof(JointHingeState, rotor) == 160);
+static_assert(offsetof(JointHingeState, setup) == 176);
+static_assert(offsetof(JointSliderState, flags) == 0);
+static_assert(offsetof(JointSliderState, anchor1) == 16);
+static_assert(offsetof(JointSliderState, anchor2) == 32);
+static_assert(offsetof(JointSliderState, collapsed1) == 48);
+static_assert(offsetof(JointSliderState, collapsed2) == 64);
+static_assert(offsetof(JointSliderState, frame1) == 80);
+static_assert(offsetof(JointSliderState, frame2) == 96);
+static_assert(offsetof(JointSliderState, pointImpulse) == 112);
+static_assert(offsetof(JointSliderState, angularImpulse) == 128);
+static_assert(offsetof(JointSliderState, axisImpulse) == 144);
+static_assert(offsetof(JointSliderState, setup) == 160);
+static_assert(offsetof(JointDistanceState, flags) == 0);
+static_assert(offsetof(JointDistanceState, anchor1) == 16);
+static_assert(offsetof(JointDistanceState, anchor2) == 32);
+static_assert(offsetof(JointDistanceState, collapsed1) == 48);
+static_assert(offsetof(JointDistanceState, collapsed2) == 64);
+static_assert(offsetof(JointDistanceState, axisImpulse) == 80);
+static_assert(offsetof(JointDistanceState, setup) == 96);
+static_assert(offsetof(JointDistanceState, distanceReference) == 112);
+static_assert(offsetof(JointSwingState, flags) == 0);
+static_assert(offsetof(JointSwingState, anchor1) == 16);
+static_assert(offsetof(JointSwingState, anchor2) == 32);
+static_assert(offsetof(JointSwingState, collapsed1) == 48);
+static_assert(offsetof(JointSwingState, collapsed2) == 64);
+static_assert(offsetof(JointSwingState, frame1) == 80);
+static_assert(offsetof(JointSwingState, frame2) == 96);
+static_assert(offsetof(JointSwingState, pointImpulse) == 112);
+static_assert(offsetof(JointSwingState, angularLimitX) == 128);
+static_assert(offsetof(JointSwingState, angularLimitY) == 144);
+static_assert(offsetof(JointSwingState, angularLimitZ) == 160);
+static_assert(offsetof(JointSwingState, angularLimitImpulse) == 176);
+static_assert(offsetof(JointSwingState, angularMotorImpulse) == 192);
+static_assert(offsetof(JointSwingState, angularMotorSetupX) == 208);
+static_assert(offsetof(JointSwingState, angularMotorSetupY) == 224);
+static_assert(offsetof(JointSwingState, angularMotorSetupZ) == 240);
 static_assert(offsetof(JointReadback, status) == 16);
-static_assert(offsetof(JointAuthor, angularFrame) == 15 * 16 && offsetof(JointAuthor, angularVelocity) == 21 * 16);
-static_assert(offsetof(JointState, angularLimitX) == 13 * 16 && offsetof(JointState, angularMotorSetupZ) == 20 * 16);
-static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, setup) == 176
-              && offsetof(JointState, distanceReference) == 192);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);

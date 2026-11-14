@@ -165,8 +165,10 @@ inline constexpr StageDefinition Stages[] = {
 // Contact counts within device indexing and buffer/device address limits.
 // Cross-island numerical work remains bounded. A single connected island is
 // serial in this first slice; this is not a published performance result.
-// JointStream contains a header, twelve words per author, then twelve words
-// per runtime record. World joint ranges are disjoint and complete; endpoints
+// JointStream contains one header, a three-word directory per joint, then
+// compact author and runtime payloads sized by the shared kind schema. Word
+// offsets are local to this resource generation. World joint ordinal ranges
+// are disjoint and complete; endpoints
 // belong to that world or use InvalidQueryBodySlot for the world endpoint.
 // Fixed/Hinge author parameters must be finite, axes unit length and
 // stiffness/damping/torque/friction/armature nonnegative. SetupJoints writes
