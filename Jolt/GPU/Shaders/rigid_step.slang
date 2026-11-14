@@ -263,6 +263,46 @@ void jph_step_joint_typed(uint phase, JointDirectory directory, JointSwingAuthor
     jph_joint_store_state(directory, runtime);
 }
 
+void jph_step_joint_typed(uint phase, JointDirectory directory, JointSixAuthor author, JointSixState runtime)
+{
+    // Inner solver early returns must never be followed by stale full-state
+    // stores from an inactive joint assigned outside another island's owner.
+    // SetupJoints still checks the complete accepted stream before graph build;
+    // a failed or uninitialized row cannot be accepted as a successful empty row.
+    if (runtime.flags.x == 0u || runtime.flags.y != JointStatusSuccess
+        || (author.bodies.w & JointEnabled) == 0u)
+        return;
+    BodyModel m1, m2;
+    jph_joint_models(directory, m1, m2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        jph_joint_clear_impulses(runtime);
+        jph_joint_store_state(directory, runtime);
+        return;
+    }
+    if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
+    BodyState s1, s2;
+    jph_joint_states(directory, s1, s2);
+    BodyState old1 = s1, old2 = s2;
+    if (phase == 1u)
+        jph_joint_solve_velocity(author, runtime, m1, s1, m2, s2, step_params.gravityDt.w);
+    else if (phase == 2u)
+        jph_joint_solve_position(author, runtime, m1, s1, m2, s2, step_params.contact.w);
+    else
+        jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
+    if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
+        || !jph_joint_state_finite(runtime))
+    {
+        if (runtime.flags.y == JointStatusSuccess)
+            runtime.flags.y = JointStatusNumericalFailure;
+        s1 = old1;
+        s2 = old2;
+    }
+    if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
+    if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
+    jph_joint_store_state(directory, runtime);
+}
+
 void jph_step_joint(uint index, uint phase)
 {
     JointDirectory directory = jph_joint_load_directory(index);
@@ -302,6 +342,13 @@ void jph_step_joint(uint index, uint phase)
     {
         JointSwingAuthor author; jph_joint_load_author(directory, author);
         JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_step_joint_typed(phase, directory, author, runtime);
+        break;
+    }
+    case JointSixDOF:
+    {
+        JointSixAuthor author; jph_joint_load_author(directory, author);
+        JointSixState runtime; jph_joint_load_state(directory, runtime);
         jph_step_joint_typed(phase, directory, author, runtime);
         break;
     }
@@ -416,6 +463,26 @@ void jph_setup_joint_typed(JointDirectory directory, JointSwingAuthor author, Jo
     jph_joint_store_state(directory, runtime);
 }
 
+void jph_setup_joint_typed(JointDirectory directory, JointSixAuthor author, JointSixState runtime)
+{
+    BodyModel m1, m2;
+    BodyState s1, s2;
+    jph_joint_bodies(directory, m1, s1, m2, s2);
+    if (!jph_resident(m1) || !jph_resident(m2))
+        jph_joint_clear_impulses(runtime);
+    else
+    {
+        // This stage stores runtime only. All global setup units precede any
+        // warm unit, so shared endpoints are read before warm impulses change w.
+        jph_joint_setup(author, runtime, m1, s1, m2, s2,
+            step_params.gravityDt.w, step_params.counts.w != 0u);
+        if (runtime.flags.y == JointStatusSuccess
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            runtime.flags.y = JointStatusNumericalFailure;
+    }
+    jph_joint_store_state(directory, runtime);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void setup_joints(uint3 tid : SV_DispatchThreadID)
@@ -460,6 +527,13 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
     {
         JointSwingAuthor author; jph_joint_load_author(directory, author);
         JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_setup_joint_typed(directory, author, runtime);
+        break;
+    }
+    case JointSixDOF:
+    {
+        JointSixAuthor author; jph_joint_load_author(directory, author);
+        JointSixState runtime; jph_joint_load_state(directory, runtime);
         jph_setup_joint_typed(directory, author, runtime);
         break;
     }

@@ -18,6 +18,7 @@ struct JphSwingLimits
     uint flags;
     float2 twistSin, twistCos, ySin, yCos, zSin, zCos;
     float2 halfSwing;
+    float2 halfMinimum, halfMaximum;
 };
 
 JphSwingLimits jph_swing_limits(JointSwingAuthor a)
@@ -27,6 +28,7 @@ JphSwingLimits jph_swing_limits(JointSwingAuthor a)
     c.twistSin = sin(0.5f * a.angularLimits.xy);
     c.twistCos = cos(0.5f * a.angularLimits.xy);
     c.halfSwing = 0.5f * a.angularLimits.zw;
+    c.halfMinimum = -c.halfSwing; c.halfMaximum = c.halfSwing;
     c.ySin = float2(-sin(c.halfSwing.x), sin(c.halfSwing.x));
     c.zSin = float2(-sin(c.halfSwing.y), sin(c.halfSwing.y));
     c.yCos = float2(cos(c.halfSwing.x));
@@ -137,7 +139,81 @@ bool jph_swing_ellipse(float2 radius, float2 point, out float2 closest, out floa
     return all(isfinite(closest));
 }
 
-bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
+// Complete only the undefined zero polar coordinate: choose angle zero when
+// both component and w are exactly zero. No epsilon and no replacement axis.
+float2 jph_swing_half_angles(float4 swing)
+{
+    float2 denominator = float2(swing.w);
+    if (swing.w == 0.0f) {
+        if (swing.y == 0.0f) denominator.x = 1.0f;
+        if (swing.z == 0.0f) denominator.y = 1.0f;
+    }
+    return atan2(swing.yz, denominator);
+}
+
+// Shared Pyramid velocity normal. Cone and motor laws are unchanged.
+// Real-equivalent to desired X cross current X for unit rotations, with
+// the small common clamp displacement divided out before normalization.
+bool jph_swing_pyramid_axis(JphSwingLimits limits, float4 world1, float4 swing, out float3 axis)
+{
+    axis = float3(0.0f);
+    if (swing.w < 0.0f) swing = -swing;
+    float2 halfAngle = jph_swing_half_angles(swing);
+    float2 limited = clamp(halfAngle, limits.halfMinimum, limits.halfMaximum);
+    bool2 changed = limited != halfAngle;
+    if (!any(changed)) return true;
+
+    // Preserve each unchanged polar coordinate directly. At (component,w)=0,
+    // the explicit zero-coordinate completion above is sin=0, cos=1.
+    // Range scaling is ordinary hypot evaluation, not an activation threshold.
+    float2 range = max(abs(swing.yz), float2(abs(swing.w)));
+    float2 safeRange = float2(range.x == 0.0f ? 1.0f : range.x,
+                             range.y == 0.0f ? 1.0f : range.y);
+    float2 scaledComponent = swing.yz / safeRange;
+    float2 scaledW = float2(swing.w) / safeRange;
+    float2 magnitude = range * sqrt(scaledComponent * scaledComponent + scaledW * scaledW);
+    float2 safeMagnitude = float2(magnitude.x == 0.0f ? 1.0f : magnitude.x,
+                                 magnitude.y == 0.0f ? 1.0f : magnitude.y);
+    float2 sn = swing.yz / safeMagnitude;
+    float2 cs = float2(swing.w) / safeMagnitude;
+    if (magnitude.x == 0.0f) { sn.x = 0.0f; cs.x = 1.0f; }
+    if (magnitude.y == 0.0f) { sn.y = 0.0f; cs.y = 1.0f; }
+    if (changed.x) {
+        bool lower = halfAngle.x < limits.halfMinimum.x;
+        sn.x = lower ? limits.ySin.x : limits.ySin.y;
+        cs.x = lower ? limits.yCos.x : limits.yCos.y;
+    }
+    if (changed.y) {
+        bool lower = halfAngle.y < limits.halfMinimum.y;
+        sn.y = lower ? limits.zSin.x : limits.zSin.y;
+        cs.y = lower ? limits.zCos.x : limits.zCos.y;
+    }
+
+    float2 residual = magnitude * sin(halfAngle - limited);
+    float t = max(abs(residual.x), abs(residual.y));
+    if (t == 0.0f) return true;
+    float2 r = residual / t;
+    float3 h = float3(sn.y * r.x - sn.x * r.y, cs.y * r.x, cs.x * r.y);
+    float3 g = float3(sn.x * cs.y, cs.x * sn.y, cs.x * cs.y);
+    float v = dot(g, swing.yzw);
+    float3 local = float3(0.0f, v * h.y - t * h.x * h.z, v * h.z + t * h.x * h.y);
+    float scale = max(abs(local.x), max(abs(local.y), abs(local.z)));
+    // Exact equal/antipodal X directions have no cross normal. Returning zero
+    // retains that geometric degeneracy; no epsilon, prior axis or substitute.
+    if (scale == 0.0f) return true;
+    if (!isfinite(scale) || !all(isfinite(local)) || !all(isfinite(g))) return false;
+    local = normalize(local / scale);
+    float gs = max(abs(g.x), max(abs(g.y), abs(g.z)));
+    if (!(gs > 0.0f)) return false;
+    float4 projected = float4(0.0f, normalize(g / gs));
+    float3 world = jph_rotate(jph_quat_mul(world1, projected), local);
+    float lengthWorld = length(world);
+    if (!(lengthWorld > 0.0f) || !isfinite(lengthWorld) || !all(isfinite(world))) return false;
+    axis = world / lengthWorld;
+    return true;
+}
+
+bool jph_swing_clamp(uint swingType, JphSwingLimits c,
     inout float4 swing, inout float4 twist, out uint clamped, out float coneProjectionT)
 {
     clamped = 0u; coneProjectionT = 0.0f;
@@ -197,7 +273,7 @@ bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
         else if ((clamped & SwClampZMin) != 0u)
             swing = float4(0.0f, swing.y, 0.0f, sqrt(1.0f - swing.y * swing.y));
     }
-    else if (a.angularModes.x == 0u)
+    else if (swingType == 0u)
     {
         float2 point = swing.yz, closest;
         if (!jph_swing_ellipse(float2(c.ySin.y, c.zSin.y), point, closest, coneProjectionT)) return false;
@@ -210,8 +286,8 @@ bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
     }
     else
     {
-        float2 halfAngle = atan2(swing.yz, float2(swing.w));
-        float2 limited = clamp(halfAngle, -c.halfSwing, c.halfSwing);
+        float2 halfAngle = jph_swing_half_angles(swing);
+        float2 limited = clamp(halfAngle, c.halfMinimum, c.halfMaximum);
         if (any(limited != halfAngle))
         {
             float2 sn = sin(limited), cs = cos(limited);
@@ -222,6 +298,12 @@ bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
     if (negateSwing) swing = -swing;
     if (negateTwist) twist = -twist;
     return all(isfinite(swing)) && all(isfinite(twist));
+}
+
+bool jph_swing_clamp(JointSwingAuthor a, JphSwingLimits c,
+    inout float4 swing, inout float4 twist, out uint clamped, out float coneProjectionT)
+{
+    return jph_swing_clamp(a.angularModes.x,c,swing,twist,clamped,coneProjectionT);
 }
 
 // Exact desiredAxis x currentAxis direction with the positive projection t
@@ -301,19 +383,16 @@ float4 jph_swing_motor_setup(BodyModel m1, BodyState s1, BodyModel m2, BodyState
     return setup;
 }
 
-void jph_swing_setup(JointSwingAuthor a, inout JointSwingState state,
-    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
+void jph_swing_constraint_axes(uint swingType, JphSwingLimits c, float4 world1, float4 q,
+    out float4 limitX, out float4 limitY, out float4 limitZ, inout uint status)
 {
-    JphSwingLimits c = jph_swing_limits(a);
-    float4 world1 = jph_quat_mul(s1.rotation, state.frame1);
-    float4 world2 = jph_quat_mul(s2.rotation, state.frame2);
-    float4 q = jph_quat_mul(jph_joint_conjugate(world1), world2);
+    limitX=limitY=limitZ=float4(0.0f);
     float4 swing, twist;
     jph_swing_decompose(q, swing, twist);
     float4 limitedSwing = swing, limitedTwist = twist;
     uint clamped; float coneProjectionT;
-    if (!jph_swing_clamp(a, c, limitedSwing, limitedTwist, clamped, coneProjectionT))
-    { state.flags.y = JointStatusNumericalFailure; return; }
+    if (!jph_swing_clamp(swingType, c, limitedSwing, limitedTwist, clamped, coneProjectionT))
+    { status = JointStatusNumericalFailure; return; }
     float4 swung = jph_quat_mul(world1, swing);
     float3 x = jph_rotate(swung, float3(1,0,0));
     float3 y = jph_rotate(swung, float3(0,1,0));
@@ -334,28 +413,42 @@ void jph_swing_setup(JointSwingAuthor a, inout JointSwingState state,
     else if ((c.flags & (SwYFree | SwZFree)) != (SwYFree | SwZFree) &&
              (clamped & (SwClampYMin | SwClampYMax | SwClampZMin | SwClampZMax)) != 0u)
     {
-        if (a.angularModes.x == 0u)
+        if (swingType == 0u)
         {
             if (!jph_swing_cone_axis(world1, swing, limitedSwing,
                 float2(c.ySin.y, c.zSin.y), coneProjectionT, y))
-            { state.flags.y = JointStatusNumericalFailure; return; }
+            { status = JointStatusNumericalFailure; return; }
             yActive = any(y != float3(0.0f));
         }
         else
         {
-            float3 desired = jph_rotate(jph_quat_mul(world1, limitedSwing), float3(1,0,0));
-            y = cross(desired, x);
-            float size = length(y);
-            if (size != 0.0f) { y /= size; yActive = true; }
+            if (!jph_swing_pyramid_axis(c, world1, swing, y))
+            { status = JointStatusNumericalFailure; return; }
+            yActive = any(y != float3(0.0f));
         }
     }
     bool xActive = (c.flags & SwTwistLocked) != 0u ||
         ((c.flags & SwTwistFree) == 0u && (clamped & (SwClampTwistMin | SwClampTwistMax)) != 0u);
     if ((c.flags & SwTwistLocked) == 0u && (clamped & SwClampTwistMin) != 0u) x = -x;
+    limitX=float4(x,xActive?(c.twistSin.x==c.twistSin.y?2.0f:1.0f):0.0f);
+    limitY=float4(y,yActive?(c.ySin.x==c.ySin.y?2.0f:1.0f):0.0f);
+    limitZ=float4(z,zActive?(c.zSin.x==c.zSin.y?2.0f:1.0f):0.0f);
+}
+
+void jph_swing_setup(JointSwingAuthor a, inout JointSwingState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
+{
+    JphSwingLimits c = jph_swing_limits(a);
+    float4 world1 = jph_quat_mul(s1.rotation, state.frame1);
+    float4 world2 = jph_quat_mul(s2.rotation, state.frame2);
+    float4 q = jph_quat_mul(jph_joint_conjugate(world1), world2);
+    float4 axisX,axisY,axisZ;
+    jph_swing_constraint_axes(a.angularModes.x,c,world1,q,axisX,axisY,axisZ,state.flags.y);
+    if (state.flags.y != JointStatusSuccess) return;
     float lx = state.angularLimitImpulse.x, ly = state.angularLimitImpulse.y, lz = state.angularLimitImpulse.z;
-    state.angularLimitX = jph_swing_limit_setup(m1,s1,m2,s2,x,xActive,c.twistSin.x==c.twistSin.y,lx,state);
-    state.angularLimitY = jph_swing_limit_setup(m1,s1,m2,s2,y,yActive,c.ySin.x==c.ySin.y,ly,state);
-    state.angularLimitZ = jph_swing_limit_setup(m1,s1,m2,s2,z,zActive,c.zSin.x==c.zSin.y,lz,state);
+    state.angularLimitX = jph_swing_limit_setup(m1,s1,m2,s2,axisX.xyz,axisX.w!=0.0f,axisX.w==2.0f,lx,state);
+    state.angularLimitY = jph_swing_limit_setup(m1,s1,m2,s2,axisY.xyz,axisY.w!=0.0f,axisY.w==2.0f,ly,state);
+    state.angularLimitZ = jph_swing_limit_setup(m1,s1,m2,s2,axisZ.xyz,axisZ.w!=0.0f,axisZ.w==2.0f,lz,state);
     state.angularLimitImpulse = float4(lx,ly,lz,0.0f);
 
     float3 error = float3(0.0f);
@@ -446,24 +539,34 @@ void jph_swing_velocity(JointSwingAuthor a, inout JointSwingState state,
     jph_joint_apply_point(m1,s1,r1,m2,s2,r2,point,false);
 }
 
+void jph_swing_constraint_position(uint swingType, JphSwingLimits c, float4 q, float4 frame1, float4 frame2,
+    bool sixCut,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte, inout uint status)
+{
+    float4 swing,twist;
+    jph_swing_decompose(q,swing,twist);
+    uint clamped; float coneProjectionT;
+    if (!jph_swing_clamp(swingType,c,swing,twist,clamped,coneProjectionT))
+    { status = JointStatusNumericalFailure; return; }
+    if (clamped != 0u)
+    {
+        float4 inverseInitial = jph_quat_mul(frame2,
+            jph_joint_conjugate(jph_quat_mul(frame1,jph_quat_mul(swing,twist))));
+        float4 diff = jph_quat_mul(jph_quat_mul(s2.rotation,inverseInitial),jph_joint_conjugate(s1.rotation));
+        if (sixCut) diff = jph_six_cut(diff);
+        float3 error = 2.0f*(diff.w < 0.0f ? -diff.xyz : diff.xyz);
+        float3 angular = jph_joint_solve_rotation(m1,s1,m2,s2,-baumgarte*error, status);
+        if (status != JointStatusSuccess) return;
+        jph_joint_apply_angular(m1,s1,m2,s2,angular,true);
+    }
+}
+
 void jph_swing_position(JointSwingAuthor a, inout JointSwingState state,
     BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
 {
-    float4 swing,twist;
-    jph_swing_decompose(jph_swing_orientation(s1,s2,state),swing,twist);
-    uint clamped; float coneProjectionT;
-    if (!jph_swing_clamp(a,jph_swing_limits(a),swing,twist,clamped,coneProjectionT))
-    { state.flags.y = JointStatusNumericalFailure; return; }
-    if (clamped != 0u)
-    {
-        float4 inverseInitial = jph_quat_mul(state.frame2,
-            jph_joint_conjugate(jph_quat_mul(state.frame1,jph_quat_mul(swing,twist))));
-        float4 diff = jph_quat_mul(jph_quat_mul(s2.rotation,inverseInitial),jph_joint_conjugate(s1.rotation));
-        float3 error = 2.0f*(diff.w < 0.0f ? -diff.xyz : diff.xyz);
-        float3 angular = jph_joint_solve_rotation(m1,s1,m2,s2,-baumgarte*error, state.flags.y);
-        if (state.flags.y != JointStatusSuccess) return;
-        jph_joint_apply_angular(m1,s1,m2,s2,angular,true);
-    }
+    jph_swing_constraint_position(a.angularModes.x,jph_swing_limits(a),jph_swing_orientation(s1,s2,state),state.frame1,state.frame2,false,
+        m1,s1,m2,s2,baumgarte,state.flags.y);
+    if (state.flags.y != JointStatusSuccess) return;
     float3 r1,r2;
     jph_joint_arms(a,state,s1,s2,r1,r2);
     float3 u = s2.positionCOM.xyz-s1.positionCOM.xyz+r2-r1;

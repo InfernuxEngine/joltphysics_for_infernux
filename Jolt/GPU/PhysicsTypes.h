@@ -176,6 +176,7 @@ JPH_GPU_CONSTANT(JointHinge, 1);
 JPH_GPU_CONSTANT(JointSlider, 2);
 JPH_GPU_CONSTANT(JointDistance, 3);
 JPH_GPU_CONSTANT(JointSwingTwist, 4);
+JPH_GPU_CONSTANT(JointSixDOF, 5);
 JPH_GPU_CONSTANT(JointEnabled, 1);
 JPH_GPU_CONSTANT(JointCollisionEnabled, 2);
 JPH_GPU_CONSTANT(JointLimitsEnabled, 4);
@@ -187,6 +188,11 @@ JPH_GPU_CONSTANT(JointResetSwingLimits, 4);
 JPH_GPU_CONSTANT(JointResetSwingMotor, 8);
 JPH_GPU_CONSTANT(JointResetTwistMotor, 16);
 JPH_GPU_CONSTANT(JointResetMobility, 32);
+JPH_GPU_CONSTANT(JointResetSixClassification, 64);
+// Per-axis reset bits: translation limits, translation motors, angular motors.
+JPH_GPU_CONSTANT(JointResetSixLimitShift, 8);
+JPH_GPU_CONSTANT(JointResetSixLinearMotorShift, 11);
+JPH_GPU_CONSTANT(JointResetSixAngularMotorShift, 14);
 JPH_GPU_CONSTANT(JointStatusSuccess, 0);
 JPH_GPU_CONSTANT(JointStatusInvalid, 1);
 JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
@@ -254,6 +260,17 @@ struct JPH_GPU_ALIGN JointSwingState {
     JPH_SWING_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
 JPH_GPU_CONSTANT(JointSwingStateWords, 16);
+struct JPH_GPU_ALIGN JointSixAuthor {
+#ifndef __cplusplus
+    uint4 bodies, identity;
+#endif
+    JPH_SIX_AUTHOR_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSixAuthorWords, 26);
+struct JPH_GPU_ALIGN JointSixState {
+    JPH_SIX_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
+};
+JPH_GPU_CONSTANT(JointSixStateWords, 28);
 #undef JPH_PAYLOAD_F
 #undef JPH_PAYLOAD_U
 #ifdef __cplusplus
@@ -267,7 +284,7 @@ JPH_ALL_AUTHOR_FIELDS(JPH_AUTHOR_TRAIT,JPH_AUTHOR_TRAIT)
 struct JointAuthor
 {
     UInt4 bodies{}, identity{};
-    using Payload = std::variant<JointFixedAuthor, JointHingeAuthor, JointSliderAuthor, JointDistanceAuthor, JointSwingAuthor>;
+    using Payload = std::variant<JointFixedAuthor, JointHingeAuthor, JointSliderAuthor, JointDistanceAuthor, JointSwingAuthor, JointSixAuthor>;
     Payload payload = JointFixedAuthor{};
     explicit JointAuthor(std::uint32_t kind = JointFixed) { SetKind(kind); }
     void SetKind(std::uint32_t kind) {
@@ -278,6 +295,7 @@ struct JointAuthor
         case JointSlider: payload.emplace<JointSliderAuthor>(); break;
         case JointDistance: payload.emplace<JointDistanceAuthor>(); break;
         case JointSwingTwist: payload.emplace<JointSwingAuthor>(); break;
+        case JointSixDOF: payload.emplace<JointSixAuthor>(); break;
         default: throw std::invalid_argument("Unknown joint payload kind");
         }
     }
@@ -288,6 +306,7 @@ struct JointAuthor
         case JointSlider: return std::holds_alternative<JointSliderAuthor>(payload);
         case JointDistance: return std::holds_alternative<JointDistanceAuthor>(payload);
         case JointSwingTwist: return std::holds_alternative<JointSwingAuthor>(payload);
+        case JointSixDOF: return std::holds_alternative<JointSixAuthor>(payload);
         default: return false;
         }
     }
@@ -307,10 +326,12 @@ struct JointAuthor
 };
 #endif
 
-// Typed joint output: scalar coordinate/velocity or full XYZW quaternion.
+// Demand-only typed motion/pose results and grouped status scratch.
+// This is not the persistent per-kind runtime state or a full-stream CPU read.
 struct JPH_GPU_ALIGN JointReadback
 {
-    JPH_GPU_FLOAT4 values;
+    JPH_GPU_FLOAT4 values;      // Scalar coordinate/velocity or Six position.xyz/0.
+    JPH_GPU_FLOAT4 orientation; // Swing/Six XYZW; zero for scalar/status rows.
     JPH_GPU_UINT4 status;
 };
 
@@ -678,7 +699,9 @@ JPH_GPU_CHECK_TYPE(JointDistanceAuthor, 160);
 JPH_GPU_CHECK_TYPE(JointDistanceState, 128);
 JPH_GPU_CHECK_TYPE(JointSwingAuthor, 208);
 JPH_GPU_CHECK_TYPE(JointSwingState, 256);
-JPH_GPU_CHECK_TYPE(JointReadback, 32);
+JPH_GPU_CHECK_TYPE(JointSixAuthor, 416);
+JPH_GPU_CHECK_TYPE(JointSixState, 448);
+JPH_GPU_CHECK_TYPE(JointReadback, 48);
 JPH_GPU_CHECK_TYPE(JointParams, 16);
 static_assert(offsetof(JointFixedAuthor, ownerAnchor) == 0);
 static_assert(offsetof(JointFixedAuthor, ownerLocalAnchor) == 16);
@@ -783,7 +806,7 @@ static_assert(offsetof(JointSwingState, angularMotorImpulse) == 192);
 static_assert(offsetof(JointSwingState, angularMotorSetupX) == 208);
 static_assert(offsetof(JointSwingState, angularMotorSetupY) == 224);
 static_assert(offsetof(JointSwingState, angularMotorSetupZ) == 240);
-static_assert(offsetof(JointReadback, status) == 16);
+static_assert(offsetof(JointReadback, orientation) == 16 && offsetof(JointReadback, status) == 32);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);

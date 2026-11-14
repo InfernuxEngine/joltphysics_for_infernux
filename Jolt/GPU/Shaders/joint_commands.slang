@@ -68,6 +68,21 @@ void jph_update_joint_state(JointSwingAuthor a, inout JointSwingState state, uin
     if ((flags & JointResetTwistMotor) != 0u) state.angularMotorImpulse.x = 0.0f;
 }
 
+void jph_update_joint_state(JointSixAuthor a, inout JointSixState state, uint flags)
+{
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if ((flags & (JointResetMobility | JointResetSixClassification)) != 0u)
+    { jph_joint_clear_impulses(state); return; }
+    if ((flags & JointResetSwingLimits) != 0u)
+        state.angularLimitImpulse = float4(0.0f);
+    for (uint i=0u;i<3u;++i)
+    {
+        if ((flags & (1u << (JointResetSixLimitShift+i))) != 0u) state.sixLimitImpulse[i]=0.0f;
+        if ((flags & (1u << (JointResetSixLinearMotorShift+i))) != 0u) state.sixMotorImpulse[i]=0.0f;
+        if ((flags & (1u << (JointResetSixAngularMotorShift+i))) != 0u) state.angularMotorImpulse[i]=0.0f;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void update_joint_state(uint3 tid : SV_DispatchThreadID)
@@ -115,6 +130,14 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
     {
         JointSwingAuthor author; jph_joint_load_author(directory, author);
         JointSwingState runtime; jph_joint_load_state(directory, runtime);
+        jph_update_joint_state(author, runtime, flags);
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
+    case JointSixDOF:
+    {
+        JointSixAuthor author; jph_joint_load_author(directory, author);
+        JointSixState runtime; jph_joint_load_state(directory, runtime);
         jph_update_joint_state(author, runtime, flags);
         jph_joint_store_state(directory, runtime);
         break;
@@ -191,6 +214,14 @@ void initialize_joints(uint3 tid : SV_DispatchThreadID)
         jph_joint_store_state(directory, runtime);
         break;
     }
+    case JointSixDOF:
+    {
+        JointSixAuthor author; jph_joint_load_author(directory, author);
+        JointSixState runtime = jph_joint_initialize(author, s1, s2);
+        if (old_index != InvalidQueryBodySlot) runtime.flags.y = JointStatusInvalid;
+        jph_joint_store_state(directory, runtime);
+        break;
+    }
     }
 }
 
@@ -261,8 +292,23 @@ void jph_read_joint_motion(JointSwingAuthor a, JointSwingState state, inout Join
     BodyState s1 = jph_joint_world_state();
     if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
     BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
-    result.values = jph_swing_orientation(s1, s2, state);
-    if (!all(isfinite(result.values))) result.status.x = JointStatusNumericalFailure;
+    result.orientation = jph_swing_orientation(s1, s2, state);
+    if (!all(isfinite(result.orientation))) result.status.x = JointStatusNumericalFailure;
+}
+
+void jph_read_joint_motion(JointSixAuthor a, JointSixState state, inout JointReadback result)
+{
+    if (state.flags.x == 0u) return;
+    result.status.x = state.flags.y;
+    if (state.flags.y != JointStatusSuccess) return;
+    BodyState s1 = jph_joint_world_state();
+    if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+    BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+    float3 r1,r2; jph_joint_arms(a,state,s1,s2,r1,r2);
+    float4 world1 = jph_quat_mul(s1.rotation,state.frame1);
+    result.values = float4(jph_inverse_rotate(world1,s2.positionCOM.xyz-s1.positionCOM.xyz+r2-r1),0.0f);
+    result.orientation = jph_six_orientation(s1,s2,state);
+    if (!all(isfinite(result.values)) || !all(isfinite(result.orientation))) result.status.x=JointStatusNumericalFailure;
 }
 
 [shader("compute")]
@@ -273,6 +319,7 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
     if (row >= joint_params.counts.z) return;
     JointReadback result;
     result.values = float4(0.0f);
+    result.orientation = float4(0.0f);
     result.status = uint4(JointStatusInvalid, 0u, 0u, 0u);
     uint index = joint_query_rows[row];
     if (index < joint_stream[0].value.x)
@@ -307,6 +354,13 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
             {
                 JointSwingAuthor author; jph_joint_load_author(directory, author);
                 JointSwingState runtime; jph_joint_load_state(directory, runtime);
+                jph_read_joint_motion(author, runtime, result);
+                break;
+            }
+            case JointSixDOF:
+            {
+                JointSixAuthor author; jph_joint_load_author(directory, author);
+                JointSixState runtime; jph_joint_load_state(directory, runtime);
                 jph_read_joint_motion(author, runtime, result);
                 break;
             }
@@ -360,6 +414,7 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
     {
         JointReadback result;
         result.values = float4(0.0f);
+    result.orientation = float4(0.0f);
         result.status = uint4(joint_status_values[0], joint_status_failures[0], 0u, 0u);
         joint_motion[joint_params.counts.z + group.x] = result;
     }

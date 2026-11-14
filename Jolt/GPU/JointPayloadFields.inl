@@ -135,4 +135,79 @@
     F(angularSpring) \
     F(angularTorque) \
     F(angularTarget) \
+    F(angularVelocity) \
+    U(sixModes) \
+    F(sixLinearMin) \
+    F(sixLinearMax) \
+    F(sixAngularMin) \
+    F(sixAngularMax) \
+    F(sixLimitStiffness) \
+    F(sixLimitDamping) \
+    F(sixLinearFriction) \
+    F(sixAngularFriction) \
+    F(sixLinearMotorK) \
+    F(sixLinearMotorC) \
+    F(sixLinearMotorForce) \
+    F(sixAngularMotorK) \
+    F(sixAngularMotorC) \
+    F(sixAngularMotorTorque) \
+    F(sixTargetPosition) \
+    F(sixTargetVelocity)
+
+
+#define JPH_SIX_AUTHOR_FIELDS(F,U) \
+    F(ownerAnchor) \
+    F(ownerLocalAnchor) \
+    F(rootCOM1) \
+    F(rootCOM2) \
+    F(scale1) \
+    F(scale2) \
+    F(angularFrame) \
+    U(sixModes) \
+    F(sixLinearMin) \
+    F(sixLinearMax) \
+    F(sixAngularMin) \
+    F(sixAngularMax) \
+    F(sixLimitStiffness) \
+    F(sixLimitDamping) \
+    F(sixLinearFriction) \
+    F(sixAngularFriction) \
+    F(sixLinearMotorK) \
+    F(sixLinearMotorC) \
+    F(sixLinearMotorForce) \
+    F(sixAngularMotorK) \
+    F(sixAngularMotorC) \
+    F(sixAngularMotorTorque) \
+    F(sixTargetPosition) \
+    F(sixTargetVelocity) \
+    F(angularTarget) \
     F(angularVelocity)
+#define JPH_SIX_STATE_FIELDS(F,U) \
+    U(flags) \
+    F(anchor1) \
+    F(anchor2) \
+    F(collapsed1) \
+    F(collapsed2) \
+    F(frame1) \
+    F(frame2) \
+    F(pointImpulse) \
+    F(angularImpulse) \
+    F(angularLimitX) \
+    F(angularLimitY) \
+    F(angularLimitZ) \
+    F(angularLimitImpulse) \
+    F(angularMotorImpulse) \
+    F(angularMotorSetupX) \
+    F(angularMotorSetupY) \
+    F(angularMotorSetupZ) \
+    F(sixTranslationAxisX) \
+    F(sixTranslationAxisY) \
+    F(sixTranslationAxisZ) \
+    F(sixLimitSetupX) \
+    F(sixLimitSetupY) \
+    F(sixLimitSetupZ) \
+    F(sixMotorSetupX) \
+    F(sixMotorSetupY) \
+    F(sixMotorSetupZ) \
+    F(sixLimitImpulse) \
+    F(sixMotorImpulse)

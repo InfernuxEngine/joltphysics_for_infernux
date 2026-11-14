@@ -113,6 +113,7 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
     case JointSlider: author_words = JointSliderAuthorWords; state_words = JointSliderStateWords; break;
     case JointDistance: author_words = JointDistanceAuthorWords; state_words = JointDistanceStateWords; break;
     case JointSwingTwist: author_words = JointSwingAuthorWords; state_words = JointSwingStateWords; break;
+    case JointSixDOF: author_words = JointSixAuthorWords; state_words = JointSixStateWords; break;
     }
     if (author_words == 0u || state_words == 0u || any(layout.zw != uint2(0u))
         || layout.x < 1u + JointDirectoryWords * header.x || layout.x > header.y

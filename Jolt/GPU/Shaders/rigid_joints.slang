@@ -32,6 +32,7 @@ uint jph_joint_state_words(uint kind)
     case JointSlider: return JointSliderStateWords;
     case JointDistance: return JointDistanceStateWords;
     case JointSwingTwist: return JointSwingStateWords;
+    case JointSixDOF: return JointSixStateWords;
     default: return 0u;
     }
 }
@@ -176,12 +177,34 @@ void jph_joint_load_author(JointDirectory directory, out JointSwingAuthor a)
 #undef JPH_LOAD_U
 }
 
+void jph_joint_load_author(JointDirectory directory, out JointSixAuthor a)
+{
+    a.bodies = directory.bodies;
+    a.identity = directory.identity;
+    uint p = directory.layout.x;
+#define JPH_LOAD_F(name) a.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) a.name = joint_stream[p++].value;
+    JPH_SIX_AUTHOR_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
 void jph_joint_load_state(JointDirectory directory, out JointSwingState s)
 {
     uint p = directory.layout.y;
 #define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
 #define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
     JPH_SWING_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
+#undef JPH_LOAD_F
+#undef JPH_LOAD_U
+}
+
+void jph_joint_load_state(JointDirectory directory, out JointSixState s)
+{
+    uint p = directory.layout.y;
+#define JPH_LOAD_F(name) s.name = asfloat(joint_stream[p++].value);
+#define JPH_LOAD_U(name) s.name = joint_stream[p++].value;
+    JPH_SIX_STATE_FIELDS(JPH_LOAD_F,JPH_LOAD_U)
 #undef JPH_LOAD_F
 #undef JPH_LOAD_U
 }
@@ -196,7 +219,32 @@ void jph_joint_store_state(JointDirectory directory, JointSwingState s)
 #undef JPH_STORE_U
 }
 
+void jph_joint_store_state(JointDirectory directory, JointSixState s)
+{
+    uint p = directory.layout.y;
+#define JPH_STORE_F(name) joint_stream[p++].value = asuint(s.name);
+#define JPH_STORE_U(name) joint_stream[p++].value = s.name;
+    JPH_SIX_STATE_FIELDS(JPH_STORE_F,JPH_STORE_U)
+#undef JPH_STORE_F
+#undef JPH_STORE_U
+}
+
 float4 jph_joint_conjugate(float4 q) { return float4(-q.xyz, q.w); }
+
+// Six-only SO(3) cut convention. Old joint drivers never call this helper.
+// At exact pi the dominant vector component decides sign; strict comparisons
+// retain deterministic x/y/z priority when magnitudes tie.
+float4 jph_six_cut(float4 q)
+{
+    if (q.w < 0.0f) return -q;
+    if (q.w > 0.0f) return q;
+    uint dominant = 0u;
+    if (abs(q.y) > abs(q.x)) dominant = 1u;
+    if (abs(q.z) > abs(q[dominant])) dominant = 2u;
+    if (q[dominant] < 0.0f) q = -q;
+    q.w = 0.0f; // Signed zero is the same exact cut, including atan2 inputs.
+    return q;
+}
 
 BodyState jph_joint_world_state()
 {
@@ -494,6 +542,82 @@ JointSwingState jph_joint_initialize(JointSwingAuthor a, BodyState s1, BodyState
     return s;
 }
 
+JointSixState jph_joint_initialize(JointSixAuthor a, BodyState s1, BodyState s2)
+{
+    JointSixState s;
+    s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
+    if (a.bodies.x == InvalidQueryBodySlot)
+    {
+        s.anchor1 = float4(world_anchor, 0.0f);
+        s.collapsed1 = float4(0.0f);
+    }
+    else
+    {
+        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = float3(0.0f);
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
+    }
+    jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
+    float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    world_frame = normalize(jph_quat_mul(s2.rotation, a.angularFrame));
+    s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
+    // Six's authored frame is already owner-local and normalized.
+    s.frame2 = a.angularFrame;
+    s.pointImpulse = float4(0.0f);
+    s.angularImpulse = float4(0.0f);
+    s.angularLimitX = float4(0.0f);
+    s.angularLimitY = float4(0.0f);
+    s.angularLimitZ = float4(0.0f);
+    s.angularLimitImpulse = float4(0.0f);
+    s.angularMotorImpulse = float4(0.0f);
+    s.angularMotorSetupX = float4(0.0f);
+    s.angularMotorSetupY = float4(0.0f);
+    s.angularMotorSetupZ = float4(0.0f);
+    s.sixTranslationAxisX = float4(0.0f);
+    s.sixTranslationAxisY = float4(0.0f);
+    s.sixTranslationAxisZ = float4(0.0f);
+    s.sixLimitSetupX = float4(0.0f);
+    s.sixLimitSetupY = float4(0.0f);
+    s.sixLimitSetupZ = float4(0.0f);
+    s.sixMotorSetupX = float4(0.0f);
+    s.sixMotorSetupY = float4(0.0f);
+    s.sixMotorSetupZ = float4(0.0f);
+    s.sixLimitImpulse = float4(0.0f);
+    s.sixMotorImpulse = float4(0.0f);
+
+    if (!(all(isfinite(s.anchor1))
+        && all(isfinite(s.anchor2))
+        && all(isfinite(s.collapsed1))
+        && all(isfinite(s.collapsed2))
+        && all(isfinite(s.frame1))
+        && all(isfinite(s.frame2))
+        && all(isfinite(s.pointImpulse))
+        && all(isfinite(s.angularImpulse))
+        && all(isfinite(s.angularLimitX))
+        && all(isfinite(s.angularLimitY))
+        && all(isfinite(s.angularLimitZ))
+        && all(isfinite(s.angularLimitImpulse))
+        && all(isfinite(s.angularMotorImpulse))
+        && all(isfinite(s.angularMotorSetupX))
+        && all(isfinite(s.angularMotorSetupY))
+        && all(isfinite(s.angularMotorSetupZ))
+        && all(isfinite(s.sixTranslationAxisX))
+        && all(isfinite(s.sixTranslationAxisY))
+        && all(isfinite(s.sixTranslationAxisZ))
+        && all(isfinite(s.sixLimitSetupX))
+        && all(isfinite(s.sixLimitSetupY))
+        && all(isfinite(s.sixLimitSetupZ))
+        && all(isfinite(s.sixMotorSetupX))
+        && all(isfinite(s.sixMotorSetupY))
+        && all(isfinite(s.sixMotorSetupZ))
+        && all(isfinite(s.sixLimitImpulse))
+        && all(isfinite(s.sixMotorImpulse))))
+        s.flags.y = JointStatusNumericalFailure;
+    return s;
+}
+
 float3 jph_joint_axis(BodyState s1, JointHingeState s)
 {
     return jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
@@ -563,6 +687,13 @@ void jph_joint_arms(JointDistanceAuthor a, JointDistanceState s, BodyState s1, B
 }
 
 void jph_joint_arms(JointSwingAuthor a, JointSwingState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
+{
+    r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
+        jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
+    r2 = jph_rotate(s2.rotation, s.anchor2.xyz * a.scale2.xyz + s.collapsed2.xyz - a.rootCOM2.xyz);
+}
+
+void jph_joint_arms(JointSixAuthor a, JointSixState s, BodyState s1, BodyState s2, out float3 r1, out float3 r2)
 {
     r1 = a.bodies.x == InvalidQueryBodySlot ? s.anchor1.xyz :
         jph_rotate(s1.rotation, s.anchor1.xyz * a.scale1.xyz + s.collapsed1.xyz - a.rootCOM1.xyz);
@@ -1081,6 +1212,13 @@ void jph_joint_clear_impulses(inout JointSwingState state)
     state.pointImpulse = float4(0.0f);
     state.angularLimitImpulse = float4(0.0f);
     state.angularMotorImpulse = float4(0.0f);
+}
+
+void jph_joint_clear_impulses(inout JointSixState state)
+{
+    state.pointImpulse = state.angularImpulse = float4(0.0f);
+    state.angularLimitImpulse = state.angularMotorImpulse = float4(0.0f);
+    state.sixLimitImpulse = state.sixMotorImpulse = float4(0.0f);
 }
 
 #include "rigid_swing_twist.slang"
@@ -1824,6 +1962,40 @@ bool jph_joint_state_finite(JointSwingState state)
         && all(isfinite(state.angularMotorSetupY))
         && all(isfinite(state.angularMotorSetupZ));
 }
+
+bool jph_joint_state_finite(JointSixState state)
+{
+    return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.anchor1))
+        && all(isfinite(state.anchor2))
+        && all(isfinite(state.collapsed1))
+        && all(isfinite(state.collapsed2))
+        && all(isfinite(state.frame1))
+        && all(isfinite(state.frame2))
+        && all(isfinite(state.pointImpulse))
+        && all(isfinite(state.angularImpulse))
+        && all(isfinite(state.angularLimitX))
+        && all(isfinite(state.angularLimitY))
+        && all(isfinite(state.angularLimitZ))
+        && all(isfinite(state.angularLimitImpulse))
+        && all(isfinite(state.angularMotorImpulse))
+        && all(isfinite(state.angularMotorSetupX))
+        && all(isfinite(state.angularMotorSetupY))
+        && all(isfinite(state.angularMotorSetupZ))
+        && all(isfinite(state.sixTranslationAxisX))
+        && all(isfinite(state.sixTranslationAxisY))
+        && all(isfinite(state.sixTranslationAxisZ))
+        && all(isfinite(state.sixLimitSetupX))
+        && all(isfinite(state.sixLimitSetupY))
+        && all(isfinite(state.sixLimitSetupZ))
+        && all(isfinite(state.sixMotorSetupX))
+        && all(isfinite(state.sixMotorSetupY))
+        && all(isfinite(state.sixMotorSetupZ))
+        && all(isfinite(state.sixLimitImpulse))
+        && all(isfinite(state.sixMotorImpulse));
+}
+
+#include "rigid_six_dof.slang"
 
 bool jph_joint_suppresses_pair(WorldRange world, uint body1, uint body2)
 {
