@@ -6,6 +6,8 @@
 
 ConstantBuffer<QueryParams> query_params;
 StructuredBuffer<QueryRecordWord> query_inputs;
+// Compact selected-world identities. Model/shape slots and hit addresses stay
+// global; only this identity port subtracts the retained world's body/leaf bases.
 StructuredBuffer<QueryBodyIdentity> query_body_ids;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
@@ -493,15 +495,15 @@ bool query_less(QueryInput request, QueryHit a, QueryHit b)
     }
     if (request.meta.y == QueryUniqueBody)
     {
-        uint2 a_id = query_body_ids[a.meta.x].ids.zw;
-        uint2 b_id = query_body_ids[b.meta.x].ids.zw;
+        uint2 a_id = query_body_ids[a.meta.x - query_params.selection.y].ids.zw;
+        uint2 b_id = query_body_ids[b.meta.x - query_params.selection.y].ids.zw;
         if (a_id.y != b_id.y || a_id.x != b_id.x)
             return a_id.y != b_id.y ? a_id.y < b_id.y : a_id.x < b_id.x;
     }
     if (request.meta.y != QueryUniqueBody && a.positionDistance.w != b.positionDistance.w)
         return a.positionDistance.w < b.positionDistance.w;
-    uint bodyA = query_body_ids[a.meta.x].ids.x;
-    uint bodyB = query_body_ids[b.meta.x].ids.x;
+    uint bodyA = query_body_ids[a.meta.x - query_params.selection.y].ids.x;
+    uint bodyB = query_body_ids[b.meta.x - query_params.selection.y].ids.x;
     if (bodyA != bodyB)
         return bodyA < bodyB;
     uint subA = shape_models[a.meta.z].meta.z;
@@ -618,7 +620,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
     }
     state.rotation = normalize(state.rotation);
     QueryMotionState output;
-    output.meta = uint4(slot, 1u, query_body_ids[slot].ids.x, model.meta.z);
+    output.meta = uint4(slot, 1u, query_body_ids[slot - query_params.selection.y].ids.x, model.meta.z);
     output.positionInverseMass = float4(state.positionCOM.xyz - jph_rotate(state.rotation, request.geometry.xyz), 0.0f);
     output.rotation = state.rotation;
     output.centerOfMass = float4(state.positionCOM.xyz, 0.0f);
@@ -943,7 +945,7 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
                            query_accepts(request, shape, slot);
             }
             if (admitted && (request.meta.w & QuerySweepPolicy) != 0u)
-                admitted = !all(query_body_ids[query_cast_params.controls.y + leaf].ids.xy == request.source.zw);
+                admitted = !all(query_body_ids[query_cast_params.controls.y + (leaf - query_params.selection.z)].ids.xy == request.source.zw);
             if (!admitted)
             {
                 ++state.cursor.x;
@@ -1040,7 +1042,7 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
             BodyModel model = body_models[slot];
             if (!jph_resident(model) || model.meta.y == 0u)
                 continue;
-            if (request.meta.x == QueryBodyBounds && query_body_ids[slot].ids.y == 0u)
+            if (request.meta.x == QueryBodyBounds && query_body_ids[slot - query_params.selection.y].ids.y == 0u)
                 continue;
             BodyState state = body_states[slot - query_params.selection.y];
             bool accepted = false;
