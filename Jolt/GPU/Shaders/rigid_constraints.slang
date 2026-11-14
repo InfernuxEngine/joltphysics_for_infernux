@@ -104,7 +104,7 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
     uint4 e = joint_stream[author].value;
     uint world = joint_stream[author + 1u].value.z;
     uint4 state = joint_stream[header.y + JointRecordWords * j].value;
-    if (state.y != JointStatusSuccess || e.z > JointHinge) status |= ConstraintBadJoint;
+    if (state.y != JointStatusSuccess || e.z > JointSlider) status |= ConstraintBadJoint;
     if (world >= constraint_params.counts.w || !cs_body(e.y, world)
         || (e.x != InvalidQueryBodySlot && !cs_body(e.x, world))) status |= ConstraintBadModel;
     uint a = ConstraintInvalid, b = ConstraintInvalid;

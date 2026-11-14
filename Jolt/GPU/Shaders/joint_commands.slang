@@ -26,6 +26,13 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
         jph_joint_store_state(index, state);
         return;
     }
+    if (a.bodies.z == JointSlider)
+    {
+        jph_joint_clear_impulses(state);
+        state.rotor.xyz = float3(0.0f);
+        jph_joint_store_state(index, state);
+        return;
+    }
     // Reset at the ordered author boundary, before a later body command.
     // Deferring this until setup would collapse two distinct setter orders.
     float old_armature = asfloat(state.flags.z);
@@ -83,7 +90,7 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
     {
         JointAuthor a = jph_joint_load_author(index);
         JointState state = jph_joint_load_state(index);
-        if (a.bodies.z == JointHinge && state.flags.x != 0u)
+        if ((a.bodies.z == JointHinge || a.bodies.z == JointSlider) && state.flags.x != 0u)
         {
             result.value.z = state.flags.y;
             if (state.flags.y == JointStatusSuccess)
@@ -91,11 +98,27 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
                 BodyState s1 = jph_joint_world_state();
                 if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
                 BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
-                float angle = jph_joint_angle(s1, s2, state);
-                float3 owner_axis = jph_rotate(jph_quat_mul(s2.rotation, state.frame2), float3(0.0f, 0.0f, 1.0f));
-                float velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
-                if (isfinite(angle) && isfinite(velocity))
-                    result.value.xy = uint2(asuint(angle), asuint(velocity));
+                float coordinate, velocity;
+                if (a.bodies.z == JointSlider)
+                {
+                    float3 r1, r2;
+                    jph_joint_arms(a, state, s1, s2, r1, r2);
+                    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+                    float3 axis, n0, n1;
+                    jph_slider_basis(s1, state, axis, n0, n1);
+                    coordinate = dot(axis, u);
+                    velocity = dot(axis, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
+                        + dot(cross(r2, axis), s2.angularVelocity.xyz)
+                        - dot(cross(r1 + u, axis), s1.angularVelocity.xyz);
+                }
+                else
+                {
+                    coordinate = jph_joint_angle(s1, s2, state);
+                    float3 owner_axis = jph_rotate(jph_quat_mul(s2.rotation, state.frame2), float3(0.0f, 0.0f, 1.0f));
+                    velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
+                }
+                if (isfinite(coordinate) && isfinite(velocity))
+                    result.value.xy = uint2(asuint(coordinate), asuint(velocity));
                 else
                     result.value.z = JointStatusNumericalFailure;
             }

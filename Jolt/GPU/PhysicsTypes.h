@@ -168,6 +168,7 @@ struct JPH_GPU_ALIGN WorldRange
 
 JPH_GPU_CONSTANT(JointFixed, 0);
 JPH_GPU_CONSTANT(JointHinge, 1);
+JPH_GPU_CONSTANT(JointSlider, 2);
 JPH_GPU_CONSTANT(JointEnabled, 1);
 JPH_GPU_CONSTANT(JointCollisionEnabled, 2);
 JPH_GPU_CONSTANT(JointLimitsEnabled, 4);
@@ -187,13 +188,13 @@ struct JPH_GPU_ALIGN JointAuthor
     JPH_GPU_UINT4 bodies; // Connected slot (or InvalidQueryBodySlot), owner, type, flags.
     JPH_GPU_UINT4 identity; // Stable joint identity low/high, world index, zero.
     JPH_GPU_FLOAT4 ownerAnchor; // Affine-baked offset from the owner's origin.
-    JPH_GPU_FLOAT4 ownerAxis; // Unit hinge axis in the owner's rotation frame.
+    JPH_GPU_FLOAT4 ownerAxis; // Unit hinge/slider axis in the owner's rotation frame.
     JPH_GPU_FLOAT4 ownerLocalAnchor; // Raw authored anchor, retained on collapsed axes.
     JPH_GPU_FLOAT4 rootCOM1;
     JPH_GPU_FLOAT4 rootCOM2;
     JPH_GPU_FLOAT4 scale1;
     JPH_GPU_FLOAT4 scale2;
-    JPH_GPU_FLOAT4 limits; // Minimum/maximum radians, zero, zero.
+    JPH_GPU_FLOAT4 limits; // Hinge radians or Slider metres: minimum/maximum, zero, zero.
     JPH_GPU_FLOAT4 motor; // Target radians, stiffness, damping, maximum torque.
     JPH_GPU_FLOAT4 passive; // Viscous damping, dry friction torque, armature, zero.
 };
@@ -207,11 +208,11 @@ struct JPH_GPU_ALIGN JointState
     JPH_GPU_FLOAT4 anchor2;
     JPH_GPU_FLOAT4 collapsed1; // Origin offset on axes whose author scale was zero.
     JPH_GPU_FLOAT4 collapsed2;
-    JPH_GPU_FLOAT4 pointImpulse;
-    JPH_GPU_FLOAT4 angularImpulse; // Fixed xyz world impulse, or hinge swing basis xy.
+    JPH_GPU_FLOAT4 pointImpulse; // Fixed/Hinge world xyz; Slider transverse basis xy.
+    JPH_GPU_FLOAT4 angularImpulse; // Fixed/Slider world xyz impulse, or Hinge swing basis xy.
     JPH_GPU_FLOAT4 axisImpulse; // Limit, motor, passive, total drive impulse.
     JPH_GPU_FLOAT4 rotor; // Stored speed, rotor impulse, frozen old speed, preceding dt.
-    JPH_GPU_FLOAT4 setup; // Frozen angle, motor softness, motor bias, limit side (-1/0/+1).
+    JPH_GPU_FLOAT4 setup; // Hinge angle/softness/bias/side; Slider coordinate/0/0/limit side.
 };
 
 struct JPH_GPU_ALIGN JointParams

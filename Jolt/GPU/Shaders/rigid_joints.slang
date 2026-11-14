@@ -159,6 +159,12 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
         float3 x = jph_joint_perpendicular(z);
         world_frame = jph_joint_frame(x, cross(z, x), z);
     }
+    if (a.bodies.z == JointSlider)
+    {
+        float3 x = normalize(jph_rotate(s2.rotation, a.ownerAxis.xyz));
+        float3 y = jph_joint_perpendicular(x);
+        world_frame = jph_joint_frame(x, y, cross(x, y));
+    }
     s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
     s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
     s.pointImpulse = float4(0.0f);
@@ -332,12 +338,8 @@ void jph_joint_swing_basis(BodyState s1, BodyState s2, JointState state,
     error = float2(dot(a1, b2), dot(a1, c2));
 }
 
-float2 jph_joint_solve2(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
-                       float3 j0, float3 j1, float2 rhs, inout JointState state)
+float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, inout JointState state)
 {
-    float3 i0 = jph_joint_inertia_sum(m1, s1, m2, s2, j0);
-    float3 i1 = jph_joint_inertia_sum(m1, s1, m2, s2, j1);
-    float a = dot(j0, i0), b = dot(j0, i1), c = dot(j1, i1);
     float2 d = rsqrt(float2(a, c));
     float off = b * d.x * d.y;
     float det = 1.0f - off * off;
@@ -349,6 +351,122 @@ float2 jph_joint_solve2(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
         return float2(0.0f);
     }
     return result;
+}
+
+float2 jph_joint_solve2(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
+                       float3 j0, float3 j1, float2 rhs, inout JointState state)
+{
+    float3 i0 = jph_joint_inertia_sum(m1, s1, m2, s2, j0);
+    float3 i1 = jph_joint_inertia_sum(m1, s1, m2, s2, j1);
+    return jph_joint_symmetric2(dot(j0, i0), dot(j0, i1), dot(j1, i1), rhs, state);
+}
+
+// Slider rows use the same body writer and phase schedule as Fixed/Hinge.
+// Mathematical source: SliderConstraint / DualAxisConstraintPart / AxisConstraintPart.
+void jph_slider_basis(BodyState s1, JointState state, out float3 axis, out float3 n0, out float3 n1)
+{
+    float4 frame = jph_quat_mul(s1.rotation, state.frame1);
+    axis = jph_rotate(frame, float3(1.0f, 0.0f, 0.0f));
+    n0 = jph_rotate(frame, float3(0.0f, 1.0f, 0.0f));
+    n1 = jph_rotate(frame, float3(0.0f, 0.0f, 1.0f));
+}
+
+void jph_slider_limit(JointAuthor a, float position, out float side, out float error)
+{
+    side = 0.0f;
+    error = 0.0f;
+    if ((a.bodies.w & JointLimitsEnabled) == 0u) return;
+    if (position <= a.limits.x)
+    {
+        side = -1.0f;
+        error = position - a.limits.x;
+    }
+    else if (position >= a.limits.y)
+    {
+        side = 1.0f;
+        error = position - a.limits.y;
+    }
+}
+
+float2 jph_slider_transverse(BodyModel m1, BodyState s1, float3 arm1,
+    BodyModel m2, BodyState s2, float3 r2, float3 n0, float3 n1, float2 rhs, inout JointState state)
+{
+    float3 k0 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n0);
+    float3 k1 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n1);
+    return jph_joint_symmetric2(dot(n0, k0), dot(n0, k1), dot(n1, k1), rhs, state);
+}
+
+void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    float3 arm1 = r1 + u; // The rotating reference axis contributes u to body 1's Jacobian.
+    float3 axis, n0, n1;
+    jph_slider_basis(s1, state, axis, n0, n1);
+    float3 relative = jph_point_velocity(m1, s1, arm1) - jph_point_velocity(m2, s2, r2);
+    float2 transverse = jph_slider_transverse(m1, s1, arm1, m2, s2, r2, n0, n1,
+        float2(dot(n0, relative), dot(n1, relative)), state);
+    if (state.flags.y != JointStatusSuccess) return;
+    state.pointImpulse.xy += transverse;
+    jph_joint_apply_point(m1, s1, arm1, m2, s2, r2, n0 * transverse.x + n1 * transverse.y, false);
+    float3 angular = jph_joint_solve_rotation(m1, s1, m2, s2,
+        jph_joint_angular_velocity(m1, s1) - jph_joint_angular_velocity(m2, s2), state);
+    if (state.flags.y != JointStatusSuccess) return;
+    state.angularImpulse.xyz += angular;
+    jph_joint_apply_angular(m1, s1, m2, s2, angular, false);
+    if (state.setup.w != 0.0f)
+    {
+        float k = dot(axis, jph_joint_point_response(m1, s1, arm1, m2, s2, r2, axis));
+        if (!(k > 0.0f) || !isfinite(k))
+        {
+            state.flags.y = JointStatusNumericalFailure;
+            return;
+        }
+        float old = state.axisImpulse.x;
+        relative = jph_point_velocity(m1, s1, arm1) - jph_point_velocity(m2, s2, r2);
+        float next = old + dot(axis, relative) / k;
+        if (a.limits.x != a.limits.y)
+            next = state.setup.w < 0.0f ? max(0.0f, next) : min(0.0f, next);
+        state.axisImpulse.x = next;
+        jph_joint_apply_point(m1, s1, arm1, m2, s2, r2, axis * (next - old), false);
+    }
+}
+
+void jph_slider_solve_position(JointAuthor a, inout JointState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    float3 axis, n0, n1;
+    jph_slider_basis(s1, state, axis, n0, n1);
+    float2 transverse = jph_slider_transverse(m1, s1, r1 + u, m2, s2, r2, n0, n1,
+        -baumgarte * float2(dot(n0, u), dot(n1, u)), state);
+    if (state.flags.y != JointStatusSuccess) return;
+    jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2, n0 * transverse.x + n1 * transverse.y, true);
+    float4 diff = jph_joint_rotation_error(s1, s2, state);
+    float3 error = 2.0f * (diff.w < 0.0f ? -diff.xyz : diff.xyz);
+    float3 angular = jph_joint_solve_rotation(m1, s1, m2, s2, -baumgarte * error, state);
+    if (state.flags.y != JointStatusSuccess) return;
+    jph_joint_apply_angular(m1, s1, m2, s2, angular, true);
+    // Rotation correction changes both material points and the reference basis.
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    jph_slider_basis(s1, state, axis, n0, n1);
+    float side, limit_error;
+    jph_slider_limit(a, dot(axis, u), side, limit_error);
+    if (side != 0.0f && limit_error != 0.0f)
+    {
+        float k = dot(axis, jph_joint_point_response(m1, s1, r1 + u, m2, s2, r2, axis));
+        if (!(k > 0.0f) || !isfinite(k))
+        {
+            state.flags.y = JointStatusNumericalFailure;
+            return;
+        }
+        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2, axis * (-baumgarte * limit_error / k), true);
+    }
 }
 
 void jph_joint_limit(JointAuthor a, float angle, out float side, out float error)
@@ -416,6 +534,21 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
             state.rotor.xy = float2(0.0f);
         }
     }
+    if (a.bodies.z == JointSlider)
+    {
+        float3 r1, r2;
+        jph_joint_arms(a, state, s1, s2, r1, r2);
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        float3 axis, n0, n1;
+        jph_slider_basis(s1, state, axis, n0, n1);
+        state.setup = float4(dot(axis, u), 0.0f, 0.0f, 0.0f);
+        float error;
+        jph_slider_limit(a, state.setup.x, state.setup.w, error);
+        if (state.setup.w == 0.0f) state.axisImpulse.x = 0.0f;
+        state.pointImpulse.zw = float2(0.0f);
+        state.axisImpulse.yzw = float3(0.0f);
+        state.rotor.xyz = float3(0.0f);
+    }
     if (!warm_start)
     {
         jph_joint_clear_impulses(state);
@@ -435,6 +568,16 @@ void jph_joint_warm_start(JointAuthor a, JointState state,
         return;
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
+    if (a.bodies.z == JointSlider)
+    {
+        float3 axis, n0, n1;
+        jph_slider_basis(s1, state, axis, n0, n1);
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
+            n0 * state.pointImpulse.x + n1 * state.pointImpulse.y + axis * state.axisImpulse.x, false);
+        jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
+        return;
+    }
     if (a.bodies.z == JointFixed)
     {
         jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
@@ -550,6 +693,11 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointSlider)
+    {
+        jph_slider_solve_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
     if (a.bodies.z == JointFixed)
     {
         float3 lambda = jph_joint_solve_rotation(m1, s1, m2, s2,
@@ -628,6 +776,11 @@ void jph_joint_solve_position(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointSlider)
+    {
+        jph_slider_solve_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
     if (a.bodies.z == JointFixed)
     {
         float4 diff = jph_joint_rotation_error(s1, s2, state);
