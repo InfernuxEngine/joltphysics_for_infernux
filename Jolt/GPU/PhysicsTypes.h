@@ -550,6 +550,8 @@ JPH_GPU_CONSTANT(QueryAny, 4);
 JPH_GPU_CONSTANT(QueryTargetCollider, 1);
 JPH_GPU_CONSTANT(QueryExcludeBody, 2);
 JPH_GPU_CONSTANT(QuerySweepPolicy, 4);
+// Internal: the native Sweep source lifetime matches this retained policy.
+JPH_GPU_CONSTANT(QuerySweepPairPolicy, 8);
 JPH_GPU_CONSTANT(QuerySuccess, 0);
 JPH_GPU_CONSTANT(QueryUnsupported, 1);
 JPH_GPU_CONSTANT(QueryNumericalFailure, 2);
@@ -586,7 +588,7 @@ struct JPH_GPU_ALIGN QueryInput
 
 struct JPH_GPU_ALIGN QueryCastParams
 {
-    JPH_GPU_UINT4 controls; // Whole-request work quantum (default 32), body identity prefix count, zero, zero.
+    JPH_GPU_UINT4 controls; // Work quantum, body identity prefix count, ignored-pair suffix base/count.
 };
 
 struct JPH_GPU_ALIGN QueryCastState
@@ -890,4 +892,20 @@ static_assert(offsetof(PoseParams, counts) == 0);
 #undef JPH_GPU_FLOAT4
 #undef JPH_GPU_UINT4
 #undef JPH_GPU_CONSTANT
+#ifndef __cplusplus
+// Identity keys use unsigned ID64 ordering without device uint64 arithmetic.
+bool jph_collider_id_less(uint2 a, uint2 b)
+{
+    return a.y < b.y || (a.y == b.y && a.x < b.x);
+}
+uint4 jph_collider_pair_key(uint2 a, uint2 b)
+{
+    return jph_collider_id_less(b, a) ? uint4(b, a) : uint4(a, b);
+}
+bool jph_collider_pair_less(uint4 a, uint4 b)
+{
+    return jph_collider_id_less(a.xy, b.xy) ||
+           (all(a.xy == b.xy) && jph_collider_id_less(a.zw, b.zw));
+}
+#endif
 #endif // JPH_GPU_PHYSICS_TYPES_H

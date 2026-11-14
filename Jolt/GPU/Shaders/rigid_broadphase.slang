@@ -12,6 +12,7 @@ StructuredBuffer<ShapeModel> shape_models;
 StructuredBuffer<WorldRange> author_worlds;
 StructuredBuffer<Aabb> bounds;
 StructuredBuffer<QueryRecordWord> joint_stream;
+StructuredBuffer<QueryRecordWord> collider_pair_ignores;
 RWStructuredBuffer<WorldRange> runtime_worlds;
 RWStructuredBuffer<ContactPatch> contact_patches;
 // Separate from the writable arena: indirect consumers never bind this as
@@ -342,6 +343,19 @@ bool bp_suppressed(uint world, uint body_a, uint body_b)
     return found.x == world && found.y == a && found.z == b;
 }
 
+bool bp_collider_suppressed(uint2 a, uint2 b)
+{
+    uint4 key = jph_collider_pair_key(a, b);
+    uint low = 0u, high = broadphase.selectedCounts.w;
+    for (uint step = 0u; step < 32u && low < high; ++step) {
+        uint middle = low + (high - low) / 2u;
+        if (jph_collider_pair_less(collider_pair_ignores[middle].value, key)) low = middle + 1u;
+        else high = middle;
+    }
+    if (low >= broadphase.selectedCounts.w) return false;
+    return all(collider_pair_ignores[low].value == key);
+}
+
 // Count and fill call this exact function against the same frozen buffers.
 // AABBs already include the existing half speculative-band expansion.
 bool bp_eligible(uint rank_a, uint rank_b)
@@ -359,6 +373,7 @@ bool bp_eligible(uint rank_a, uint rank_b)
     if ((a.surface.y & (1u << b.surface.x)) == 0u
         || (b.surface.y & (1u << a.surface.x)) == 0u) return false;
     if (bp_suppressed(key_a.x, a.meta.y, b.meta.y)) return false;
+    if (bp_collider_suppressed(a.source.xy, b.source.xy)) return false;
     Aabb ba = bounds[key_a.z], bb = bounds[key_b.z];
     return !any(ba.minimum.xyz > bb.maximum.xyz) && !any(bb.minimum.xyz > ba.maximum.xyz);
 }

@@ -45,7 +45,7 @@ struct BP_ALIGN BroadphaseParams
     BP_U4 summary;      // final 1-record reduction address, world-summary W-record base, fill-check N-record base, zero.
     // One accepted layout address, never a stable RuntimeWorld identity.
     // selection=(world row, body base, leaf base, joint base).
-    // selectedCounts=(body capacity, leaf count, joint count, zero).
+    // selectedCounts=(body capacity, leaf count, joint count, Collider-pair ignore count).
     // Counts above remain TOTAL array extents for global address validation.
     BP_U4 selection;
     BP_U4 selectedCounts;

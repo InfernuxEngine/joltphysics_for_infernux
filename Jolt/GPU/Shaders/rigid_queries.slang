@@ -914,6 +914,21 @@ bool query_cast_pair_step(QueryInput request, ShapeModel target, BodyState body,
     return true;
 }
 
+bool query_collider_suppressed(uint2 a, uint2 b)
+{
+    uint4 key = jph_collider_pair_key(a, b);
+    uint low = 0u, high = query_cast_params.controls.w;
+    for (uint step = 0u; step < 32u && low < high; ++step)
+    {
+        uint middle = low + (high - low) / 2u;
+        uint4 value = query_body_ids[query_cast_params.controls.z + middle].ids;
+        if (jph_collider_pair_less(value, key)) low = middle + 1u;
+        else high = middle;
+    }
+    if (low >= query_cast_params.controls.w) return false;
+    return all(query_body_ids[query_cast_params.controls.z + low].ids == key);
+}
+
 void query_cast_advance(QueryInput request, uint begin, inout QueryCastState state)
 {
     uint quantum = max(query_cast_params.controls.x, 1u);
@@ -947,6 +962,8 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
             }
             if (admitted && (request.meta.w & QuerySweepPolicy) != 0u)
                 admitted = !all(query_body_ids[query_cast_params.controls.y + (leaf - query_params.selection.z)].ids.xy == request.source.zw);
+            if (admitted && (request.meta.w & QuerySweepPairPolicy) != 0u)
+                admitted = !query_collider_suppressed(request.filter.zw, shape.source.xy);
             if (!admitted)
             {
                 ++state.cursor.x;
