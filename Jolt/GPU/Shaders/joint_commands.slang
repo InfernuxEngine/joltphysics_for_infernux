@@ -26,7 +26,7 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
         jph_joint_store_state(index, state);
         return;
     }
-    if (a.bodies.z == JointSlider)
+    if (a.bodies.z == JointSlider || a.bodies.z == JointDistance)
     {
         jph_joint_clear_impulses(state);
         state.rotor.xyz = float3(0.0f);
@@ -58,13 +58,13 @@ void initialize_joints(uint3 tid : SV_DispatchThreadID)
     uint index = tid.x;
     if (index >= joint_params.counts.x) return;
     uint old_index = joint_remap[index];
-    uint destination = joint_stream[0].value.y + JointRecordWords * index;
+    uint destination = joint_stream[0].value.y + JointStateWords * index;
     if (old_index != InvalidQueryBodySlot && old_index < joint_params.counts.y)
     {
-        uint source = old_joint_stream[0].value.y + JointRecordWords * old_index;
+        uint source = old_joint_stream[0].value.y + JointStateWords * old_index;
         // Copy GPU-owned state directly. Both resources are immutable to the
         // CPU in these ranges; accepted topology decides the identity remap.
-        for (uint word = 0u; word < JointRecordWords; ++word)
+        for (uint word = 0u; word < JointStateWords; ++word)
             joint_stream[destination + word] = old_joint_stream[source + word];
         return;
     }
@@ -90,7 +90,7 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
     {
         JointAuthor a = jph_joint_load_author(index);
         JointState state = jph_joint_load_state(index);
-        if ((a.bodies.z == JointHinge || a.bodies.z == JointSlider) && state.flags.x != 0u)
+        if ((a.bodies.z == JointHinge || a.bodies.z == JointSlider || a.bodies.z == JointDistance) && state.flags.x != 0u)
         {
             result.value.z = state.flags.y;
             if (state.flags.y == JointStatusSuccess)
@@ -99,7 +99,18 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
                 if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
                 BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
                 float coordinate, velocity;
-                if (a.bodies.z == JointSlider)
+                if (a.bodies.z == JointDistance)
+                {
+                    float3 r1, r2;
+                    jph_joint_arms(a, state, s1, s2, r1, r2);
+                    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+                    coordinate = length(u);
+                    float3 normal = coordinate > 0.0f ? u / coordinate : state.distanceReference.xyz;
+                    velocity = dot(normal, s2.linearVelocity.xyz - s1.linearVelocity.xyz)
+                        + dot(cross(r2, normal), s2.angularVelocity.xyz)
+                        - dot(cross(r1 + u, normal), s1.angularVelocity.xyz);
+                }
+                else if (a.bodies.z == JointSlider)
                 {
                     float3 r1, r2;
                     jph_joint_arms(a, state, s1, s2, r1, r2);
@@ -143,7 +154,7 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
         uint index = joint_params.counts.x + tid.x;
         if (joint_params.counts.w == 0u)
         {
-            uint runtime_word = joint_stream[0].value.y + JointRecordWords * index;
+            uint runtime_word = joint_stream[0].value.y + JointStateWords * index;
             status = joint_stream[runtime_word].value.y;
             if (status != JointStatusSuccess)
                 first_failure = index;

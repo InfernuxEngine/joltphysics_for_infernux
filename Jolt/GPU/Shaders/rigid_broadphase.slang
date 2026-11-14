@@ -211,7 +211,7 @@ void build_suppression(uint3 tid : SV_DispatchThreadID)
         bp_store(broadphase.rankRows.z + joint, uint4(0u));
         return;
     }
-    uint p = 1u + JointRecordWords * joint;
+    uint p = 1u + JointAuthorWords * joint;
     uint4 endpoints = joint_stream[p].value;
     uint world = joint_stream[p + 1u].value.z;
     uint status = 0u;

@@ -169,18 +169,21 @@ struct JPH_GPU_ALIGN WorldRange
 JPH_GPU_CONSTANT(JointFixed, 0);
 JPH_GPU_CONSTANT(JointHinge, 1);
 JPH_GPU_CONSTANT(JointSlider, 2);
+JPH_GPU_CONSTANT(JointDistance, 3);
 JPH_GPU_CONSTANT(JointEnabled, 1);
 JPH_GPU_CONSTANT(JointCollisionEnabled, 2);
 JPH_GPU_CONSTANT(JointLimitsEnabled, 4);
 JPH_GPU_CONSTANT(JointMotorEnabled, 8);
+JPH_GPU_CONSTANT(JointAutoDistance, 16);
 JPH_GPU_CONSTANT(JointResetWarmStart, 1);
 JPH_GPU_CONSTANT(JointResetRotor, 2);
-JPH_GPU_CONSTANT(JointRecordWords, 12);
+JPH_GPU_CONSTANT(JointAuthorWords, 15);
+JPH_GPU_CONSTANT(JointStateWords, 13);
 JPH_GPU_CONSTANT(JointStatusSuccess, 0);
 JPH_GPU_CONSTANT(JointStatusInvalid, 1);
 JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
 
-// One stream of 16-byte QueryRecordWords: header (count, 1+12*count,0,0),
+// One stream of 16-byte QueryRecordWords: header (count, 1+JointAuthorWords*count,0,0),
 // count author records, then count runtime records. CPU uploads only the
 // header/author prefix; device stores address only the runtime suffix.
 struct JPH_GPU_ALIGN JointAuthor
@@ -197,6 +200,9 @@ struct JPH_GPU_ALIGN JointAuthor
     JPH_GPU_FLOAT4 limits; // Hinge radians or Slider metres: minimum/maximum, zero, zero.
     JPH_GPU_FLOAT4 motor; // Target radians, stiffness, damping, maximum torque.
     JPH_GPU_FLOAT4 passive; // Viscous damping, dry friction torque, armature, zero.
+    JPH_GPU_FLOAT4 connectedAnchor; // Distance: affine-baked connected offset, or absolute world point.
+    JPH_GPU_FLOAT4 connectedLocalAnchor; // Distance raw local anchor, including collapsed axes.
+    JPH_GPU_FLOAT4 linearSpring; // Distance: stiffness N/m, damping N s/m, zero, zero.
 };
 
 struct JPH_GPU_ALIGN JointState
@@ -212,7 +218,8 @@ struct JPH_GPU_ALIGN JointState
     JPH_GPU_FLOAT4 angularImpulse; // Fixed/Slider world xyz impulse, or Hinge swing basis xy.
     JPH_GPU_FLOAT4 axisImpulse; // Limit, motor, passive, total drive impulse.
     JPH_GPU_FLOAT4 rotor; // Stored speed, rotor impulse, frozen old speed, preceding dt.
-    JPH_GPU_FLOAT4 setup; // Hinge angle/softness/bias/side; Slider coordinate/0/0/limit side.
+    JPH_GPU_FLOAT4 setup; // Scalar coordinate, softness, bias, active limit side.
+    JPH_GPU_FLOAT4 distanceReference; // Distance: persistent normal.xyz, captured auto length.w.
 };
 
 struct JPH_GPU_ALIGN JointParams
@@ -565,11 +572,13 @@ JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 32);
-JPH_GPU_CHECK_TYPE(JointAuthor, 192);
-JPH_GPU_CHECK_TYPE(JointState, 192);
+JPH_GPU_CHECK_TYPE(JointAuthor, JointAuthorWords * 16);
+JPH_GPU_CHECK_TYPE(JointState, JointStateWords * 16);
 JPH_GPU_CHECK_TYPE(JointParams, 16);
-static_assert(offsetof(JointAuthor, ownerAnchor) == 32 && offsetof(JointAuthor, passive) == 176);
-static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, setup) == 176);
+static_assert(offsetof(JointAuthor, ownerAnchor) == 32 && offsetof(JointAuthor, connectedAnchor) == 192
+              && offsetof(JointAuthor, linearSpring) == 224);
+static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, setup) == 176
+              && offsetof(JointState, distanceReference) == 192);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);

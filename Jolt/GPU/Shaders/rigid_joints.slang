@@ -12,7 +12,7 @@ RWStructuredBuffer<QueryRecordWord> joint_stream;
 
 JointAuthor jph_joint_load_author(uint index)
 {
-    uint p = 1u + JointRecordWords * index;
+    uint p = 1u + JointAuthorWords * index;
     JointAuthor a;
     a.bodies = joint_stream[p].value;
     a.identity = joint_stream[p + 1u].value;
@@ -26,12 +26,15 @@ JointAuthor jph_joint_load_author(uint index)
     a.limits = asfloat(joint_stream[p + 9u].value);
     a.motor = asfloat(joint_stream[p + 10u].value);
     a.passive = asfloat(joint_stream[p + 11u].value);
+    a.connectedAnchor = asfloat(joint_stream[p + 12u].value);
+    a.connectedLocalAnchor = asfloat(joint_stream[p + 13u].value);
+    a.linearSpring = asfloat(joint_stream[p + 14u].value);
     return a;
 }
 
 JointState jph_joint_load_state(uint index)
 {
-    uint p = joint_stream[0].value.y + JointRecordWords * index;
+    uint p = joint_stream[0].value.y + JointStateWords * index;
     JointState s;
     s.flags = joint_stream[p].value;
     s.frame1 = asfloat(joint_stream[p + 1u].value);
@@ -45,13 +48,14 @@ JointState jph_joint_load_state(uint index)
     s.axisImpulse = asfloat(joint_stream[p + 9u].value);
     s.rotor = asfloat(joint_stream[p + 10u].value);
     s.setup = asfloat(joint_stream[p + 11u].value);
+    s.distanceReference = asfloat(joint_stream[p + 12u].value);
     return s;
 }
 
 void jph_joint_store_state(uint index, JointState s)
 {
     // The only stores into this resource are in the runtime suffix.
-    uint p = joint_stream[0].value.y + JointRecordWords * index;
+    uint p = joint_stream[0].value.y + JointStateWords * index;
     joint_stream[p].value = s.flags;
     joint_stream[p + 1u].value = asuint(s.frame1);
     joint_stream[p + 2u].value = asuint(s.frame2);
@@ -64,6 +68,7 @@ void jph_joint_store_state(uint index, JointState s)
     joint_stream[p + 9u].value = asuint(s.axisImpulse);
     joint_stream[p + 10u].value = asuint(s.rotor);
     joint_stream[p + 11u].value = asuint(s.setup);
+    joint_stream[p + 12u].value = asuint(s.distanceReference);
 }
 
 float4 jph_joint_conjugate(float4 q) { return float4(-q.xyz, q.w); }
@@ -143,13 +148,15 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
     float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
     if (a.bodies.x == InvalidQueryBodySlot)
     {
-        s.anchor1 = float4(world_anchor, 0.0f);
+        s.anchor1 = a.bodies.z == JointDistance ? a.connectedAnchor : float4(world_anchor, 0.0f);
         s.collapsed1 = float4(0.0f);
     }
     else
     {
-        float3 offset = jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
-        jph_joint_unscale(offset, a.scale1.xyz, float3(0.0f), s.anchor1, s.collapsed1);
+        float3 offset = a.bodies.z == JointDistance ? a.connectedAnchor.xyz
+            : jph_inverse_rotate(s1.rotation, world_anchor - s1.positionCOM.xyz) + a.rootCOM1.xyz;
+        float3 raw = a.bodies.z == JointDistance ? a.connectedLocalAnchor.xyz : float3(0.0f);
+        jph_joint_unscale(offset, a.scale1.xyz, raw, s.anchor1, s.collapsed1);
     }
     jph_joint_unscale(a.ownerAnchor.xyz, a.scale2.xyz, a.ownerLocalAnchor.xyz, s.anchor2, s.collapsed2);
     float4 world_frame = float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -172,6 +179,14 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
     s.axisImpulse = float4(0.0f);
     s.rotor = float4(0.0f);
     s.setup = float4(0.0f);
+    s.distanceReference = float4(0.0f);
+    if (a.bodies.z == JointDistance)
+    {
+        float3 connected_point = a.bodies.x == InvalidQueryBodySlot ? a.connectedAnchor.xyz
+            : s1.positionCOM.xyz + jph_rotate(s1.rotation, a.connectedAnchor.xyz - a.rootCOM1.xyz);
+        // Jolt retains +Y until the first positive-length properties calculation.
+        s.distanceReference = float4(0.0f, 1.0f, 0.0f, length(world_anchor - connected_point));
+    }
     if (a.bodies.z == JointHinge)
     {
         float3 axis = jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
@@ -179,7 +194,8 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
     }
     if (!all(isfinite(s.anchor1)) || !all(isfinite(s.anchor2)) ||
         !all(isfinite(s.frame1)) || !all(isfinite(s.frame2)) ||
-        !all(isfinite(s.collapsed1)) || !all(isfinite(s.collapsed2)) || !all(isfinite(s.rotor)))
+        !all(isfinite(s.collapsed1)) || !all(isfinite(s.collapsed2)) || !all(isfinite(s.rotor))
+        || !all(isfinite(s.distanceReference)))
         s.flags.y = JointStatusNumericalFailure;
     return s;
 }
@@ -469,6 +485,136 @@ void jph_slider_solve_position(JointAuthor a, inout JointState state,
     }
 }
 
+// DistanceConstraint + AxisConstraintPart, StiffnessAndDamping limit mode.
+void jph_distance_limit(JointAuthor a, JointState state, float coordinate,
+    out float side, out float error)
+{
+    float minimum = (a.bodies.w & JointAutoDistance) != 0u ? state.distanceReference.w : a.limits.x;
+    float maximum = (a.bodies.w & JointAutoDistance) != 0u ? state.distanceReference.w : a.limits.y;
+    side = 0.0f;
+    error = 0.0f;
+    if (minimum == maximum)
+    {
+        side = 2.0f; // Bilateral, including equality at zero length.
+        error = coordinate - minimum;
+    }
+    else if (coordinate <= minimum)
+    {
+        side = -1.0f;
+        error = coordinate - minimum;
+    }
+    else if (coordinate >= maximum)
+    {
+        side = 1.0f;
+        error = coordinate - maximum;
+    }
+}
+
+float jph_distance_geometry(JointAuthor a, inout JointState state, BodyState s1, BodyState s2,
+    out float3 arm1, out float3 r2)
+{
+    float3 r1;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+    float coordinate = length(u);
+    if (coordinate > 0.0f) state.distanceReference.xyz = u / coordinate;
+    // Preserve Jolt's cached dot(delta, normal), not a new pose evaluation
+    // during the later position-error test (or an assumed bit-identical sqrt).
+    state.setup.x = dot(u, state.distanceReference.xyz);
+    arm1 = r1 + u;
+    return coordinate;
+}
+
+float jph_distance_inverse_mass(BodyModel m1, BodyState s1, float3 arm1,
+    BodyModel m2, BodyState s2, float3 r2, inout JointState state)
+{
+    float3 n = state.distanceReference.xyz;
+    float k = dot(n, jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n));
+    if (k < 0.0f || !isfinite(k)) state.flags.y = JointStatusNumericalFailure;
+    return k;
+}
+
+void jph_distance_setup(JointAuthor a, inout JointState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
+{
+    float3 arm1, r2;
+    float coordinate = jph_distance_geometry(a, state, s1, s2, arm1, r2);
+    float side, error;
+    jph_distance_limit(a, state, coordinate, side, error);
+    state.setup = float4(state.setup.x, 0.0f, 0.0f, side);
+    state.pointImpulse = float4(0.0f);
+    state.angularImpulse = float4(0.0f);
+    state.axisImpulse.yzw = float3(0.0f);
+    state.rotor.xyz = float3(0.0f);
+    // An interior row is inactive before inverse-mass evaluation in Jolt.
+    float k = side == 0.0f ? 0.0f : jph_distance_inverse_mass(m1, s1, arm1, m2, s2, r2, state);
+    if (side == 0.0f || k == 0.0f)
+    {
+        state.setup.w = 0.0f;
+        state.axisImpulse.x = 0.0f;
+    }
+    else if (a.linearSpring.x > 0.0f)
+    {
+        // HasStiffness, not HasStiffnessOrDamping: damping-only remains hard.
+        state.setup.y = 1.0f / (dt * (a.linearSpring.y + dt * a.linearSpring.x));
+        state.setup.z = dt * a.linearSpring.x * state.setup.y * error;
+    }
+    if (!all(isfinite(state.setup)) || !all(isfinite(state.distanceReference)))
+        state.flags.y = JointStatusNumericalFailure;
+}
+
+void jph_distance_solve_velocity(JointAuthor a, inout JointState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2)
+{
+    if (state.setup.w == 0.0f) return;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    float3 arm1 = s2.positionCOM.xyz - s1.positionCOM.xyz + r2;
+    float k = jph_distance_inverse_mass(m1, s1, arm1, m2, s2, r2, state);
+    float denominator = k + state.setup.y;
+    if (state.flags.y != JointStatusSuccess || !(denominator > 0.0f) || !isfinite(denominator))
+    {
+        state.flags.y = JointStatusNumericalFailure;
+        return;
+    }
+    float3 n = state.distanceReference.xyz;
+    float jv = dot(n, jph_point_velocity(m1, s1, arm1) - jph_point_velocity(m2, s2, r2));
+    float old = state.axisImpulse.x;
+    float next = old + (jv - state.setup.y * old - state.setup.z) / denominator;
+    if (state.setup.w == -1.0f) next = max(0.0f, next);
+    else if (state.setup.w == 1.0f) next = min(0.0f, next);
+    state.axisImpulse.x = next;
+    jph_joint_apply_point(m1, s1, arm1, m2, s2, r2, n * (next - old), false);
+}
+
+void jph_distance_solve_position(JointAuthor a, inout JointState state,
+    BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2, float baumgarte)
+{
+    if (a.linearSpring.x > 0.0f) return;
+    // Jolt checks the cached points before recalculating properties. The last
+    // projected distance is their length, including the retained zero normal.
+    float side, error;
+    jph_distance_limit(a, state, state.setup.x, side, error);
+    if (error == 0.0f) return;
+    float3 arm1, r2;
+    float coordinate = jph_distance_geometry(a, state, s1, s2, arm1, r2);
+    float current_error;
+    jph_distance_limit(a, state, coordinate, state.setup.w, current_error);
+    if (state.setup.w == 0.0f)
+    {
+        state.axisImpulse.x = 0.0f;
+        return;
+    }
+    float k = jph_distance_inverse_mass(m1, s1, arm1, m2, s2, r2, state);
+    if (state.flags.y != JointStatusSuccess || k == 0.0f)
+    {
+        state.axisImpulse.x = 0.0f;
+        return;
+    }
+    jph_joint_apply_point(m1, s1, arm1, m2, s2, r2,
+        state.distanceReference.xyz * (-baumgarte * error / k), true);
+}
+
 void jph_joint_limit(JointAuthor a, float angle, out float side, out float error)
 {
     side = 0.0f;
@@ -549,6 +695,8 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
         state.axisImpulse.yzw = float3(0.0f);
         state.rotor.xyz = float3(0.0f);
     }
+    if (a.bodies.z == JointDistance)
+        jph_distance_setup(a, state, m1, s1, m2, s2, dt);
     if (!warm_start)
     {
         jph_joint_clear_impulses(state);
@@ -576,6 +724,13 @@ void jph_joint_warm_start(JointAuthor a, JointState state,
         jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
             n0 * state.pointImpulse.x + n1 * state.pointImpulse.y + axis * state.axisImpulse.x, false);
         jph_joint_apply_angular(m1, s1, m2, s2, state.angularImpulse.xyz, false);
+        return;
+    }
+    if (a.bodies.z == JointDistance)
+    {
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        jph_joint_apply_point(m1, s1, r1 + u, m2, s2, r2,
+            state.distanceReference.xyz * state.axisImpulse.x, false);
         return;
     }
     if (a.bodies.z == JointFixed)
@@ -693,6 +848,11 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointDistance)
+    {
+        jph_distance_solve_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
     if (a.bodies.z == JointSlider)
     {
         jph_slider_solve_velocity(a, state, m1, s1, m2, s2);
@@ -776,6 +936,11 @@ void jph_joint_solve_position(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointDistance)
+    {
+        jph_distance_solve_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
     if (a.bodies.z == JointSlider)
     {
         jph_slider_solve_position(a, state, m1, s1, m2, s2, baumgarte);
@@ -821,7 +986,8 @@ bool jph_joint_finite(BodyState state)
 bool jph_joint_state_finite(JointState state)
 {
     return all(isfinite(state.pointImpulse)) && all(isfinite(state.angularImpulse))
-        && all(isfinite(state.axisImpulse)) && all(isfinite(state.rotor)) && all(isfinite(state.setup));
+        && all(isfinite(state.axisImpulse)) && all(isfinite(state.rotor)) && all(isfinite(state.setup))
+        && all(isfinite(state.distanceReference));
 }
 
 bool jph_joint_suppresses_pair(WorldRange world, uint body1, uint body2)

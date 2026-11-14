@@ -95,16 +95,16 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
     }
     uint4 header = joint_stream[0].value;
     uint status = 0u;
-    if (header.x != constraint_params.counts.y || header.y != 1u + JointRecordWords * header.x)
+    if (header.x != constraint_params.counts.y || header.y != 1u + JointAuthorWords * header.x)
     {
         cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
         return;
     }
-    uint author = 1u + JointRecordWords * j;
+    uint author = 1u + JointAuthorWords * j;
     uint4 e = joint_stream[author].value;
     uint world = joint_stream[author + 1u].value.z;
-    uint4 state = joint_stream[header.y + JointRecordWords * j].value;
-    if (state.y != JointStatusSuccess || e.z > JointSlider) status |= ConstraintBadJoint;
+    uint4 state = joint_stream[header.y + JointStateWords * j].value;
+    if (state.y != JointStatusSuccess || e.z > JointDistance) status |= ConstraintBadJoint;
     if (world >= constraint_params.counts.w || !cs_body(e.y, world)
         || (e.x != InvalidQueryBodySlot && !cs_body(e.x, world))) status |= ConstraintBadModel;
     uint a = ConstraintInvalid, b = ConstraintInvalid;
