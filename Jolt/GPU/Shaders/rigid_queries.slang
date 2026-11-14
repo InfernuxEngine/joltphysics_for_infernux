@@ -21,11 +21,11 @@ RWStructuredBuffer<uint> query_export_values;
 ConstantBuffer<QueryCastParams> query_cast_params;
 RWStructuredBuffer<QueryCastState> query_cast_states;
 
-// One 16-byte immutable request stream: all Input112 records precede the
+// One 16-byte immutable request stream: all Input128 records precede the
 // explicit Primitive64 suffix. Identity records likewise share one resource.
 QueryInput query_load_input(uint index)
 {
-    uint base = index * 7u;
+    uint base = index * 8u;
     QueryInput request;
     request.meta = query_inputs[base].value;
     request.filter = query_inputs[base + 1u].value;
@@ -34,12 +34,13 @@ QueryInput query_load_input(uint index)
     request.direction = asfloat(query_inputs[base + 4u].value);
     request.rotation = asfloat(query_inputs[base + 5u].value);
     request.geometry = asfloat(query_inputs[base + 6u].value);
+    request.lifetime = query_inputs[base + 7u].value;
     return request;
 }
 
 QueryPrimitive query_load_primitive(uint index)
 {
-    uint base = query_params.counts.x * 7u + index * 4u;
+    uint base = query_params.counts.x * 8u + index * 4u;
     QueryPrimitive primitive;
     primitive.meta = query_inputs[base].value;
     primitive.geometry = asfloat(query_inputs[base + 1u].value);
@@ -914,19 +915,28 @@ bool query_cast_pair_step(QueryInput request, ShapeModel target, BodyState body,
     return true;
 }
 
-bool query_collider_suppressed(uint2 a, uint2 b)
+ColliderPairKey query_collider_pair(uint index)
 {
-    uint4 key = jph_collider_pair_key(a, b);
+    uint base = query_cast_params.controls.z + index * 2u;
+    ColliderPairKey key;
+    key.a = query_body_ids[base].ids;
+    key.b = query_body_ids[base + 1u].ids;
+    return key;
+}
+
+bool query_collider_suppressed(uint4 a, uint4 b)
+{
+    ColliderPairKey key = jph_collider_pair_key(a, b);
     uint low = 0u, high = query_cast_params.controls.w;
     for (uint step = 0u; step < 32u && low < high; ++step)
     {
         uint middle = low + (high - low) / 2u;
-        uint4 value = query_body_ids[query_cast_params.controls.z + middle].ids;
+        ColliderPairKey value = query_collider_pair(middle);
         if (jph_collider_pair_less(value, key)) low = middle + 1u;
         else high = middle;
     }
     if (low >= query_cast_params.controls.w) return false;
-    return all(query_body_ids[query_cast_params.controls.z + low].ids == key);
+    return jph_collider_pair_equal(query_collider_pair(low), key);
 }
 
 void query_cast_advance(QueryInput request, uint begin, inout QueryCastState state)
@@ -963,7 +973,7 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
             if (admitted && (request.meta.w & QuerySweepPolicy) != 0u)
                 admitted = !all(query_body_ids[query_cast_params.controls.y + (leaf - query_params.selection.z)].ids.xy == request.source.zw);
             if (admitted && (request.meta.w & QuerySweepPairPolicy) != 0u)
-                admitted = !query_collider_suppressed(request.filter.zw, shape.source.xy);
+                admitted = !query_collider_suppressed(uint4(request.filter.zw, request.lifetime.xy), shape.source);
             if (!admitted)
             {
                 ++state.cursor.x;

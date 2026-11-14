@@ -36,7 +36,6 @@ JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
 JPH_GPU_CONSTANT(ShapeCapsule, 2);
 JPH_GPU_CONSTANT(ShapeSensor, 1);
-JPH_GPU_CONSTANT(InvalidGeometryPayload, 0xffffffffu);
 JPH_GPU_CONSTANT(PatchActive, 1);
 JPH_GPU_CONSTANT(PatchSensor, 2);
 JPH_GPU_CONSTANT(PatchOverlapping, 4);
@@ -129,10 +128,17 @@ struct JPH_GPU_ALIGN ShapeModel
     // Layer index [0, 31], collision mask, friction combine, bounce combine.
     // Both masks must admit the opposite leaf's layer for a pair to collide.
     JPH_GPU_UINT4 surface;
-    // Collider ID low/high words, geometry payload index, SubShapeID prefix
-    // bits written. Primitive leaves use InvalidGeometryPayload. The full
-    // Collider identity is preserved without requiring device uint64 math.
+    // Collider ID low/high words, lifetime generation low/high words.
+    // SubShapeID/prefix-bit metadata remains in the accepted host leaf directory.
     JPH_GPU_UINT4 source;
+};
+
+struct JPH_GPU_ALIGN ColliderPairKey
+{
+    // Each endpoint is (ID low/high, generation low/high). Canonical order is
+    // unsigned ID64, then generation64; no device uint64 arithmetic is needed.
+    JPH_GPU_UINT4 a;
+    JPH_GPU_UINT4 b;
 };
 
 struct JPH_GPU_ALIGN BodyState
@@ -584,11 +590,14 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_FLOAT4 direction;
     JPH_GPU_FLOAT4 rotation; // Query primitive quaternion xyzw.
     JPH_GPU_FLOAT4 geometry; // Same cooked geometry law as ShapeModel.
+    // Source Sweep Collider generation low/high; zw zero. Other queries use zero.
+    JPH_GPU_UINT4 lifetime;
 };
 
 struct JPH_GPU_ALIGN QueryCastParams
 {
-    JPH_GPU_UINT4 controls; // Work quantum, body identity prefix count, ignored-pair suffix base/count.
+    // Work quantum, body identity prefix count, pair suffix base in 16-byte words, pair count.
+    JPH_GPU_UINT4 controls;
 };
 
 struct JPH_GPU_ALIGN QueryCastState
@@ -825,7 +834,8 @@ JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
 JPH_GPU_CHECK_TYPE(QueryParams, 64);
 static_assert(offsetof(QueryParams, selection) == 32 && offsetof(QueryParams, selectedCounts) == 48);
-JPH_GPU_CHECK_TYPE(QueryInput, 112);
+JPH_GPU_CHECK_TYPE(QueryInput, 128);
+JPH_GPU_CHECK_TYPE(ColliderPairKey, 32);
 JPH_GPU_CHECK_TYPE(QueryCastParams, 16);
 JPH_GPU_CHECK_TYPE(QueryCastState, 64);
 static_assert(offsetof(QueryCastState, progress) == 16 && offsetof(QueryCastState, normal) == 32
@@ -851,7 +861,9 @@ static_assert(offsetof(QueryMotionState, positionInverseMass) == 16 && offsetof(
     && offsetof(QueryMotionState, inertia2) == 176);
 JPH_GPU_CHECK_TYPE(QuerySpan, 16);
 JPH_GPU_CHECK_TYPE(QuerySummary, 16);
-static_assert(offsetof(QueryInput, geometry) == 96 && offsetof(QueryInput, filter) == 16);
+static_assert(offsetof(QueryInput, geometry) == 96 && offsetof(QueryInput, filter) == 16
+    && offsetof(QueryInput, lifetime) == 112);
+static_assert(offsetof(ColliderPairKey, a) == 0 && offsetof(ColliderPairKey, b) == 16);
 static_assert(offsetof(QueryHit, positionDistance) == 16 && offsetof(QueryHit, pointADepth) == 48);
 static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
     && offsetof(BodyCommand, rootCOM) == 48);
@@ -893,19 +905,32 @@ static_assert(offsetof(PoseParams, counts) == 0);
 #undef JPH_GPU_UINT4
 #undef JPH_GPU_CONSTANT
 #ifndef __cplusplus
-// Identity keys use unsigned ID64 ordering without device uint64 arithmetic.
+// Identity keys use unsigned ID64/generation64 ordering without device uint64 math.
 bool jph_collider_id_less(uint2 a, uint2 b)
 {
     return a.y < b.y || (a.y == b.y && a.x < b.x);
 }
-uint4 jph_collider_pair_key(uint2 a, uint2 b)
-{
-    return jph_collider_id_less(b, a) ? uint4(b, a) : uint4(a, b);
-}
-bool jph_collider_pair_less(uint4 a, uint4 b)
+bool jph_collider_lifetime_less(uint4 a, uint4 b)
 {
     return jph_collider_id_less(a.xy, b.xy) ||
            (all(a.xy == b.xy) && jph_collider_id_less(a.zw, b.zw));
+}
+ColliderPairKey jph_collider_pair_key(uint4 a, uint4 b)
+{
+    ColliderPairKey key;
+    bool reverse = jph_collider_lifetime_less(b, a);
+    key.a = reverse ? b : a;
+    key.b = reverse ? a : b;
+    return key;
+}
+bool jph_collider_pair_less(ColliderPairKey a, ColliderPairKey b)
+{
+    return jph_collider_lifetime_less(a.a, b.a) ||
+           (all(a.a == b.a) && jph_collider_lifetime_less(a.b, b.b));
+}
+bool jph_collider_pair_equal(ColliderPairKey a, ColliderPairKey b)
+{
+    return all(a.a == b.a) && all(a.b == b.b);
 }
 #endif
 #endif // JPH_GPU_PHYSICS_TYPES_H
