@@ -64,6 +64,8 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
                 state.rotation = command.auxiliary;
                 state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
             }
+            // A pose command changes the principal frame before later FIFO Jv.
+            jph_project_motion(model, state);
         }
         else if (kind == CommandResetMotion)
         {
@@ -100,6 +102,12 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
         {
             uint action = mode & MotionBoundaryActionMask;
             bool had_move = jph_has_kinematic_move(target);
+            if (action == MotionBoundaryProjectMobility)
+            {
+                // New model is accepted first. Keep forces and target identity.
+                jph_project_motion(model, state);
+                continue;
+            }
             if (action == MotionBoundaryTypeChange)
             {
                 // Carry protected author channels from the device target,
@@ -135,6 +143,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
                 state.angularVelocity = float4(0.0f);
             }
             target.state = uint4(0u);
+            jph_project_motion(model, state);
         }
         else if (kind == CommandSetLinearVelocity || kind == CommandSetAngularVelocity)
         {
@@ -144,9 +153,9 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
                 // preserving the other channel's actual current velocity.
                 target.state = uint4(0u);
                 if (kind == CommandSetLinearVelocity)
-                    state.linearVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.z);
+                    state.linearVelocity.xyz = jph_clamp_speed(jph_project_linear(model, command.value.xyz), model.damping.z);
                 else
-                    state.angularVelocity.xyz = jph_clamp_speed(command.value.xyz, model.damping.w);
+                    state.angularVelocity.xyz = jph_clamp_speed(jph_project_angular(model, state, command.value.xyz), model.damping.w);
             }
         }
         else if (jph_dynamic(model))
@@ -179,7 +188,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
                 else
                 {
                     state.linearVelocity.xyz = jph_clamp_speed(
-                        state.linearVelocity.xyz + model.mass.x * force, model.damping.z);
+                        state.linearVelocity.xyz + jph_inverse_linear_mass(model, force), model.damping.z);
                     if (kind == CommandAddForceAtPosition)
                         state.angularVelocity.xyz = jph_clamp_speed(
                             state.angularVelocity.xyz + jph_inverse_inertia(model, state, torque), model.damping.w);

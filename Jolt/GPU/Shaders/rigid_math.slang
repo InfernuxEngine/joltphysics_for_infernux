@@ -153,13 +153,50 @@ float jph_inverse_mass(BodyModel model)
     return jph_dynamic(model) ? model.mass.x : 0.0f;
 }
 
+// The physical mass/inertia remain unprojected in BodyModel for force units.
+float3 jph_allowed_axes(float locks)
+{
+    uint bits = uint(locks);
+    return float3((bits & 1u) == 0u ? 1.0f : 0.0f,
+                  (bits & 2u) == 0u ? 1.0f : 0.0f,
+                  (bits & 4u) == 0u ? 1.0f : 0.0f);
+}
+
+float3 jph_project_linear(BodyModel model, float3 value)
+{
+    return value * jph_allowed_axes(model.mass.y);
+}
+
+float3 jph_project_angular(BodyModel model, BodyState state, float3 value)
+{
+    if (model.mass.z == 0.0f) return value;
+    float4 frame = jph_quat_mul(state.rotation, model.inertiaRotation);
+    return jph_rotate(frame, jph_inverse_rotate(frame, value) * jph_allowed_axes(model.mass.z));
+}
+
+void jph_project_motion(BodyModel model, inout BodyState state)
+{
+    state.linearVelocity.xyz = jph_project_linear(model, state.linearVelocity.xyz);
+    state.angularVelocity.xyz = jph_project_angular(model, state, state.angularVelocity.xyz);
+}
+
+float3 jph_inverse_linear_mass(BodyModel model, float3 value)
+{
+    return jph_inverse_mass(model) * jph_project_linear(model, value);
+}
+
+float jph_inverse_mass_axis(BodyModel model, float3 axis)
+{
+    return dot(axis, jph_inverse_linear_mass(model, axis));
+}
+
 float3 jph_inverse_inertia(BodyModel model, BodyState state, float3 v)
 {
     if (!jph_dynamic(model))
         return float3(0.0f);
     float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
     return jph_rotate(inertia_to_world,
-        model.invInertiaDiagonal.xyz * jph_inverse_rotate(inertia_to_world, v));
+        model.invInertiaDiagonal.xyz * jph_allowed_axes(model.mass.z) * jph_inverse_rotate(inertia_to_world, v));
 }
 
 float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
@@ -173,8 +210,10 @@ float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
 
 void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt)
 {
-    // MotionProperties::ApplyGyroscopicForceInternal. Preparation admits only
-    // positive principal inverse inertia; locked axes are outside this slice.
+    // With any principal lock, projected w has at most two components;
+    // its gyroscopic acceleration is wholly excluded. Do not renormalize it.
+    if (model.mass.z != 0.0f) return;
+    // Preserve the existing unconstrained gyroscopic arithmetic.
     float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
     float3 local_velocity = jph_inverse_rotate(inertia_to_world, state.angularVelocity.xyz);
     float3 local_momentum = local_velocity / model.invInertiaDiagonal.xyz;
@@ -188,7 +227,7 @@ void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt
 
 float3 jph_acceleration(BodyModel model, BodyForces forces, float3 gravity)
 {
-    return jph_dynamic(model) ? gravity * model.mass.w + forces.force.xyz * model.mass.x : float3(0.0f);
+    return jph_dynamic(model) ? jph_project_linear(model, gravity * model.mass.w) + jph_inverse_linear_mass(model, forces.force.xyz) : float3(0.0f);
 }
 
 void jph_tangents(float3 normal, out float3 t1, out float3 t2)
@@ -205,7 +244,7 @@ float jph_effective_mass(BodyModel ma, BodyState sa, float3 ra,
 {
     float3 ja = cross(ra, axis);
     float3 jb = cross(rb, axis);
-    float inverse_effective_mass = jph_inverse_mass(ma) + jph_inverse_mass(mb)
+    float inverse_effective_mass = jph_inverse_mass_axis(ma, axis) + jph_inverse_mass_axis(mb, axis)
         + dot(ja, jph_inverse_inertia(ma, sa, ja))
         + dot(jb, jph_inverse_inertia(mb, sb, jb));
     return inverse_effective_mass > 0.0f ? 1.0f / inverse_effective_mass : 0.0f;
@@ -224,12 +263,12 @@ void jph_apply_impulse(BodyModel ma, inout BodyState sa, float3 ra,
 {
     if (jph_dynamic(ma))
     {
-        sa.linearVelocity.xyz -= delta_lambda * ma.mass.x * axis;
+        sa.linearVelocity.xyz -= delta_lambda * jph_inverse_linear_mass(ma, axis);
         sa.angularVelocity.xyz -= delta_lambda * jph_inverse_inertia(ma, sa, cross(ra, axis));
     }
     if (jph_dynamic(mb))
     {
-        sb.linearVelocity.xyz += delta_lambda * mb.mass.x * axis;
+        sb.linearVelocity.xyz += delta_lambda * jph_inverse_linear_mass(mb, axis);
         sb.angularVelocity.xyz += delta_lambda * jph_inverse_inertia(mb, sb, cross(rb, axis));
     }
 }
@@ -1450,7 +1489,7 @@ float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyStat
     float4 k[4];
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         k[point] = float4(0.0f);
-    float inverse_mass = jph_inverse_mass(ma) + jph_inverse_mass(mb);
+    float inverse_mass = jph_inverse_mass_axis(ma, normal) + jph_inverse_mass_axis(mb, normal);
     for (uint column = 0u; column < MaxContactPointsPerPair; ++column)
     {
         if (column >= count)
@@ -1485,7 +1524,7 @@ float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyStat
     float4 inverse_scale = float4(0.0f);
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         if (point < count)
-            inverse_scale[point] = 1.0f / sqrt(k[point][point]);
+            inverse_scale[point] = k[point][point] > 0.0f ? 1.0f / sqrt(k[point][point]) : 0.0f;
     for (uint column = 0u; column < MaxContactPointsPerPair; ++column)
     {
         if (column >= count)
@@ -1498,7 +1537,7 @@ float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyStat
             k[row][column] = value;
             k[column][row] = value;
         }
-        k[column][column] = 1.0f;
+        k[column][column] = inverse_scale[column] > 0.0f ? 1.0f : 0.0f;
     }
     float4 scaled_q = q * inverse_scale;
 
@@ -1586,14 +1625,16 @@ void jph_solve_position(BodyModel ma, inout BodyState sa, BodyModel mb, inout Bo
     if (jph_dynamic(ma))
     {
         float3 angular_step = -lambda * jph_inverse_inertia(ma, sa, cross(ra, normal));
-        sa.positionCOM.xyz -= lambda * ma.mass.x * normal;
+        sa.positionCOM.xyz -= lambda * jph_inverse_linear_mass(ma, normal);
         sa.rotation = jph_rotation_step(sa.rotation, angular_step);
+        jph_project_motion(ma, sa);
     }
     if (jph_dynamic(mb))
     {
         float3 angular_step = lambda * jph_inverse_inertia(mb, sb, cross(rb, normal));
-        sb.positionCOM.xyz += lambda * mb.mass.x * normal;
+        sb.positionCOM.xyz += lambda * jph_inverse_linear_mass(mb, normal);
         sb.rotation = jph_rotation_step(sb.rotation, angular_step);
+        jph_project_motion(mb, sb);
     }
     // Split position correction deliberately leaves the physical velocities alone.
 }

@@ -215,6 +215,12 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
         // the command; only later Integrate dispatches use substep time h.
         float requested_dt = target.rootCOMDt.w;
         float3 root_com = target.rootCOMDt.xyz;
+        // Capture one reachable endpoint at the actual tick start. The COM
+        // conversion and prescribed angular motion must use this same pose.
+        float3 angular_velocity = jph_project_angular(model, state,
+            jph_kinematic_angular_velocity(target.rotation, state.rotation, requested_dt));
+        float4 reachable_rotation = model.mass.z == 0.0f ? target.rotation
+            : jph_kinematic_rotation_step(state.rotation, angular_velocity * requested_dt);
         float3 origin = state.positionCOM.xyz - jph_rotate(state.rotation, root_com);
         float3 delta = target.positionSpeed.xyz - origin;
         float maximum_distance = target.positionSpeed.w * requested_dt;
@@ -224,12 +230,16 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
             // Preserve the old origin-based transform-drive cap exactly:
             // excess translation AND rotation teleport before the last stretch.
             origin = target.positionSpeed.xyz - delta * (maximum_distance / distance);
-            state.rotation = target.rotation;
-            state.positionCOM.xyz = origin + jph_rotate(state.rotation, root_com);
+            float3 capped_com = origin + jph_rotate(reachable_rotation, root_com);
+            if (model.mass.y == 0.0f) state.positionCOM.xyz = capped_com;
+            else state.positionCOM.xyz += jph_project_linear(model, capped_com - state.positionCOM.xyz);
+            state.rotation = reachable_rotation;
+            angular_velocity = float3(0.0f); // Rotation used the existing cap teleport.
+            jph_project_motion(model, state);
         }
-        float3 target_com = target.positionSpeed.xyz + jph_rotate(target.rotation, root_com);
-        state.linearVelocity = float4((target_com - state.positionCOM.xyz) / requested_dt, 0.0f);
-        state.angularVelocity = float4(jph_kinematic_angular_velocity(target.rotation, state.rotation, requested_dt), 0.0f);
+        float3 target_com = target.positionSpeed.xyz + jph_rotate(reachable_rotation, root_com);
+        state.linearVelocity = float4(jph_project_linear(model, (target_com - state.positionCOM.xyz) / requested_dt), 0.0f);
+        state.angularVelocity = float4(angular_velocity, 0.0f);
         target.state.x = (target.state.x & TargetTemporaryStatic) | TargetActive;
     }
     else if ((target.state.x & TargetDrivenLastTick) != 0u)
@@ -256,6 +266,7 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     BodyState state = body_states[index];
     BodyForces forces = body_forces[index];
     float dt = step_params.gravityDt.w;
+    jph_project_motion(model, state);
     // PhysicsSystem applies gyro before external force/torque and drag.
     jph_apply_gyroscopic_force(model, state, dt);
     state.linearVelocity.xyz += dt * jph_acceleration(model, forces, step_params.gravityDt.xyz);
@@ -586,13 +597,13 @@ void jph_solve_patch_velocity(uint patch_index)
     }
     if (jph_dynamic(ma))
     {
-        sa.linearVelocity.xyz -= ma.mass.x * delta_linear * normal;
+        sa.linearVelocity.xyz -= delta_linear * jph_inverse_linear_mass(ma, normal);
         sa.angularVelocity.xyz -= jph_inverse_inertia(ma, sa, delta_angular_a);
         body_states[a] = sa;
     }
     if (jph_dynamic(mb))
     {
-        sb.linearVelocity.xyz += mb.mass.x * delta_linear * normal;
+        sb.linearVelocity.xyz += delta_linear * jph_inverse_linear_mass(mb, normal);
         sb.angularVelocity.xyz += jph_inverse_inertia(mb, sb, delta_angular_b);
         body_states[b] = sb;
     }
@@ -623,6 +634,7 @@ void integrate(uint3 tid : SV_DispatchThreadID)
         return;
     BodyState state = body_states[index];
     float dt = step_params.gravityDt.w;
+    jph_project_motion(model, state);
     // Jolt clamps Dynamic bodies after impulses. Prescribed Kinematic target
     // velocity must not be truncated by Dynamic speed limits.
     if (jph_dynamic(model))
@@ -634,6 +646,8 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     else
         state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
     state.positionCOM.xyz += dt * state.linearVelocity.xyz;
+    // The body rotation also rotates the allowed principal angular subspace.
+    jph_project_motion(model, state);
     body_states[index] = state;
 }
 

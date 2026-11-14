@@ -639,6 +639,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
         }
         float3 inertia = 1.0f / diagonal;
         float4 principal = normalize(jph_quat_mul(state.rotation, model.inertiaRotation));
+        // Raw scalar physical inverse mass; projected translation is a tensor.
         output.positionInverseMass.w = model.mass.x;
         output.inverseInertia0 = float4(jph_inverse_inertia(model, state, float3(1, 0, 0)), 0.0f);
         output.inverseInertia1 = float4(jph_inverse_inertia(model, state, float3(0, 1, 0)), 0.0f);

@@ -7,6 +7,7 @@
 #define JPH_GPU_RIGID_JOINTS_SLANG
 
 #include "rigid_math.slang"
+#include "rigid_psd.slang"
 
 RWStructuredBuffer<QueryRecordWord> joint_stream;
 
@@ -302,13 +303,78 @@ float3 jph_joint_inertia_sum(BodyModel m1, BodyState s1, BodyModel m2, BodyState
 float3 jph_joint_point_response(BodyModel m1, BodyState s1, float3 r1,
                               BodyModel m2, BodyState s2, float3 r2, float3 value)
 {
-    return (jph_inverse_mass(m1) + jph_inverse_mass(m2)) * value
+    return jph_inverse_linear_mass(m1, value) + jph_inverse_linear_mass(m2, value)
         - cross(r1, jph_inverse_inertia(m1, s1, cross(r1, value)))
         - cross(r2, jph_inverse_inertia(m2, s2, cross(r2, value)));
 }
 
-float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, inout JointState state)
+JphPsdRange jph_joint_reachable(BodyModel m1, BodyState s1, float3 arm1,
+    BodyModel m2, BodyState s2, float3 arm2, bool point, uint dimension, float3 row0, float3 row1)
 {
+    JphPsdRange range = jph_psd_range();
+    // No-lock behavior retains the previous strict arithmetic/error path.
+    bool restricted = any(m1.mass.yz != float2(0.0f)) || any(m2.mass.yz != float2(0.0f));
+    bool full1 = jph_dynamic(m1) && (point ? m1.mass.y == 0.0f : m1.mass.z == 0.0f);
+    bool full2 = jph_dynamic(m2) && (point ? m2.mass.y == 0.0f : m2.mass.z == 0.0f);
+    if (!restricted || full1 || full2) { range.rank = dimension; return range; }
+    // Range-only geometric scaling; physical K and applied impulses below
+    // retain the original arms and actual mass/inertia weights.
+    if (dimension == 2u)
+    {
+        float rowScale = max(max(abs(row0.x), max(abs(row0.y), abs(row0.z))),
+                             max(abs(row1.x), max(abs(row1.y), abs(row1.z))));
+        if (rowScale != 0.0f) { row0 /= rowScale; row1 /= rowScale; }
+    }
+    JphPsdFactors factors = jph_psd_factors();
+    uint structural_bound = 0u;
+    for (uint body = 0u; body < 2u; ++body)
+    {
+        BodyModel model = body == 0u ? m1 : m2;
+        BodyState pose = body == 0u ? s1 : s2;
+        float3 arm = body == 0u ? arm1 : arm2;
+        if (!jph_dynamic(model)) continue;
+        if (point)
+        {
+            float armScale = max(abs(arm.x), max(abs(arm.y), abs(arm.z)));
+            if (armScale != 0.0f) arm /= armScale;
+        }
+        uint translation_locks = uint(model.mass.y), angular_locks = uint(model.mass.z);
+        uint free_translation = countbits((~translation_locks) & 7u);
+        uint free_angular = countbits((~angular_locks) & 7u);
+        // cross(arm, .) has rank at most two, independent of float roundoff
+        // in its three sampled columns. This is geometry, not a small-K test.
+        uint angular_bound = point ? (all(arm == float3(0.0f)) ? 0u : min(2u, free_angular)) : free_angular;
+        structural_bound += min(dimension, (point ? free_translation : 0u) + angular_bound);
+        float4 principal = jph_quat_mul(pose.rotation, model.inertiaRotation);
+        for (uint axis = 0u; axis < 3u; ++axis)
+        {
+            float3 coordinate = float3(0.0f); coordinate[axis] = 1.0f;
+            if (point && (translation_locks & (1u << axis)) == 0u)
+            {
+                float3 column = dimension == 3u ? coordinate : float3(dot(row0, coordinate), dot(row1, coordinate), 0.0f);
+                jph_psd_add(factors, column);
+            }
+            if ((angular_locks & (1u << axis)) == 0u)
+            {
+                float3 column = jph_rotate(principal, coordinate);
+                if (point) column = cross(column, arm);
+                if (dimension == 2u) column = float3(dot(row0, column), dot(row1, column), 0.0f);
+                jph_psd_add(factors, column);
+            }
+        }
+    }
+    factors.upperBound = min(dimension, structural_bound);
+    return jph_psd_finish(factors, dimension);
+}
+
+float3 jph_joint_solve3(float3 c0, float3 c1, float3 c2, float3 rhs, JphPsdRange reachable, inout JointState state)
+{
+    if (!reachable.valid || reachable.rank < 3u)
+    {
+        float3 result;
+        if (!jph_psd_solve3(c0, c1, c2, rhs, reachable, result)) state.flags.y = JointStatusNumericalFailure;
+        return result;
+    }
     // Symmetric diagonal equilibration keeps unrelated units / large inertia
     // ratios from deciding the determinant threshold. This is a local block.
     float3 diagonal = float3(c0.x, c1.y, c2.z);
@@ -340,7 +406,8 @@ float3 jph_joint_solve_rotation(BodyModel m1, BodyState s1, BodyModel m2, BodySt
 {
     return jph_joint_solve3(jph_joint_inertia_sum(m1, s1, m2, s2, float3(1.0f, 0.0f, 0.0f)),
         jph_joint_inertia_sum(m1, s1, m2, s2, float3(0.0f, 1.0f, 0.0f)),
-        jph_joint_inertia_sum(m1, s1, m2, s2, float3(0.0f, 0.0f, 1.0f)), rhs, state);
+        jph_joint_inertia_sum(m1, s1, m2, s2, float3(0.0f, 0.0f, 1.0f)), rhs,
+        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),state);
 }
 
 float3 jph_joint_solve_point(BodyModel m1, BodyState s1, float3 r1, BodyModel m2, BodyState s2, float3 r2,
@@ -348,7 +415,8 @@ float3 jph_joint_solve_point(BodyModel m1, BodyState s1, float3 r1, BodyModel m2
 {
     return jph_joint_solve3(jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(1.0f, 0.0f, 0.0f)),
         jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(0.0f, 1.0f, 0.0f)),
-        jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(0.0f, 0.0f, 1.0f)), rhs, state);
+        jph_joint_point_response(m1, s1, r1, m2, s2, r2, float3(0.0f, 0.0f, 1.0f)), rhs,
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state);
 }
 
 void jph_joint_apply_angular(BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
@@ -357,10 +425,10 @@ void jph_joint_apply_angular(BodyModel m1, inout BodyState s1, BodyModel m2, ino
     float3 a = jph_inverse_inertia(m1, s1, impulse);
     float3 b = jph_inverse_inertia(m2, s2, impulse);
     if (jph_dynamic(m1))
-        if (position) s1.rotation = jph_rotation_step(s1.rotation, -a);
+        if (position) { s1.rotation = jph_rotation_step(s1.rotation, -a); jph_project_motion(m1, s1); }
         else s1.angularVelocity.xyz -= a;
     if (jph_dynamic(m2))
-        if (position) s2.rotation = jph_rotation_step(s2.rotation, b);
+        if (position) { s2.rotation = jph_rotation_step(s2.rotation, b); jph_project_motion(m2, s2); }
         else s2.angularVelocity.xyz += b;
 }
 
@@ -372,23 +440,25 @@ void jph_joint_apply_point(BodyModel m1, inout BodyState s1, float3 r1,
     if (jph_dynamic(m1))
         if (position)
         {
-            s1.positionCOM.xyz -= m1.mass.x * impulse;
+            s1.positionCOM.xyz -= jph_inverse_linear_mass(m1, impulse);
             s1.rotation = jph_rotation_step(s1.rotation, -a);
+            jph_project_motion(m1, s1);
         }
         else
         {
-            s1.linearVelocity.xyz -= m1.mass.x * impulse;
+            s1.linearVelocity.xyz -= jph_inverse_linear_mass(m1, impulse);
             s1.angularVelocity.xyz -= a;
         }
     if (jph_dynamic(m2))
         if (position)
         {
-            s2.positionCOM.xyz += m2.mass.x * impulse;
+            s2.positionCOM.xyz += jph_inverse_linear_mass(m2, impulse);
             s2.rotation = jph_rotation_step(s2.rotation, b);
+            jph_project_motion(m2, s2);
         }
         else
         {
-            s2.linearVelocity.xyz += m2.mass.x * impulse;
+            s2.linearVelocity.xyz += jph_inverse_linear_mass(m2, impulse);
             s2.angularVelocity.xyz += b;
         }
 }
@@ -413,8 +483,14 @@ void jph_joint_swing_basis(BodyState s1, BodyState s2, JointState state,
     error = float2(dot(a1, b2), dot(a1, c2));
 }
 
-float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, inout JointState state)
+float2 jph_joint_symmetric2(float a, float b, float c, float2 rhs, JphPsdRange reachable, inout JointState state)
 {
+    if (!reachable.valid || reachable.rank < 2u)
+    {
+        float2 result;
+        if (!jph_psd_solve2(a,b,c,rhs,reachable,result)) state.flags.y = JointStatusNumericalFailure;
+        return result;
+    }
     float2 d = rsqrt(float2(a, c));
     float off = b * d.x * d.y;
     float det = 1.0f - off * off;
@@ -433,7 +509,8 @@ float2 jph_joint_solve2(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2,
 {
     float3 i0 = jph_joint_inertia_sum(m1, s1, m2, s2, j0);
     float3 i1 = jph_joint_inertia_sum(m1, s1, m2, s2, j1);
-    return jph_joint_symmetric2(dot(j0, i0), dot(j0, i1), dot(j1, i1), rhs, state);
+    return jph_joint_symmetric2(dot(j0, i0), dot(j0, i1), dot(j1, i1), rhs,
+        jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,2u,j0,j1),state);
 }
 
 // Slider rows use the same body writer and phase schedule as Fixed/Hinge.
@@ -468,7 +545,8 @@ float2 jph_slider_transverse(BodyModel m1, BodyState s1, float3 arm1,
 {
     float3 k0 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n0);
     float3 k1 = jph_joint_point_response(m1, s1, arm1, m2, s2, r2, n1);
-    return jph_joint_symmetric2(dot(n0, k0), dot(n0, k1), dot(n1, k1), rhs, state);
+    return jph_joint_symmetric2(dot(n0, k0), dot(n0, k1), dot(n1, k1), rhs,
+        jph_joint_reachable(m1,s1,arm1,m2,s2,r2,true,2u,n0,n1),state);
 }
 
 void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
@@ -494,6 +572,7 @@ void jph_slider_solve_velocity(JointAuthor a, inout JointState state,
     if (state.setup.w != 0.0f)
     {
         float k = dot(axis, jph_joint_point_response(m1, s1, arm1, m2, s2, r2, axis));
+        if (k == 0.0f) { state.axisImpulse.x = 0.0f; return; }
         if (!(k > 0.0f) || !isfinite(k))
         {
             state.flags.y = JointStatusNumericalFailure;
@@ -535,6 +614,7 @@ void jph_slider_solve_position(JointAuthor a, inout JointState state,
     if (side != 0.0f && limit_error != 0.0f)
     {
         float k = dot(axis, jph_joint_point_response(m1, s1, r1 + u, m2, s2, r2, axis));
+        if (k == 0.0f) { state.axisImpulse.x = 0.0f; return; }
         if (!(k > 0.0f) || !isfinite(k))
         {
             state.flags.y = JointStatusNumericalFailure;
@@ -630,6 +710,7 @@ void jph_distance_solve_velocity(JointAuthor a, inout JointState state,
     jph_joint_arms(a, state, s1, s2, r1, r2);
     float3 arm1 = s2.positionCOM.xyz - s1.positionCOM.xyz + r2;
     float k = jph_distance_inverse_mass(m1, s1, arm1, m2, s2, r2, state);
+    if (k == 0.0f) { state.axisImpulse.x = 0.0f; state.setup.w = 0.0f; return; }
     float denominator = k + state.setup.y;
     if (state.flags.y != JointStatusSuccess || !(denominator > 0.0f) || !isfinite(denominator))
     {
@@ -708,6 +789,52 @@ void jph_joint_clear_impulses(inout JointState state)
 
 #include "rigid_swing_twist.slang"
 
+float3 jph_joint_project_range(JphPsdRange range, float3 impulse, uint dimension, inout JointState state)
+{
+    if (!range.valid) { state.flags.y = JointStatusNumericalFailure; return float3(0.0f); }
+    if (range.rank == dimension) return impulse;
+    float3 result = float3(0.0f);
+    for (uint i = 0u; i < range.rank; ++i) result += range.axis[i] * dot(range.axis[i], impulse);
+    return result;
+}
+
+void jph_joint_project_warm(JointAuthor a, inout JointState state,
+    BodyModel m1, BodyState s1, BodyModel m2, BodyState s2)
+{
+    if (all(m1.mass.yz == float2(0.0f)) && all(m2.mass.yz == float2(0.0f))) return;
+    float3 r1, r2;
+    jph_joint_arms(a, state, s1, s2, r1, r2);
+    if (a.bodies.z == JointDistance) return; // Scalar setup already clears K=0.
+    if (a.bodies.z == JointSlider)
+    {
+        float3 axis, n0, n1;
+        jph_slider_basis(s1, state, axis, n0, n1);
+        float3 u = s2.positionCOM.xyz - s1.positionCOM.xyz + r2 - r1;
+        state.pointImpulse.xy = jph_joint_project_range(
+            jph_joint_reachable(m1,s1,r1+u,m2,s2,r2,true,2u,n0,n1),
+            float3(state.pointImpulse.xy,0.0f),2u,state).xy;
+        if (dot(axis,jph_joint_point_response(m1,s1,r1+u,m2,s2,r2,axis)) == 0.0f)
+        { state.axisImpulse.x = 0.0f; state.setup.w = 0.0f; }
+    }
+    else state.pointImpulse.xyz = jph_joint_project_range(
+        jph_joint_reachable(m1,s1,r1,m2,s2,r2,true,3u,float3(0),float3(0)),state.pointImpulse.xyz,3u,state);
+    if (a.bodies.z == JointFixed || a.bodies.z == JointSlider)
+        state.angularImpulse.xyz = jph_joint_project_range(
+            jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,3u,float3(0),float3(0)),
+            state.angularImpulse.xyz,3u,state);
+    else if (a.bodies.z == JointHinge)
+    {
+        float3 j0,j1; float2 error;
+        jph_joint_swing_basis(s1,s2,state,j0,j1,error);
+        state.angularImpulse.xy = jph_joint_project_range(
+            jph_joint_reachable(m1,s1,float3(0),m2,s2,float3(0),false,2u,j0,j1),
+            float3(state.angularImpulse.xy,0.0f),2u,state).xy;
+        float3 axis = jph_joint_axis(s1,state);
+        if (dot(axis,jph_joint_inertia_sum(m1,s1,m2,s2,axis)) == 0.0f)
+        { state.axisImpulse = float4(0.0f); state.setup.w = 0.0f; state.rotor.y = 0.0f; }
+    }
+}
+
 void jph_joint_setup(JointAuthor a, inout JointState state,
                      BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
                      float dt, bool warm_start)
@@ -776,6 +903,7 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
         state.angularLimitImpulse *= ratio;
         state.angularMotorImpulse *= ratio;
     }
+    jph_joint_project_warm(a,state,m1,s1,m2,s2);
 }
 
 void jph_joint_warm_start(JointAuthor a, JointState state,
@@ -971,6 +1099,11 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
             jph_joint_apply_drive_velocity(m1, s1, m2, s2, axis, response1, response2, k1, k2,
                 solved.velocity, state);
             if (state.flags.y != JointStatusSuccess) return;
+        }
+        else if (k == 0.0f && k1 == 0.0f && k2 == 0.0f)
+        {
+            state.axisImpulse.yzw = float3(0.0f);
+            state.rotor.y = 0.0f;
         }
         else
         {

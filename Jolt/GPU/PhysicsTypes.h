@@ -77,6 +77,7 @@ JPH_GPU_CONSTANT(MotionBoundaryActionMask, 3);
 JPH_GPU_CONSTANT(MotionBoundaryTypeChange, 0);
 JPH_GPU_CONSTANT(MotionBoundarySuspendPreserve, 1);
 JPH_GPU_CONSTANT(MotionBoundarySuspendReset, 2);
+JPH_GPU_CONSTANT(MotionBoundaryProjectMobility, 3);
 JPH_GPU_CONSTANT(MotionBoundaryCarryAuthoredPosition, 4);
 JPH_GPU_CONSTANT(MotionBoundaryCarryAuthoredRotation, 8);
 JPH_GPU_CONSTANT(TargetPending, 1);
@@ -95,7 +96,8 @@ struct JPH_GPU_ALIGN BodyModel
     // First leaf, leaf count, motion type | MotionNotResident, world index.
     // Zero leaves represent an empty collision body without a dummy primitive.
     JPH_GPU_UINT4 meta;
-    // Inverse mass, zero padding, zero padding, gravity factor.
+    // Raw inverse mass, exact world translation freeze bits (0..7), exact
+    // principal-inertia rotation freeze bits (0..7), gravity factor.
     JPH_GPU_FLOAT4 mass;
     // Principal inverse inertia; w is padding.
     JPH_GPU_FLOAT4 invInertiaDiagonal;
@@ -181,6 +183,7 @@ JPH_GPU_CONSTANT(JointResetRotor, 2);
 JPH_GPU_CONSTANT(JointResetSwingLimits, 4);
 JPH_GPU_CONSTANT(JointResetSwingMotor, 8);
 JPH_GPU_CONSTANT(JointResetTwistMotor, 16);
+JPH_GPU_CONSTANT(JointResetMobility, 32);
 JPH_GPU_CONSTANT(JointAuthorWords, 22);
 JPH_GPU_CONSTANT(JointStateWords, 21);
 JPH_GPU_CONSTANT(JointStatusSuccess, 0);

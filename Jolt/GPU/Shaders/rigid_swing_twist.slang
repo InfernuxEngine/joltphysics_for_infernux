@@ -264,6 +264,7 @@ float4 jph_swing_orientation(BodyState s1, BodyState s2, JointState state)
                         jph_quat_mul(s2.rotation, state.frame2));
 }
 
+// Both scalar K and apply paths use the shared projected principal inertia.
 float jph_swing_inverse_mass(BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float3 axis,
     inout JointState state)
 {

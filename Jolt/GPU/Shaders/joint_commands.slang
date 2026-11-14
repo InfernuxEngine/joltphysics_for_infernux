@@ -26,6 +26,22 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
         jph_joint_store_state(index, state, a.bodies.z);
         return;
     }
+    if ((flags & JointResetMobility) != 0u)
+    {
+        // rotor.x contains the warm prediction; remove its old armature
+        // reaction before clearing rotor.y, as in the ordinary author reset.
+        float old_armature = asfloat(state.flags.z);
+        float speed = old_armature > 0.0f ? state.rotor.x - state.rotor.y / old_armature : state.rotor.x;
+        jph_joint_clear_impulses(state);
+        if (a.bodies.z == JointHinge)
+        {
+            state.rotor.xz = float2(speed);
+            if (!isfinite(speed)) state.flags.y = JointStatusNumericalFailure;
+        }
+        // Frames, auto length, angle, armature and previous dt are retained.
+        jph_joint_store_state(index, state, a.bodies.z);
+        return;
+    }
     if (a.bodies.z == JointSwingTwist)
     {
         if ((flags & JointResetSwingLimits) != 0u) state.angularLimitImpulse = float4(0.0f);
