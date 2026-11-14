@@ -329,8 +329,9 @@ struct JPH_GPU_ALIGN Aabb
 
 struct JPH_GPU_ALIGN ContactPatch
 {
-    // Global leaf A/B indices, patch flags, zero padding. Each patch owns
-    // MaxContactPointsPerPair consecutive Contact records. Sensor patches
+    // Global leaf A/B indices and patch flags. After narrowphase w is the
+    // actual manifold point count; broadphase candidates use w for world row.
+    // Each patch owns MaxContactPointsPerPair Contact records. Sensor patches
     // retain real overlap/source but never activate response points.
     JPH_GPU_UINT4 leaves;
 };

@@ -733,6 +733,7 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
             manifold.normal = -manifold.normal;
         patch.leaves.z |= (sensor ? 0u : PatchActive) |
                           (manifold.penetration >= 0.0f ? PatchOverlapping : 0u);
+        patch.leaves.w = manifold.count;
         contact_patches[patch_index] = patch;
         for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
             if (point < manifold.count)
@@ -770,6 +771,7 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     if (penetration < -speculative_distance)
         return;
     patch.leaves.z |= (sensor ? 0u : PatchActive) | (penetration >= 0.0f ? PatchOverlapping : 0u);
+    patch.leaves.w = 1u;
     contact_patches[patch_index] = patch;
     result.meta.z = sensor ? 0u : 1u;
     result.meta.w = feature;
