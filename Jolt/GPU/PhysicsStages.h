@@ -96,7 +96,7 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
             | Mask(Resource::ContactPatches), Mask(Resource::Contacts)},
     {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::ConstraintSchedule)
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
             | Mask(Resource::ContactPatches),
@@ -177,8 +177,8 @@ inline constexpr StageDefinition Stages[] = {
 
 // Existing substep and iteration order is unchanged. Build and independently
 // validate the combined Dynamic-writer constraint plan after all SetupContacts
-// and all SetupJoints and before WarmJoints. Setup/Finish retain full-stream
-// joint coverage. No failed/uninitialized accepted joint may be compacted into
+// and all selected SetupJoints and before WarmJoints. Setup/Finish retain
+// complete selected-world joint coverage. No failed/uninitialized accepted joint may be compacted into
 // an apparently successful empty schedule; the original failure gate remains.
 // All units of a phase/iteration precede its successor. Each island phase uses
 // StageWork = (localFirst, localCount, islandTableFirst, islandLaneCount).

@@ -89,8 +89,8 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
             if (state.flags.y == JointStatusSuccess)
             {
                 BodyState s1 = jph_joint_world_state();
-                if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x];
-                BodyState s2 = body_states[a.bodies.y];
+                if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
+                BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
                 float angle = jph_joint_angle(s1, s2, state);
                 float3 owner_axis = jph_rotate(jph_quat_mul(s2.rotation, state.frame2), float3(0.0f, 0.0f, 1.0f));
                 float velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);

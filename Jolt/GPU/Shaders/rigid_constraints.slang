@@ -40,7 +40,9 @@ bool cs_body(uint body, uint world)
     if (body >= constraint_params.counts.x || world >= constraint_params.counts.w) return false;
     BodyModel m = body_models[body];
     WorldRange w = worlds[world];
-    return m.meta.w == world && cs_in_range(body, w.bodies.x, w.bodies.y);
+    return world == constraint_params.selection.x && m.meta.w == world
+        && cs_in_range(body, constraint_params.selection.y, constraint_params.selectedCounts.x)
+        && cs_in_range(body, w.bodies.x, w.bodies.y);
 }
 uint cs_ref_base(uint kind)
 {
@@ -86,6 +88,11 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
 {
     uint j;
     if (!cs_item(tid.x, constraint_params.counts.y, j)) return;
+    if (!cs_in_range(j, constraint_params.selection.w, constraint_params.selectedCounts.z))
+    {
+        cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, 0u);
+        return;
+    }
     uint4 header = joint_stream[0].value;
     uint status = 0u;
     if (header.x != constraint_params.counts.y || header.y != 1u + JointRecordWords * header.x)
@@ -244,7 +251,7 @@ void constraint_check_round(uint3 tid : SV_DispatchThreadID)
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
     uint old = labels_old[v].load(), next = labels_next[v].load(), status = 0u;
     BodyModel m = body_models[v];
-    if (cs_writer(m))
+    if (cs_writer(m) && cs_body(v, m.meta.w))
     {
         if (!cs_label(v, old) || !cs_label(v, next) || next > old) status |= ConstraintBadLabel;
     }
@@ -280,7 +287,7 @@ void constraint_validate_labels(uint3 tid : SV_DispatchThreadID)
     uint v;
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
     uint status = 0u, l = labels_old[v].load();
-    if (cs_writer(body_models[v]))
+    if (cs_writer(body_models[v]) && cs_body(v, body_models[v].meta.w))
     {
         if (!cs_label(v, l)) status |= ConstraintBadLabel;
         else if (labels_old[l].load() != l) status |= ConstraintBadLabel;

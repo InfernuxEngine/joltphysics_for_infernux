@@ -16,6 +16,27 @@ RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 
+
+bool jph_selected_range(uint index, uint base, uint count)
+{
+    return index >= base && index - base < count;
+}
+bool jph_selected_body_slot(uint index)
+{
+    return index < step_params.counts.x && jph_selected_range(index, step_params.selection.y, step_params.selectedCounts.x);
+}
+bool jph_selected_body(uint index)
+{
+    if (!jph_selected_body_slot(index)) return false;
+    return body_models[index].meta.w == step_params.selection.x;
+}
+bool jph_selected_joint(uint index, JointAuthor author)
+{
+    return jph_selected_range(index, step_params.selection.w, step_params.selectedCounts.z)
+        && author.identity.z == step_params.selection.x && jph_selected_body_slot(author.bodies.y)
+        && (author.bodies.x == InvalidQueryBodySlot || jph_selected_body_slot(author.bodies.x));
+}
+
 #include "island_owner_schedule.slang"
 
 void jph_joint_models(JointAuthor author, out BodyModel m1, out BodyModel m2)
@@ -46,6 +67,8 @@ void jph_joint_bodies(JointAuthor author, out BodyModel m1, out BodyState s1,
 void jph_step_joint(uint index, uint phase)
 {
     JointAuthor author = jph_joint_load_author(index);
+    if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
+        || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
     JointState runtime = jph_joint_load_state(index);
     // Inner solver early returns must never be followed by stale full-state
     // stores from an inactive joint assigned outside another island's owner.
@@ -101,6 +124,8 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
     uint index = stage_work.range.x + tid.x;
     if (index >= joint_stream[0].value.x) return;
     JointAuthor author = jph_joint_load_author(index);
+    if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
+        || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
     JointState runtime = jph_joint_load_state(index);
     BodyModel m1, m2;
     BodyState s1, s2;
@@ -148,6 +173,8 @@ void finish_joints(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
     if (index >= joint_stream[0].value.x) return;
+    JointAuthor author = jph_joint_load_author(index);
+    if (!jph_selected_joint(index, author)) return;
     JointState runtime = jph_joint_load_state(index);
     runtime.rotor.w = step_params.gravityDt.w;
     jph_joint_store_state(index, runtime);
@@ -171,7 +198,7 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (index >= step_params.counts.x)
+    if (!jph_selected_body(index))
         return;
     BodyModel model = body_models[index];
     if (!jph_resident(model))
@@ -221,7 +248,7 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (index >= step_params.counts.x)
+    if (!jph_selected_body(index))
         return;
     BodyModel model = body_models[index];
     if (!jph_dynamic(model) || !jph_resident(model))
@@ -246,7 +273,7 @@ void finish_tick(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (index >= step_params.counts.x)
+    if (!jph_selected_body(index))
         return;
     if (!jph_resident(body_models[index]))
         return;
@@ -266,9 +293,10 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (index >= step_params.counts.z)
+    if (index >= step_params.counts.z || !jph_selected_range(index, step_params.selection.z, step_params.selectedCounts.y))
         return;
     ShapeModel shape = shape_models[index];
+    if (!jph_selected_body_slot(shape.meta.y)) return;
     BodyState state = body_states[shape.meta.y];
     float4 geometry = shape.geometry;
     float3 center = jph_leaf_position(shape, state);
@@ -302,6 +330,13 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     uint patch_index = candidate_base + candidate_ordinal; // WORD address.
     uint slot = candidate_ordinal * MaxContactPointsPerPair; // CONTACT ordinal.
     ContactPatch patch = contact_patches[patch_index];
+    Contact empty;
+    empty.meta = uint4(0u);
+    empty.normalDepth = empty.localAnchorA = empty.localAnchorB = empty.impulse = float4(0.0f);
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point) contacts[slot + point] = empty;
+    if (patch.leaves.w != step_params.selection.x
+        || !jph_selected_range(patch.leaves.x, step_params.selection.z, step_params.selectedCounts.y)
+        || !jph_selected_range(patch.leaves.y, step_params.selection.z, step_params.selectedCounts.y)) return;
     ShapeModel shape_a = shape_models[patch.leaves.x];
     ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = shape_a.meta.y;
@@ -323,6 +358,7 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
         contacts[slot + point] = result;
 
+    if (!jph_selected_body_slot(a) || !jph_selected_body_slot(b)) return;
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
     float4 ga = shape_a.geometry;
@@ -425,6 +461,7 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = contact.meta.x;
     uint b = contact.meta.y;
+    if (!jph_selected_body(a) || !jph_selected_body(b)) return;
     BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
     BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
     BodyState sa = body_states[a];
@@ -464,6 +501,7 @@ void jph_solve_patch_velocity(uint patch_index)
     Contact contact = contacts[slot];
     uint a = contact.meta.x;
     uint b = contact.meta.y;
+    if (!jph_selected_body(a) || !jph_selected_body(b)) return;
     BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
     BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
     BodyState sa = body_states[a];
@@ -578,7 +616,7 @@ void integrate(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (index >= step_params.counts.x)
+    if (!jph_selected_body(index))
         return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
     if (!jph_nonstatic(model) || !jph_resident(model))
@@ -607,6 +645,7 @@ void jph_solve_contact_position(uint source_row)
         return;
     uint a = contact.meta.x;
     uint b = contact.meta.y;
+    if (!jph_selected_body(a) || !jph_selected_body(b)) return;
     BodyModel ma = body_models[a];
     BodyModel mb = body_models[b];
     BodyState sa = body_states[a];

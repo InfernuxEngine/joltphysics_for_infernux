@@ -262,13 +262,19 @@ struct JPH_GPU_ALIGN StepParams
     JPH_GPU_FLOAT4 contact;
     // Minimum restitution speed, then three padding values.
     JPH_GPU_FLOAT4 restitution;
+    // One accepted layout address, never a stable RuntimeWorld identity.
+    // selection=(world row, body base, leaf base, joint base).
+    // selectedCounts=(body capacity, leaf count, joint count, zero).
+    // Counts above remain TOTAL array extents for global address validation.
+    JPH_GPU_UINT4 selection;
+    JPH_GPU_UINT4 selectedCounts;
 };
 
 // One immutable dispatch unit. Independent domains use global item ordinals;
-// world domains use local item ordinals and an explicit world range.
+// island domains use local ordinals and an explicit island-table range.
 struct JPH_GPU_ALIGN StageWork
 {
-    JPH_GPU_UINT4 range; // Item first/count, world first/count.
+    JPH_GPU_UINT4 range; // Global item first/count, or local first/count and island table first/count.
 };
 
 // Immutable render hierarchy nodes address one frozen BodyState generation.
@@ -428,10 +434,14 @@ JPH_GPU_CONSTANT(QueryPending, 3);
 
 struct JPH_GPU_ALIGN QueryParams
 {
-    // Request count, first body slot, body slots, published leaf count.
+    // Request count, selected global body base/count, selected leaf count.
     JPH_GPU_UINT4 counts;
     // Explicit primitive count, per-request scratch record stride, record capacity, output format.
     JPH_GPU_UINT4 sizes;
+    // Same selected layout address as StepParams; model/shape indices remain global.
+    // BodyState indices are globalSlot-selection.y in the compact completed output.
+    JPH_GPU_UINT4 selection;
+    JPH_GPU_UINT4 selectedCounts;
 };
 
 struct JPH_GPU_ALIGN QueryInput
@@ -528,6 +538,8 @@ struct JPH_GPU_ALIGN QueryExportParams
 {
     JPH_GPU_UINT4 output; // format, field, record count, scalar offset.
     JPH_GPU_UINT4 sizes; // request count, record words, scalars per output row, zero.
+    // Source first record; original aggregate body index; override index flag; zero.
+    JPH_GPU_UINT4 selection;
 };
 
 struct JPH_GPU_ALIGN QuerySpan
@@ -560,7 +572,7 @@ static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, 
 JPH_GPU_CHECK_TYPE(Aabb, 32);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);
-JPH_GPU_CHECK_TYPE(StepParams, 80);
+JPH_GPU_CHECK_TYPE(StepParams, 112);
 JPH_GPU_CHECK_TYPE(StageWork, 16);
 JPH_GPU_CHECK_TYPE(PoseNode, 192);
 JPH_GPU_CHECK_TYPE(PoseBinding, 128);
@@ -571,7 +583,8 @@ JPH_GPU_CHECK_TYPE(CenterOfMassUpdate, 32);
 JPH_GPU_CHECK_TYPE(BodyCommand, 64);
 JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
-JPH_GPU_CHECK_TYPE(QueryParams, 32);
+JPH_GPU_CHECK_TYPE(QueryParams, 64);
+static_assert(offsetof(QueryParams, selection) == 32 && offsetof(QueryParams, selectedCounts) == 48);
 JPH_GPU_CHECK_TYPE(QueryInput, 112);
 JPH_GPU_CHECK_TYPE(QueryCastParams, 16);
 JPH_GPU_CHECK_TYPE(QueryCastState, 64);
@@ -583,7 +596,8 @@ JPH_GPU_CHECK_TYPE(QueryHit, 64);
 JPH_GPU_CHECK_TYPE(QueryRecordWord, 16);
 JPH_GPU_CHECK_TYPE(QueryShapeState, 144);
 JPH_GPU_CHECK_TYPE(QueryMotionState, 192);
-JPH_GPU_CHECK_TYPE(QueryExportParams, 32);
+JPH_GPU_CHECK_TYPE(QueryExportParams, 48);
+static_assert(offsetof(QueryExportParams, selection) == 32);
 static_assert(offsetof(QueryRecordWord, value) == 0 && offsetof(QueryExportParams, sizes) == 16);
 static_assert(offsetof(QueryShapeState, surface) == 16 && offsetof(QueryShapeState, geometry) == 32
     && offsetof(QueryShapeState, center) == 48 && offsetof(QueryShapeState, rotation) == 64
@@ -617,6 +631,7 @@ static_assert(offsetof(ContactPatch, leaves) == 0);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);
 static_assert(offsetof(Contact, normalDepth) == 16 && offsetof(Contact, impulse) == 64);
 static_assert(offsetof(StepParams, gravityDt) == 32 && offsetof(StepParams, restitution) == 64);
+static_assert(offsetof(StepParams, selection) == 80 && offsetof(StepParams, selectedCounts) == 96);
 static_assert(offsetof(StageWork, range) == 0);
 static_assert(offsetof(PoseNode, bodyParent) == 0 && offsetof(PoseNode, rootCOM) == 16
     && offsetof(PoseNode, localScale) == 32 && offsetof(PoseNode, parentRotation) == 48

@@ -60,6 +60,12 @@ struct CS_ALIGN ConstraintParams
     CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, 0, 0.
     CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, CC-check total word.
     CS_U4 round;        // round body-check total word; yzw zero padding.
+    // One accepted layout address, never a stable RuntimeWorld identity.
+    // selection=(world row, body base, leaf base, joint base).
+    // selectedCounts=(body capacity, leaf count, joint count, zero).
+    // Counts above remain TOTAL array extents for global address validation.
+    CS_U4 selection;
+    CS_U4 selectedCounts;
 };
 
 // Frozen numerical consumer header (four words, base=0):
@@ -109,7 +115,7 @@ struct CS_ALIGN ConstraintParams
 static_assert(sizeof(ConstraintScheduleWord) == 16);
 static_assert(alignof(ConstraintScheduleWord) == 16);
 static_assert(std::is_trivially_copyable_v<ConstraintScheduleWord>);
-static_assert(sizeof(ConstraintParams) == 12 * 16);
+static_assert(sizeof(ConstraintParams) == 14 * 16);
 static_assert(alignof(ConstraintParams) == 16);
 } }
 #endif

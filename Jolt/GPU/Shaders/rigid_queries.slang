@@ -557,7 +557,7 @@ void query_gather_shapes(QueryInput request, uint begin, inout uint count, inout
         BodyModel model = body_models[slot];
         if (!jph_resident(model))
             continue;
-        BodyState state = body_states[slot];
+        BodyState state = body_states[slot - query_params.selection.y];
         if (!query_valid_quaternion(state.rotation) || !all(isfinite(state.positionCOM)) ||
             !all(isfinite(state.linearVelocity)) || !all(isfinite(state.angularVelocity)))
         {
@@ -568,6 +568,11 @@ void query_gather_shapes(QueryInput request, uint begin, inout uint count, inout
         for (uint ordinal = 0u; ordinal < model.meta.y; ++ordinal)
         {
             uint leaf = model.meta.x + ordinal;
+            if (leaf < query_params.selection.z || leaf - query_params.selection.z >= query_params.selectedCounts.y)
+            {
+                status = QueryNumericalFailure;
+                break;
+            }
             ShapeModel shape = shape_models[leaf];
             if ((request.meta.z != QueryAllShapeTypes && shape.meta.x != request.meta.z) ||
                 !query_accepts(request, shape, slot))
@@ -604,7 +609,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
 {
     uint slot = request.source.y;
     BodyModel model = body_models[slot];
-    BodyState state = body_states[slot];
+    BodyState state = body_states[slot - query_params.selection.y];
     if (!query_valid_quaternion(state.rotation) || !all(isfinite(state.positionCOM)) ||
         !all(isfinite(state.linearVelocity)) || !all(isfinite(state.angularVelocity)))
     {
@@ -919,7 +924,7 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
             break;
         }
         ++state.iteration.x;
-        if (state.cursor.x >= query_params.counts.w)
+        if (state.cursor.x - query_params.selection.z >= query_params.selectedCounts.y)
         {
             state.cursor.w = QuerySuccess;
             state.cursor.y = 2u;
@@ -952,7 +957,7 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
         }
         QueryHit hit;
         uint status;
-        bool finished = query_cast_pair_step(request, shape, body_states[slot], state, direction, hit, status);
+        bool finished = query_cast_pair_step(request, shape, body_states[slot - query_params.selection.y], state, direction, hit, status);
         if (status != QuerySuccess)
         {
             state.cursor.w = status;
@@ -995,7 +1000,7 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
     uint count = request.meta.y == QueryClosest ? 1u : 0u;
     uint status = QuerySuccess;
     QueryCastState cast;
-    cast.cursor = uint4(0u, 2u, count, QuerySuccess);
+    cast.cursor = uint4(query_params.selection.z, 2u, count, QuerySuccess);
     cast.progress = float4(0.0f, 3.402823466e+38f, 0.0f, request.positionMaximum.w);
     cast.normal = float4(0.0f);
     cast.iteration = uint4(0u);
@@ -1037,7 +1042,7 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
                 continue;
             if (request.meta.x == QueryBodyBounds && query_body_ids[slot].ids.y == 0u)
                 continue;
-            BodyState state = body_states[slot];
+            BodyState state = body_states[slot - query_params.selection.y];
             bool accepted = false;
             float3 low = float3(3.402823466e+38f);
             float3 high = -low;
@@ -1045,6 +1050,11 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
             for (uint ordinal = 0u; ordinal < model.meta.y; ++ordinal)
             {
                 uint leaf = model.meta.x + ordinal;
+            if (leaf < query_params.selection.z || leaf - query_params.selection.z >= query_params.selectedCounts.y)
+            {
+                status = QueryNumericalFailure;
+                break;
+            }
                 ShapeModel shape = shape_models[leaf];
                 if (request.meta.x == QueryBodyBounds)
                 {
@@ -1177,7 +1187,8 @@ void query_export(uint3 tid : SV_DispatchThreadID)
     if (row >= query_export_params.output.z || query_summary[0].counts.y != QuerySuccess)
         return;
     uint field = query_export_params.output.y;
-    uint base = row * query_export_params.sizes.y;
+    uint source_row = query_export_params.selection.x + row;
+    uint base = source_row * query_export_params.sizes.y;
     uint destination = query_export_params.output.w + row * query_export_params.sizes.z;
     uint4 value = uint4(0u);
     if (field == QueryExportMotionPosition) value = query_hits[base + 1u].value;
@@ -1200,10 +1211,10 @@ void query_export(uint3 tid : SV_DispatchThreadID)
         {
             uint middle = low + (high - low) / 2u;
             QuerySpan span = query_spans[middle];
-            if (span.range.x + span.range.y <= row) low = middle + 1u;
+            if (span.range.x + span.range.y <= source_row) low = middle + 1u;
             else high = middle;
         }
-        value.x = low;
+        value.x = query_export_params.selection.z != 0u ? query_export_params.selection.y : low;
     }
     else if (field == QueryExportShapeCenter) value = query_hits[base + 3u].value;
     else if (field == QueryExportShapeHalfExtents) value = query_hits[base + 2u].value;

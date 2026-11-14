@@ -79,7 +79,7 @@ bool bp_in_range(uint index, uint first, uint count)
 
 bool bp_world_selected(uint world)
 {
-    return bp_in_range(world, stage_work.range.z, stage_work.range.w);
+    return world == broadphase.selection.x;
 }
 
 bool bp_item(uint lane, uint length, out uint item)
@@ -134,7 +134,7 @@ void seed_active(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     uint status = bp_load(bp_h1()).z;
-    bp_store(broadphase.activeState.x, uint4(broadphase.counts.x, 0u, status, 0u));
+    bp_store(broadphase.activeState.x, uint4(broadphase.selectedCounts.y, 0u, status, 0u));
     bp_store(broadphase.activeState.y, uint4(0u));
 }
 
@@ -168,6 +168,11 @@ void build_sort_records(uint3 tid : SV_DispatchThreadID)
 {
     uint leaf;
     if (!bp_item(tid.x, broadphase.counts.x, leaf)) return;
+    if (!bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
+    {
+        bp_store(broadphase.merge.x + leaf, uint4(0xffffffffu, 0xffffffffu, leaf, 0u));
+        return;
+    }
     ShapeModel shape = shape_models[leaf];
     uint status = 0u;
     if (shape.surface.x >= 32u) status |= BP_BAD_MODEL;
@@ -177,7 +182,7 @@ void build_sort_records(uint3 tid : SV_DispatchThreadID)
     {
         BodyModel body = body_models[shape.meta.y];
         world = body.meta.w;
-        if (world >= broadphase.counts.z) status |= BP_BAD_MODEL;
+        if (world >= broadphase.counts.z || !bp_world_selected(world)) status |= BP_BAD_MODEL;
         else
         {
             WorldRange owner = author_worlds[world];
@@ -200,6 +205,12 @@ void build_suppression(uint3 tid : SV_DispatchThreadID)
 {
     uint joint;
     if (!bp_item(tid.x, broadphase.counts.y, joint)) return;
+    if (!bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
+    {
+        bp_store(broadphase.merge.x + joint, uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint));
+        bp_store(broadphase.rankRows.z + joint, uint4(0u));
+        return;
+    }
     uint p = 1u + JointRecordWords * joint;
     uint4 endpoints = joint_stream[p].value;
     uint world = joint_stream[p + 1u].value.z;
@@ -207,7 +218,7 @@ void build_suppression(uint3 tid : SV_DispatchThreadID)
     bool suppress = (endpoints.w & (JointEnabled | JointCollisionEnabled)) == JointEnabled;
     // World endpoints cannot match any two real bodies, exactly as before.
     suppress = suppress && endpoints.x != InvalidQueryBodySlot;
-    if (world >= broadphase.counts.z || endpoints.y >= broadphase.counts.w
+    if (world >= broadphase.counts.z || !bp_world_selected(world) || endpoints.y >= broadphase.counts.w
         || (endpoints.x != InvalidQueryBodySlot && endpoints.x >= broadphase.counts.w))
         status |= BP_BAD_MODEL;
     else
@@ -286,6 +297,12 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
     uint status = key.w;
     uint end = rank + 1u;
     if (key.x >= broadphase.counts.z || key.z >= broadphase.counts.x) status |= BP_BAD_MODEL;
+    if (rank >= broadphase.selectedCounts.y)
+    {
+        bp_store(broadphase.rankRows.x + rank, uint4(end, end, 0u, 0u));
+        bp_store(broadphase.rankRows.y + rank, uint4(0u));
+        return;
+    }
     if (status == 0u)
     {
         uint max_x = bp_ordered(bounds[key.z].maximum.x);
@@ -331,7 +348,7 @@ bool bp_eligible(uint rank_a, uint rank_b)
 {
     uint4 key_a = bp_load(broadphase.workspace.z + rank_a);
     uint4 key_b = bp_load(broadphase.workspace.z + rank_b);
-    if (key_a.x != key_b.x) return false;
+    if (!bp_world_selected(key_a.x) || key_a.x != key_b.x) return false;
     ShapeModel a = shape_models[key_a.z], b = shape_models[key_b.z];
     if (a.meta.y == b.meta.y) return false;
     BodyModel ma = body_models[a.meta.y], mb = body_models[b.meta.y];
@@ -572,8 +589,15 @@ void publish_count_summary(uint3 tid : SV_DispatchThreadID)
 void build_world_ranges(uint3 tid : SV_DispatchThreadID)
 {
     uint world;
-    if (!bp_item(tid.x, broadphase.counts.z, world) || !bp_world_selected(world)) return;
+    if (!bp_item(tid.x, broadphase.counts.z, world)) return;
     WorldRange runtime = author_worlds[world];
+    if (!bp_world_selected(world))
+    {
+        runtime.bodies.zw = uint2(0u);
+        runtime_worlds[world] = runtime;
+        bp_store(broadphase.summary.y + world, uint4(0u));
+        return;
+    }
     uint first = bp_world_bound(world, false), end = bp_world_bound(world, true);
     uint4 total = bp_load(bp_h1());
     uint2 begin_offset = total.xy;

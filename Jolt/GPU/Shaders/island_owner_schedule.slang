@@ -21,7 +21,7 @@ bool jph_island_unit(uint lane, bool joints, out uint4 joint_range, out uint4 pa
     uint island = constraint_schedule[table_base + table_first + lane].value.x;
     joint_range = constraint_schedule[bases.x + 2u * island].value;
     patch_range = constraint_schedule[bases.x + 2u * island + 1u].value;
-    return true;
+    return joint_range.x == step_params.selection.x;
 }
 
 bool jph_island_joint_range(uint lane, out uint begin, out uint first, out uint end)

@@ -43,6 +43,12 @@ struct BP_ALIGN BroadphaseParams
     BP_U4 scanParent;   // globally scanned parent prefix base for add_scan_offsets; yzw zero.
     BP_U4 activeState;  // Input/output active-meta word bases, scan level [0,6], dynamic-scan flag [0,1].
     BP_U4 summary;      // final 1-record reduction address, world-summary W-record base, fill-check N-record base, zero.
+    // One accepted layout address, never a stable RuntimeWorld identity.
+    // selection=(world row, body base, leaf base, joint base).
+    // selectedCounts=(body capacity, leaf count, joint count, zero).
+    // Counts above remain TOTAL array extents for global address validation.
+    BP_U4 selection;
+    BP_U4 selectedCounts;
 };
 
 // 16-byte arena header0 = (candidateBankWordBase, actualC, 0, 0).
@@ -67,7 +73,7 @@ struct BP_ALIGN BroadphaseParams
 // ordered by world index. Within each world the key is exactly (leafA,leafB).
 
 #ifdef __cplusplus
-static_assert(sizeof(BroadphaseParams) == 12 * 16);
+static_assert(sizeof(BroadphaseParams) == 14 * 16);
 static_assert(alignof(BroadphaseParams) == 16);
 static_assert(sizeof(WorldRange) == 32);
 } }
