@@ -9,7 +9,7 @@ StructuredBuffer<uint> joint_remap;
 StructuredBuffer<QueryRecordWord> old_joint_stream;
 StructuredBuffer<BodyState> body_states;
 StructuredBuffer<uint> joint_query_rows;
-RWStructuredBuffer<QueryRecordWord> joint_motion;
+RWStructuredBuffer<JointReadback> joint_motion;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -20,17 +20,25 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
     uint index = joint_query_rows[2u * request];
     uint flags = joint_query_rows[2u * request + 1u];
     JointAuthor a = jph_joint_load_author(index);
-    JointState state = jph_joint_load_state(index);
+    JointState state = jph_joint_load_state(index, a.bodies.z);
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
     {
-        jph_joint_store_state(index, state);
+        jph_joint_store_state(index, state, a.bodies.z);
+        return;
+    }
+    if (a.bodies.z == JointSwingTwist)
+    {
+        if ((flags & JointResetSwingLimits) != 0u) state.angularLimitImpulse = float4(0.0f);
+        if ((flags & JointResetSwingMotor) != 0u) state.angularMotorImpulse.yz = float2(0.0f);
+        if ((flags & JointResetTwistMotor) != 0u) state.angularMotorImpulse.x = 0.0f;
+        jph_joint_store_state(index, state, a.bodies.z);
         return;
     }
     if (a.bodies.z == JointSlider || a.bodies.z == JointDistance)
     {
         jph_joint_clear_impulses(state);
         state.rotor.xyz = float3(0.0f);
-        jph_joint_store_state(index, state);
+        jph_joint_store_state(index, state, a.bodies.z);
         return;
     }
     // Reset at the ordered author boundary, before a later body command.
@@ -48,7 +56,7 @@ void update_joint_state(uint3 tid : SV_DispatchThreadID)
     state.rotor.xyz = float3(speed, 0.0f, speed);
     state.flags.z = asuint(a.passive.z);
     if (!isfinite(speed)) state.flags.y = JointStatusNumericalFailure;
-    jph_joint_store_state(index, state);
+    jph_joint_store_state(index, state, a.bodies.z);
 }
 
 [shader("compute")]
@@ -74,7 +82,11 @@ void initialize_joints(uint3 tid : SV_DispatchThreadID)
     JointState state = jph_joint_initialize(a, s1, body_states[a.bodies.y]);
     if (old_index != InvalidQueryBodySlot)
         state.flags.y = JointStatusInvalid;
-    jph_joint_store_state(index, state);
+    jph_joint_store_state(index, state, a.bodies.z);
+    // Initialize the unused suffix once, so remap copies never read undefined data.
+    if (a.bodies.z != JointSwingTwist)
+        for (uint word = 13u; word < JointStateWords; ++word)
+            joint_stream[destination + word].value = uint4(0u);
 }
 
 [shader("compute")]
@@ -83,21 +95,29 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
 {
     uint row = tid.x;
     if (row >= joint_params.counts.z) return;
-    QueryRecordWord result;
-    result.value = uint4(0u, 0u, JointStatusInvalid, 0u);
+    JointReadback result;
+    result.values = float4(0.0f);
+    result.status = uint4(JointStatusInvalid, 0u, 0u, 0u);
     uint index = joint_query_rows[row];
     if (index < joint_stream[0].value.x)
     {
         JointAuthor a = jph_joint_load_author(index);
-        JointState state = jph_joint_load_state(index);
-        if ((a.bodies.z == JointHinge || a.bodies.z == JointSlider || a.bodies.z == JointDistance) && state.flags.x != 0u)
+        JointState state = jph_joint_load_state(index, a.bodies.z);
+        if (a.bodies.z == joint_params.counts.y && a.bodies.z >= JointHinge && a.bodies.z <= JointSwingTwist && state.flags.x != 0u)
         {
-            result.value.z = state.flags.y;
+            result.status.x = state.flags.y;
             if (state.flags.y == JointStatusSuccess)
             {
                 BodyState s1 = jph_joint_world_state();
                 if (a.bodies.x != InvalidQueryBodySlot) s1 = body_states[a.bodies.x - joint_params.counts.w];
                 BodyState s2 = body_states[a.bodies.y - joint_params.counts.w];
+                if (a.bodies.z == JointSwingTwist)
+                {
+                    result.values = jph_swing_orientation(s1, s2, state);
+                    if (!all(isfinite(result.values))) result.status.x = JointStatusNumericalFailure;
+                    joint_motion[row] = result;
+                    return;
+                }
                 float coordinate, velocity;
                 if (a.bodies.z == JointDistance)
                 {
@@ -129,9 +149,9 @@ void read_joint_motion(uint3 tid : SV_DispatchThreadID)
                     velocity = dot(owner_axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
                 }
                 if (isfinite(coordinate) && isfinite(velocity))
-                    result.value.xy = uint2(asuint(coordinate), asuint(velocity));
+                    result.values.xy = float2(coordinate, velocity);
                 else
-                    result.value.z = JointStatusNumericalFailure;
+                    result.status.x = JointStatusNumericalFailure;
             }
         }
     }
@@ -161,7 +181,7 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
         }
         else
         {
-            uint4 previous = joint_motion[index].value;
+            uint4 previous = joint_motion[index].status;
             status = previous.x;
             first_failure = previous.y;
         }
@@ -180,8 +200,9 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
     }
     if (lane.x == 0u)
     {
-        QueryRecordWord result;
-        result.value = uint4(joint_status_values[0], joint_status_failures[0], 0u, 0u);
+        JointReadback result;
+        result.values = float4(0.0f);
+        result.status = uint4(joint_status_values[0], joint_status_failures[0], 0u, 0u);
         joint_motion[joint_params.counts.z + group.x] = result;
     }
 }

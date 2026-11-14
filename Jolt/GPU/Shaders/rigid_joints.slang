@@ -29,10 +29,28 @@ JointAuthor jph_joint_load_author(uint index)
     a.connectedAnchor = asfloat(joint_stream[p + 12u].value);
     a.connectedLocalAnchor = asfloat(joint_stream[p + 13u].value);
     a.linearSpring = asfloat(joint_stream[p + 14u].value);
+    a.angularFrame = float4(0.0f);
+    a.angularLimits = float4(0.0f);
+    a.angularModes = uint4(0u);
+    a.angularSpring = float4(0.0f);
+    a.angularTorque = float4(0.0f);
+    a.angularTarget = float4(0.0f);
+    a.angularVelocity = float4(0.0f);
+    // Old kinds never read the angular author suffix.
+    if (a.bodies.z == JointSwingTwist)
+    {
+        a.angularFrame = asfloat(joint_stream[p + 15u].value);
+        a.angularLimits = asfloat(joint_stream[p + 16u].value);
+        a.angularModes = joint_stream[p + 17u].value;
+        a.angularSpring = asfloat(joint_stream[p + 18u].value);
+        a.angularTorque = asfloat(joint_stream[p + 19u].value);
+        a.angularTarget = asfloat(joint_stream[p + 20u].value);
+        a.angularVelocity = asfloat(joint_stream[p + 21u].value);
+    }
     return a;
 }
 
-JointState jph_joint_load_state(uint index)
+JointState jph_joint_load_state(uint index, uint kind)
 {
     uint p = joint_stream[0].value.y + JointStateWords * index;
     JointState s;
@@ -49,10 +67,29 @@ JointState jph_joint_load_state(uint index)
     s.rotor = asfloat(joint_stream[p + 10u].value);
     s.setup = asfloat(joint_stream[p + 11u].value);
     s.distanceReference = asfloat(joint_stream[p + 12u].value);
+    s.angularLimitX = float4(0.0f);
+    s.angularLimitY = float4(0.0f);
+    s.angularLimitZ = float4(0.0f);
+    s.angularLimitImpulse = float4(0.0f);
+    s.angularMotorImpulse = float4(0.0f);
+    s.angularMotorSetupX = float4(0.0f);
+    s.angularMotorSetupY = float4(0.0f);
+    s.angularMotorSetupZ = float4(0.0f);
+    if (kind == JointSwingTwist)
+    {
+        s.angularLimitX = asfloat(joint_stream[p + 13u].value);
+        s.angularLimitY = asfloat(joint_stream[p + 14u].value);
+        s.angularLimitZ = asfloat(joint_stream[p + 15u].value);
+        s.angularLimitImpulse = asfloat(joint_stream[p + 16u].value);
+        s.angularMotorImpulse = asfloat(joint_stream[p + 17u].value);
+        s.angularMotorSetupX = asfloat(joint_stream[p + 18u].value);
+        s.angularMotorSetupY = asfloat(joint_stream[p + 19u].value);
+        s.angularMotorSetupZ = asfloat(joint_stream[p + 20u].value);
+    }
     return s;
 }
 
-void jph_joint_store_state(uint index, JointState s)
+void jph_joint_store_state(uint index, JointState s, uint kind)
 {
     // The only stores into this resource are in the runtime suffix.
     uint p = joint_stream[0].value.y + JointStateWords * index;
@@ -69,6 +106,18 @@ void jph_joint_store_state(uint index, JointState s)
     joint_stream[p + 10u].value = asuint(s.rotor);
     joint_stream[p + 11u].value = asuint(s.setup);
     joint_stream[p + 12u].value = asuint(s.distanceReference);
+    // Old kinds never write the angular state suffix during solver iterations.
+    if (kind == JointSwingTwist)
+    {
+        joint_stream[p + 13u].value = asuint(s.angularLimitX);
+        joint_stream[p + 14u].value = asuint(s.angularLimitY);
+        joint_stream[p + 15u].value = asuint(s.angularLimitZ);
+        joint_stream[p + 16u].value = asuint(s.angularLimitImpulse);
+        joint_stream[p + 17u].value = asuint(s.angularMotorImpulse);
+        joint_stream[p + 18u].value = asuint(s.angularMotorSetupX);
+        joint_stream[p + 19u].value = asuint(s.angularMotorSetupY);
+        joint_stream[p + 20u].value = asuint(s.angularMotorSetupZ);
+    }
 }
 
 float4 jph_joint_conjugate(float4 q) { return float4(-q.xyz, q.w); }
@@ -172,6 +221,8 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
         float3 y = jph_joint_perpendicular(x);
         world_frame = jph_joint_frame(x, y, cross(x, y));
     }
+    if (a.bodies.z == JointSwingTwist)
+        world_frame = normalize(jph_quat_mul(s2.rotation, a.angularFrame));
     s.frame1 = normalize(jph_quat_mul(jph_joint_conjugate(s1.rotation), world_frame));
     s.frame2 = normalize(jph_quat_mul(jph_joint_conjugate(s2.rotation), world_frame));
     s.pointImpulse = float4(0.0f);
@@ -180,6 +231,14 @@ JointState jph_joint_initialize(JointAuthor a, BodyState s1, BodyState s2)
     s.rotor = float4(0.0f);
     s.setup = float4(0.0f);
     s.distanceReference = float4(0.0f);
+    s.angularLimitX = float4(0.0f);
+    s.angularLimitY = float4(0.0f);
+    s.angularLimitZ = float4(0.0f);
+    s.angularLimitImpulse = float4(0.0f);
+    s.angularMotorImpulse = float4(0.0f);
+    s.angularMotorSetupX = float4(0.0f);
+    s.angularMotorSetupY = float4(0.0f);
+    s.angularMotorSetupZ = float4(0.0f);
     if (a.bodies.z == JointDistance)
     {
         float3 connected_point = a.bodies.x == InvalidQueryBodySlot ? a.connectedAnchor.xyz
@@ -643,7 +702,11 @@ void jph_joint_clear_impulses(inout JointState state)
     state.angularImpulse = float4(0.0f);
     state.axisImpulse = float4(0.0f);
     state.rotor.y = 0.0f;
+    state.angularLimitImpulse = float4(0.0f);
+    state.angularMotorImpulse = float4(0.0f);
 }
+
+#include "rigid_swing_twist.slang"
 
 void jph_joint_setup(JointAuthor a, inout JointState state,
                      BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
@@ -697,6 +760,8 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
     }
     if (a.bodies.z == JointDistance)
         jph_distance_setup(a, state, m1, s1, m2, s2, dt);
+    if (a.bodies.z == JointSwingTwist)
+        jph_swing_setup(a, state, m1, s1, m2, s2, dt);
     if (!warm_start)
     {
         jph_joint_clear_impulses(state);
@@ -706,6 +771,11 @@ void jph_joint_setup(JointAuthor a, inout JointState state,
     state.angularImpulse *= ratio;
     state.axisImpulse *= ratio;
     state.rotor.y *= ratio;
+    if (a.bodies.z == JointSwingTwist)
+    {
+        state.angularLimitImpulse *= ratio;
+        state.angularMotorImpulse *= ratio;
+    }
 }
 
 void jph_joint_warm_start(JointAuthor a, JointState state,
@@ -714,6 +784,11 @@ void jph_joint_warm_start(JointAuthor a, JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointSwingTwist)
+    {
+        jph_swing_warm(a, state, m1, s1, m2, s2);
+        return;
+    }
     float3 r1, r2;
     jph_joint_arms(a, state, s1, s2, r1, r2);
     if (a.bodies.z == JointSlider)
@@ -848,6 +923,11 @@ void jph_joint_solve_velocity(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointSwingTwist)
+    {
+        jph_swing_velocity(a, state, m1, s1, m2, s2);
+        return;
+    }
     if (a.bodies.z == JointDistance)
     {
         jph_distance_solve_velocity(a, state, m1, s1, m2, s2);
@@ -936,6 +1016,11 @@ void jph_joint_solve_position(JointAuthor a, inout JointState state,
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess ||
         (a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2)))
         return;
+    if (a.bodies.z == JointSwingTwist)
+    {
+        jph_swing_position(a, state, m1, s1, m2, s2, baumgarte);
+        return;
+    }
     if (a.bodies.z == JointDistance)
     {
         jph_distance_solve_position(a, state, m1, s1, m2, s2, baumgarte);
@@ -983,11 +1068,19 @@ bool jph_joint_finite(BodyState state)
         && all(isfinite(state.linearVelocity)) && all(isfinite(state.angularVelocity));
 }
 
-bool jph_joint_state_finite(JointState state)
+bool jph_joint_state_finite(JointState state, uint kind)
 {
     return all(isfinite(state.pointImpulse)) && all(isfinite(state.angularImpulse))
         && all(isfinite(state.axisImpulse)) && all(isfinite(state.rotor)) && all(isfinite(state.setup))
-        && all(isfinite(state.distanceReference));
+        && all(isfinite(state.distanceReference))
+        && (kind != JointSwingTwist || (all(isfinite(state.angularLimitX))
+            && all(isfinite(state.angularLimitY))
+            && all(isfinite(state.angularLimitZ))
+            && all(isfinite(state.angularLimitImpulse))
+            && all(isfinite(state.angularMotorImpulse))
+            && all(isfinite(state.angularMotorSetupX))
+            && all(isfinite(state.angularMotorSetupY))
+            && all(isfinite(state.angularMotorSetupZ))));
 }
 
 bool jph_joint_suppresses_pair(WorldRange world, uint body1, uint body2)

@@ -170,6 +170,7 @@ JPH_GPU_CONSTANT(JointFixed, 0);
 JPH_GPU_CONSTANT(JointHinge, 1);
 JPH_GPU_CONSTANT(JointSlider, 2);
 JPH_GPU_CONSTANT(JointDistance, 3);
+JPH_GPU_CONSTANT(JointSwingTwist, 4);
 JPH_GPU_CONSTANT(JointEnabled, 1);
 JPH_GPU_CONSTANT(JointCollisionEnabled, 2);
 JPH_GPU_CONSTANT(JointLimitsEnabled, 4);
@@ -177,8 +178,11 @@ JPH_GPU_CONSTANT(JointMotorEnabled, 8);
 JPH_GPU_CONSTANT(JointAutoDistance, 16);
 JPH_GPU_CONSTANT(JointResetWarmStart, 1);
 JPH_GPU_CONSTANT(JointResetRotor, 2);
-JPH_GPU_CONSTANT(JointAuthorWords, 15);
-JPH_GPU_CONSTANT(JointStateWords, 13);
+JPH_GPU_CONSTANT(JointResetSwingLimits, 4);
+JPH_GPU_CONSTANT(JointResetSwingMotor, 8);
+JPH_GPU_CONSTANT(JointResetTwistMotor, 16);
+JPH_GPU_CONSTANT(JointAuthorWords, 22);
+JPH_GPU_CONSTANT(JointStateWords, 21);
 JPH_GPU_CONSTANT(JointStatusSuccess, 0);
 JPH_GPU_CONSTANT(JointStatusInvalid, 1);
 JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
@@ -203,6 +207,13 @@ struct JPH_GPU_ALIGN JointAuthor
     JPH_GPU_FLOAT4 connectedAnchor; // Distance: affine-baked connected offset, or absolute world point.
     JPH_GPU_FLOAT4 connectedLocalAnchor; // Distance raw local anchor, including collapsed axes.
     JPH_GPU_FLOAT4 linearSpring; // Distance: stiffness N/m, damping N s/m, zero, zero.
+    JPH_GPU_FLOAT4 angularFrame; // Owner constraint frame quaternion: columns X, Z cross X, Z.
+    JPH_GPU_FLOAT4 angularLimits; // Twist min/max, swing Y/Z half-angle, radians.
+    JPH_GPU_UINT4 angularModes; // Cone/Pyramid, swing mode, twist mode, zero.
+    JPH_GPU_FLOAT4 angularSpring; // Swing stiffness/damping, twist stiffness/damping, SI.
+    JPH_GPU_FLOAT4 angularTorque; // Swing cap, twist cap, Off friction torque, zero.
+    JPH_GPU_FLOAT4 angularTarget; // Relative constraint-space target quaternion XYZW.
+    JPH_GPU_FLOAT4 angularVelocity; // Owner constraint-space angular velocity rad/s, zero.
 };
 
 struct JPH_GPU_ALIGN JointState
@@ -220,11 +231,28 @@ struct JPH_GPU_ALIGN JointState
     JPH_GPU_FLOAT4 rotor; // Stored speed, rotor impulse, frozen old speed, preceding dt.
     JPH_GPU_FLOAT4 setup; // Scalar coordinate, softness, bias, active limit side.
     JPH_GPU_FLOAT4 distanceReference; // Distance: persistent normal.xyz, captured auto length.w.
+    JPH_GPU_FLOAT4 angularLimitX; // Twist world axis.xyz; inactive/unilateral/bilateral mode.w.
+    JPH_GPU_FLOAT4 angularLimitY; // Swing Y world axis.xyz and mode.w.
+    JPH_GPU_FLOAT4 angularLimitZ; // Swing Z world axis.xyz and mode.w.
+    JPH_GPU_FLOAT4 angularLimitImpulse; // Limit impulse X/Y/Z, zero.
+    JPH_GPU_FLOAT4 angularMotorImpulse; // Motor impulse X/Y/Z, zero.
+    JPH_GPU_FLOAT4 angularMotorSetupX; // Effective mass, gamma, bias, dt times torque cap.
+    JPH_GPU_FLOAT4 angularMotorSetupY; // Effective mass, gamma, bias, dt times torque cap.
+    JPH_GPU_FLOAT4 angularMotorSetupZ; // Effective mass, gamma, bias, dt times torque cap.
+};
+
+// Typed joint output: scalar coordinate/velocity or full XYZW quaternion.
+struct JPH_GPU_ALIGN JointReadback
+{
+    JPH_GPU_FLOAT4 values;
+    JPH_GPU_UINT4 status;
 };
 
 struct JPH_GPU_ALIGN JointParams
 {
-    JPH_GPU_UINT4 counts; // New count, old count, query row count, zero.
+    // Initialize: new count, old count, 0, 0. Motion: count, requested kind, rows, body base.
+    // Update: count, 0, requests, 0. Status: input first/count, output first, level.
+    JPH_GPU_UINT4 counts;
 };
 
 struct JPH_GPU_ALIGN Aabb
@@ -574,9 +602,13 @@ JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 32);
 JPH_GPU_CHECK_TYPE(JointAuthor, JointAuthorWords * 16);
 JPH_GPU_CHECK_TYPE(JointState, JointStateWords * 16);
+JPH_GPU_CHECK_TYPE(JointReadback, 32);
 JPH_GPU_CHECK_TYPE(JointParams, 16);
 static_assert(offsetof(JointAuthor, ownerAnchor) == 32 && offsetof(JointAuthor, connectedAnchor) == 192
               && offsetof(JointAuthor, linearSpring) == 224);
+static_assert(offsetof(JointReadback, status) == 16);
+static_assert(offsetof(JointAuthor, angularFrame) == 15 * 16 && offsetof(JointAuthor, angularVelocity) == 21 * 16);
+static_assert(offsetof(JointState, angularLimitX) == 13 * 16 && offsetof(JointState, angularMotorSetupZ) == 20 * 16);
 static_assert(offsetof(JointState, pointImpulse) == 112 && offsetof(JointState, setup) == 176
               && offsetof(JointState, distanceReference) == 192);
 JPH_GPU_CHECK_TYPE(Aabb, 32);

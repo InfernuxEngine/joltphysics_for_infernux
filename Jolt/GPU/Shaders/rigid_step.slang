@@ -69,7 +69,7 @@ void jph_step_joint(uint index, uint phase)
     JointAuthor author = jph_joint_load_author(index);
     if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
         || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
-    JointState runtime = jph_joint_load_state(index);
+    JointState runtime = jph_joint_load_state(index, author.bodies.z);
     // Inner solver early returns must never be followed by stale full-state
     // stores from an inactive joint assigned outside another island's owner.
     // SetupJoints still checks the complete accepted stream before graph build;
@@ -82,7 +82,7 @@ void jph_step_joint(uint index, uint phase)
     if (!jph_resident(m1) || !jph_resident(m2))
     {
         jph_joint_clear_impulses(runtime);
-        jph_joint_store_state(index, runtime);
+        jph_joint_store_state(index, runtime, author.bodies.z);
         return;
     }
     if (!jph_dynamic(m1) && !jph_dynamic(m2)) return;
@@ -96,7 +96,7 @@ void jph_step_joint(uint index, uint phase)
     else
         jph_joint_warm_start(author, runtime, m1, s1, m2, s2);
     if (runtime.flags.y != JointStatusSuccess || !jph_joint_finite(s1) || !jph_joint_finite(s2)
-        || !jph_joint_state_finite(runtime))
+        || !jph_joint_state_finite(runtime, author.bodies.z))
     {
         if (runtime.flags.y == JointStatusSuccess)
             runtime.flags.y = JointStatusNumericalFailure;
@@ -105,7 +105,7 @@ void jph_step_joint(uint index, uint phase)
     }
     if (jph_dynamic(m1)) body_states[author.bodies.x] = s1;
     if (jph_dynamic(m2)) body_states[author.bodies.y] = s2;
-    jph_joint_store_state(index, runtime);
+    jph_joint_store_state(index, runtime, author.bodies.z);
 }
 
 void jph_step_island_joints(uint island_lane, uint phase)
@@ -126,7 +126,7 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
     JointAuthor author = jph_joint_load_author(index);
     if (!jph_selected_joint(index, author) || !jph_selected_body(author.bodies.y)
         || (author.bodies.x != InvalidQueryBodySlot && !jph_selected_body(author.bodies.x))) return;
-    JointState runtime = jph_joint_load_state(index);
+    JointState runtime = jph_joint_load_state(index, author.bodies.z);
     BodyModel m1, m2;
     BodyState s1, s2;
     jph_joint_bodies(author, m1, s1, m2, s2);
@@ -139,10 +139,10 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
         jph_joint_setup(author, runtime, m1, s1, m2, s2,
             step_params.gravityDt.w, step_params.counts.w != 0u);
         if (runtime.flags.y == JointStatusSuccess
-            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime)))
+            && (!jph_joint_finite(s1) || !jph_joint_finite(s2) || !jph_joint_state_finite(runtime, author.bodies.z)))
             runtime.flags.y = JointStatusNumericalFailure;
     }
-    jph_joint_store_state(index, runtime);
+    jph_joint_store_state(index, runtime, author.bodies.z);
 }
 
 [shader("compute")]
@@ -175,9 +175,9 @@ void finish_joints(uint3 tid : SV_DispatchThreadID)
     if (index >= joint_stream[0].value.x) return;
     JointAuthor author = jph_joint_load_author(index);
     if (!jph_selected_joint(index, author)) return;
-    JointState runtime = jph_joint_load_state(index);
+    JointState runtime = jph_joint_load_state(index, author.bodies.z);
     runtime.rotor.w = step_params.gravityDt.w;
-    jph_joint_store_state(index, runtime);
+    jph_joint_store_state(index, runtime, author.bodies.z);
 }
 
 // Only the primitive geometry uses this local pose. Body state, principal
