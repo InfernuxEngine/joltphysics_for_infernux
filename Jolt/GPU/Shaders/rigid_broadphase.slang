@@ -18,6 +18,9 @@ RWStructuredBuffer<ContactPatch> contact_patches;
 // Separate from the writable arena: indirect consumers never bind this as
 // writable storage. Each direct producer completely writes its used records.
 RWStructuredBuffer<QueryRecordWord> indirect_arguments;
+RWStructuredBuffer<QueryRecordWord> resident_step;
+RWStructuredBuffer<Contact> resident_contacts;
+RWStructuredBuffer<ContactPatch> resident_patches;
 
 static const uint BP_BAD_BOUNDS = 1u;
 static const uint BP_SUM_OVERFLOW = 2u;
@@ -26,6 +29,13 @@ static const uint BP_BAD_CURSOR = 8u;
 static const uint BP_FILL_MISMATCH = 16u;
 static const uint BP_INDEX_OVERFLOW = 32u;
 static const uint BP_BAD_QUANTUM = 64u;
+static const uint BP_CAPACITY_NEEDED = 128u;
+
+bool bp_suffix_valid()
+{
+    uint4 header = contact_patches[broadphase.workspace.y + 1u].leaves;
+    return header.z == 0u && header.y == 0u && header.x <= broadphase.candidates.z;
+}
 
 uint4 bp_load(uint p) { return contact_patches[p].leaves; }
 void bp_store(uint p, uint4 v) { contact_patches[p].leaves = v; }
@@ -105,6 +115,54 @@ void init_words(uint3 tid : SV_DispatchThreadID)
     if (bp_item(tid.x, broadphase.workspace.x, word)) bp_store(word, uint4(0u));
 }
 
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void init_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint item;
+    if (!bp_item(tid.x, max(1u, broadphase.candidates.z * MaxContactPointsPerPair), item)) return;
+    Contact empty;
+    empty.meta = uint4(0u);
+    empty.normalDepth = empty.localAnchorA = empty.localAnchorB = empty.impulse = float4(0.0f);
+    resident_contacts[item] = empty;
+}
+
+// The CPU uploaded the other StepParams words. This producer modifies only
+// solve.zw; the uniform consumer follows the real storage-write dependency.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void publish_resident_count(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    uint4 header = bp_load(bp_h1());
+    header.z &= ~BP_CAPACITY_NEEDED;
+    if (header.y == 0u && header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
+    bp_store(bp_h1(), header);
+    uint4 solve = resident_step[1u].value;
+    solve.zw = header.z == 0u ? uint2(header.x * MaxContactPointsPerPair, header.x) : uint2(0u);
+    resident_step[1u].value = solve;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void init_candidates(uint3 tid : SV_DispatchThreadID)
+{
+    uint word;
+    if (bp_item(tid.x, 1u + 2u * broadphase.candidates.z, word))
+        resident_patches[word].leaves = uint4(0u);
+}
+
+uint4 bp_merge_load(uint word)
+{
+    return broadphase.mergeKey.x == 2u ? resident_patches[word].leaves : bp_load(word);
+}
+
+void bp_merge_store(uint word, uint4 value)
+{
+    if (broadphase.mergeKey.x == 2u) resident_patches[word].leaves = value;
+    else bp_store(word, value);
+}
+
 uint bp_blocks(uint count)
 {
     return count / BroadphaseBlockSize + (count % BroadphaseBlockSize != 0u ? 1u : 0u);
@@ -135,7 +193,8 @@ void seed_active(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     uint status = bp_load(bp_h1()).z;
-    bp_store(broadphase.activeState.x, uint4(broadphase.selectedCounts.y, 0u, status, 0u));
+    uint count = broadphase.round.z == 1u && !bp_suffix_valid() ? 0u : broadphase.selectedCounts.y;
+    bp_store(broadphase.activeState.x, uint4(count, 0u, status, 0u));
     bp_store(broadphase.activeState.y, uint4(0u));
 }
 
@@ -145,7 +204,8 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
 {
     uint record = tid.x;
     if (record >= stage_work.range.y) return;
-    uint length = bp_active_level_length();
+    bool candidates = stage_work.range.z == 1u;
+    uint length = candidates ? (bp_suffix_valid() ? bp_load(bp_h1()).x : 0u) : bp_active_level_length();
     uint limit = BroadphaseItemLimit;
     bool block_mode = stage_work.range.w == 1u;
     if (block_mode)
@@ -253,27 +313,28 @@ bool bp_less(uint4 a, uint4 b)
 [numthreads(64, 1, 1)]
 void merge_items(uint3 tid : SV_DispatchThreadID)
 {
+    uint length = broadphase.mergeKey.x == 2u ? (bp_suffix_valid() ? bp_load(bp_h1()).x : 0u) : broadphase.merge.z;
     uint item;
-    if (!bp_item(tid.x, broadphase.merge.z, item)) return;
+    if (!bp_item(tid.x, length, item)) return;
     uint width = broadphase.merge.w; // Host validates power-of-two and <= 2^31.
     uint run = item / width;
     uint own_begin = run * width;
-    uint own_end = own_begin + min(width, broadphase.merge.z - own_begin);
+    uint own_end = own_begin + min(width, length - own_begin);
     bool right = (run & 1u) != 0u;
     uint other_begin = right ? own_begin - width : own_end;
-    uint other_end = right ? own_begin : other_begin + min(width, broadphase.merge.z - other_begin);
+    uint other_end = right ? own_begin : other_begin + min(width, length - other_begin);
     uint merged_begin = right ? other_begin : own_begin;
-    uint4 key = bp_load(broadphase.merge.x + item);
+    uint4 key = bp_merge_load(broadphase.merge.x + item);
     uint low = other_begin, high = other_end;
     for (uint step = 0u; step < 32u && low < high; ++step)
     {
         uint middle = low + (high - low) / 2u;
-        uint4 other = bp_load(broadphase.merge.x + middle);
+        uint4 other = bp_merge_load(broadphase.merge.x + middle);
         bool before = right ? !bp_less(key, other) : bp_less(other, key);
         if (before) low = middle + 1u; else high = middle;
     }
     uint destination = merged_begin + (item - own_begin) + (low - other_begin);
-    bp_store(broadphase.merge.y + destination, key);
+    bp_merge_store(broadphase.merge.y + destination, key);
 }
 
 uint bp_world_bound(uint world, bool upper)
@@ -412,8 +473,8 @@ void bp_round(uint lane, bool fill)
             if (overflow || destination.y != 0u || destination.x >= broadphase.candidates.z || row.w >= row.z)
                 status |= BP_FILL_MISMATCH;
             else
-                bp_store(broadphase.candidates.x + destination.x,
-                    uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x));
+                resident_patches[broadphase.candidates.x + destination.x].leaves =
+                    uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x);
             if (row.w == 0xffffffffu) status |= BP_SUM_OVERFLOW; else ++row.w;
         }
         else
@@ -649,7 +710,7 @@ void publish_world_summary(uint3 tid : SV_DispatchThreadID)
 void reset_fill_ranks(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_suffix_valid() || !bp_item(tid.x, broadphase.counts.x, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
     row.y = rank + 1u;
     row.w = 0u;
@@ -665,6 +726,7 @@ void check_fill(uint3 tid : SV_DispatchThreadID)
     if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
     uint status = bp_load(broadphase.rankRows.y + rank).z;
+    if (!bp_suffix_valid()) { bp_store(broadphase.summary.z + rank, uint4(0u)); return; }
     if (row.y != row.x || row.w != row.z) status |= BP_FILL_MISMATCH;
     bp_store(broadphase.summary.z + rank, uint4(row.w, 0u, status, 0u));
 }
@@ -674,6 +736,7 @@ void check_fill(uint3 tid : SV_DispatchThreadID)
 void publish_fill_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
+    if (!bp_suffix_valid()) return;
     uint4 emitted = bp_load(broadphase.summary.x);
     uint4 header = bp_load(bp_h1());
     header.z |= emitted.z;
@@ -688,9 +751,9 @@ void set_candidate_bank(uint3 tid : SV_DispatchThreadID)
     if (tid.x != 0u) return;
     uint4 header = bp_load(bp_h1());
     uint status = header.z;
-    if (header.y != 0u || header.x != broadphase.candidates.z) status |= BP_FILL_MISMATCH;
+    if ((status & BP_CAPACITY_NEEDED) == 0u && (header.y != 0u || header.x > broadphase.candidates.z)) status |= BP_FILL_MISMATCH;
     header.z = status;
     bp_store(bp_h1(), header);
     // Host calls only after every canonical-sort chunk has completed.
-    bp_store(bp_h0(), uint4(broadphase.merge.x, broadphase.candidates.z, 0u, 0u));
+    resident_patches[0u].leaves = uint4(broadphase.merge.x, status == 0u ? header.x : 0u, 0u, 0u);
 }
