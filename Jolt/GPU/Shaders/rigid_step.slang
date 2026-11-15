@@ -19,6 +19,9 @@ RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<uint4> convex_geometry;
 RWStructuredBuffer<BodySleepRecord> body_sleep;
+ConstantBuffer<BodyBatchHeader> body_batch_header;
+StructuredBuffer<StepParams> body_batch_selections;
+StructuredBuffer<BodyBatchTile> body_batch_tiles;
 
 bool jph_sleep_awake_dynamic(uint body)
 {
@@ -43,14 +46,22 @@ bool jph_selected_range(uint index, uint base, uint count)
 {
     return index >= base && index - base < count;
 }
+bool jph_selected_body_slot(uint index, StepParams parameters)
+{
+    return index < parameters.counts.x && jph_selected_range(index, parameters.selection.y, parameters.selectedCounts.x);
+}
+bool jph_selected_body(uint index, StepParams parameters)
+{
+    if (!jph_selected_body_slot(index, parameters)) return false;
+    return body_models[index].meta.w == parameters.selection.x;
+}
 bool jph_selected_body_slot(uint index)
 {
-    return index < step_params.counts.x && jph_selected_range(index, step_params.selection.y, step_params.selectedCounts.x);
+    return jph_selected_body_slot(index, step_params);
 }
 bool jph_selected_body(uint index)
 {
-    if (!jph_selected_body_slot(index)) return false;
-    return body_models[index].meta.w == step_params.selection.x;
+    return jph_selected_body(index, step_params);
 }
 bool jph_selected_joint(uint index, JointDirectory author)
 {
@@ -624,13 +635,9 @@ float4 jph_leaf_rotation(ShapeModel shape, BodyState state)
     return jph_quat_mul(state.rotation, shape.localRotation);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
+void jph_body_prepare_kinematics(uint index, StepParams parameters)
 {
-    if (tid.x >= stage_work.range.y) return;
-    uint index = stage_work.range.x + tid.x;
-    if (!jph_selected_body(index))
+    if (!jph_selected_body(index, parameters))
         return;
     BodyModel model = body_models[index];
     BodySleepRuntime sleep = body_sleep[index].runtime;
@@ -704,28 +711,42 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void apply_forces(uint3 tid : SV_DispatchThreadID)
+void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
-    if (!jph_selected_body(index))
+    jph_body_prepare_kinematics(index, step_params);
+}
+
+void jph_body_apply_forces(uint index, StepParams parameters)
+{
+    if (!jph_selected_body(index, parameters))
         return;
     BodyModel model = body_models[index];
     if (!jph_dynamic(model) || !jph_resident(model) || body_sleep[index].runtime.state.x == 0u)
         return;
     BodyState state = body_states[index];
     BodyForces forces = body_forces[index];
-    float dt = step_params.gravityDt.w;
+    float dt = parameters.gravityDt.w;
     jph_project_motion(model, state);
     // PhysicsSystem applies gyro before external force/torque and drag.
     jph_apply_gyroscopic_force(model, state, dt);
-    state.linearVelocity.xyz += dt * jph_acceleration(model, forces, step_params.gravityDt.xyz);
+    state.linearVelocity.xyz += dt * jph_acceleration(model, forces, parameters.gravityDt.xyz);
     state.angularVelocity.xyz += dt * jph_inverse_inertia(model, state, forces.torque.xyz);
     state.linearVelocity.xyz *= max(0.0f, 1.0f - model.damping.x * dt);
     state.angularVelocity.xyz *= max(0.0f, 1.0f - model.damping.y * dt);
     state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
     state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
     body_states[index] = state;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void apply_forces(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    jph_body_apply_forces(index, step_params);
 }
 
 [shader("compute")]
@@ -1091,14 +1112,9 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
         jph_solve_patch_velocity(jph_island_patch_source(begin, local));
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void integrate(uint3 tid : SV_DispatchThreadID)
+void jph_body_integrate(uint index, StepParams parameters)
 {
-    if (tid.x >= stage_work.range.y) return;
-    uint index = stage_work.range.x + tid.x;
-    if (jph_articulation_admitted(index, false)) return;
-    if (!jph_selected_body(index))
+    if (!jph_selected_body(index, parameters))
         return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
     if (!jph_nonstatic(model) || !jph_resident(model))
@@ -1106,7 +1122,7 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     if ((body_models[index].meta.z & ~MotionNotResident) != MotionStatic
         && body_sleep[index].runtime.state.x == 0u) return;
     BodyState state = body_states[index];
-    float dt = step_params.gravityDt.w;
+    float dt = parameters.gravityDt.w;
     jph_project_motion(model, state);
     // Jolt clamps Dynamic bodies after impulses. Prescribed Kinematic target
     // velocity must not be truncated by Dynamic speed limits.
@@ -1122,6 +1138,16 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     // The body rotation also rotates the allowed principal angular subspace.
     jph_project_motion(model, state);
     body_states[index] = state;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void integrate(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    if (jph_articulation_admitted(index, false)) return;
+    jph_body_integrate(index, step_params);
 }
 
 // One original row, retaining raw models and per-row BodyState load/store.
@@ -1161,3 +1187,56 @@ void solve_position(uint3 tid : SV_DispatchThreadID)
 }
 
 #include "rigid_sleep.slang"
+
+
+// The owner admits only no-joint/no-articulation/no-participant members and
+// validates disjoint tiles against the same accepted layout/allocation generation.
+// Guard subtraction before addition so malformed intervals cannot wrap a slot.
+bool jph_body_batch_slot(uint group, uint lane, out uint index, out StepParams parameters)
+{
+    index = 0u;
+    parameters = (StepParams)0;
+    if (group >= body_batch_header.counts.y) return false;
+    BodyBatchTile tile = body_batch_tiles[group];
+    if (tile.selectionIndex >= body_batch_header.counts.x || tile.bodyCount == 0u
+        || tile.bodyCount > 64u || lane >= tile.bodyCount) return false;
+    parameters = body_batch_selections[tile.selectionIndex];
+    if (parameters.counts.x != body_batch_header.counts.z || parameters.counts.y != body_batch_header.counts.w
+        || parameters.selection.x >= parameters.counts.y || parameters.selectedCounts.z != 0u) return false;
+    if (!jph_selected_body_slot(tile.bodyFirst, parameters)) return false;
+    uint selectedOffset = tile.bodyFirst - parameters.selection.y;
+    if (tile.bodyCount > parameters.selectedCounts.x - selectedOffset
+        || tile.bodyCount > parameters.counts.x - tile.bodyFirst) return false;
+    index = tile.bodyFirst + lane;
+    return jph_selected_body(index, parameters);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void body_batch_prepare_kinematics(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
+{
+    uint index;
+    StepParams parameters;
+    if (jph_body_batch_slot(group.x, lane.x, index, parameters))
+        jph_body_prepare_kinematics(index, parameters);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void body_batch_apply_forces(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
+{
+    uint index;
+    StepParams parameters;
+    if (jph_body_batch_slot(group.x, lane.x, index, parameters))
+        jph_body_apply_forces(index, parameters);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void body_batch_integrate(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
+{
+    uint index;
+    StepParams parameters;
+    if (jph_body_batch_slot(group.x, lane.x, index, parameters))
+        jph_body_integrate(index, parameters);
+}

@@ -24,11 +24,13 @@ struct alignas(16) UInt4 { std::uint32_t x, y, z, w; };
 #define JPH_GPU_ALIGN alignas(16)
 #define JPH_GPU_FLOAT4 Float4
 #define JPH_GPU_UINT4 UInt4
+#define JPH_GPU_UINT std::uint32_t
 #define JPH_GPU_CONSTANT(name, value) inline constexpr std::uint32_t name = value
 #else
 #define JPH_GPU_ALIGN
 #define JPH_GPU_FLOAT4 float4
 #define JPH_GPU_UINT4 uint4
+#define JPH_GPU_UINT uint
 #define JPH_GPU_CONSTANT(name, value) static const uint name = value
 #endif
 
@@ -412,6 +414,23 @@ struct JPH_GPU_ALIGN StepParams
     // Counts above remain TOTAL array extents for global address validation.
     JPH_GPU_UINT4 selection;
     JPH_GPU_UINT4 selectedCounts;
+};
+
+// One body-domain dispatch over immutable selections in the same accepted layout.
+// Every selection is an unmodified StepParams value, including its own dt/gravity.
+struct JPH_GPU_ALIGN BodyBatchHeader
+{
+    // Selection count, tile count, total BodyModel extent, total WorldRange extent.
+    JPH_GPU_UINT4 counts;
+};
+
+// Structured storage stride is 12 bytes; no vector alignment or spare fields.
+// One group of 64 lanes addresses only this tile's selected body interval.
+struct BodyBatchTile
+{
+    JPH_GPU_UINT selectionIndex;
+    JPH_GPU_UINT bodyFirst;
+    JPH_GPU_UINT bodyCount;
 };
 
 // One immutable dispatch unit. Independent domains use global item ordinals;
@@ -908,6 +927,12 @@ static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angular
 static_assert(offsetof(Contact, normalDepth) == 16 && offsetof(Contact, impulse) == 64);
 static_assert(offsetof(StepParams, gravityDt) == 32 && offsetof(StepParams, restitution) == 64);
 static_assert(offsetof(StepParams, selection) == 80 && offsetof(StepParams, selectedCounts) == 96);
+static_assert(sizeof(BodyBatchHeader) == 16 && alignof(BodyBatchHeader) == 16);
+static_assert(std::is_standard_layout<BodyBatchHeader>::value && std::is_trivially_copyable<BodyBatchHeader>::value);
+static_assert(sizeof(BodyBatchTile) == 12 && alignof(BodyBatchTile) == 4);
+static_assert(std::is_standard_layout<BodyBatchTile>::value && std::is_trivially_copyable<BodyBatchTile>::value);
+static_assert(offsetof(BodyBatchTile, selectionIndex) == 0 && offsetof(BodyBatchTile, bodyFirst) == 4
+    && offsetof(BodyBatchTile, bodyCount) == 8);
 static_assert(offsetof(StageWork, range) == 0);
 static_assert(offsetof(PoseNode, bodyParent) == 0 && offsetof(PoseNode, rootCOM) == 16
     && offsetof(PoseNode, localScale) == 32 && offsetof(PoseNode, parentRotation) == 48
@@ -927,6 +952,7 @@ static_assert(offsetof(PoseParams, counts) == 0);
 #undef JPH_GPU_ALIGN
 #undef JPH_GPU_FLOAT4
 #undef JPH_GPU_UINT4
+#undef JPH_GPU_UINT
 #undef JPH_GPU_CONSTANT
 #ifndef __cplusplus
 // Identity keys use unsigned ID64/generation64 ordering without device uint64 math.
