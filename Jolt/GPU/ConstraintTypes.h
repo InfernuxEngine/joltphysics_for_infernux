@@ -49,7 +49,7 @@ struct CS_ALIGN ConstraintScheduleWord { CS_U4 value; };
 struct CS_ALIGN ConstraintParams
 {
     CS_U4 counts;       // B slots, accepted J, actual candidate P, accepted W.
-    CS_U4 limits;       // total schedule words, accepted shape count, contact rows=4P, 0.
+    CS_U4 limits;       // total schedule words, accepted shape count, contact rows=4P, body-root word base.
     CS_U4 layout;       // header base=0, CC control word, body-check row base, ref-check row base.
     CS_U4 references;   // joint ref base, patch ref base (each 2 words/item), final joint sort bank, final patch sort bank.
     CS_U4 sources;      // joint source word base, patch source word base, joint ID-table base, patch ID-table base.
@@ -72,7 +72,7 @@ struct CS_ALIGN ConstraintParams
 // h0=(islandCount,jointIslandCount,contactIslandCount,status)
 // h1=(activeJ,activeP,maxJointItems,maxPatchItems)
 // h2=(rangeWordBase,jointTableWordBase,contactTableWordBase,jointSourceWordBase)
-// h3=(patchSourceWordBase,wordCount,0,0)
+// h3=(patchSourceWordBase,wordCount,bodyRootWordBase,totalBodySlots)
 // status==0 is the ONLY installable state. Initialization sets NotReady.
 // range[i].word0=(world,root,jointBegin,jointCount)
 // range[i].word1=(patchBegin,patchCount,0,0)
@@ -90,6 +90,10 @@ struct CS_ALIGN ConstraintParams
 // stable merge places all active keys before initialized inactive tails.
 // Root flag scalar (reuses LabelsNext AFTER final CC validation):
 // bit0=has Joint, bit1=has patch. Only active refs mark roots.
+// Label banks allocate B+1 scalars: CC initializes/reads only [0,B).
+// The unused bank is the source-exclusive sleep root-vote scratch; sleep's
+// actual clear initializes selected roots and status[B] before its consumers.
+// Body-root words retain the SAME validated labels for isolated Dynamics too.
 // Scan mode0 record=(sum0,sum1,sum2,ORstatus), checked u32 sums.
 // Scan mode1 record=(sumJ,sumP,maxJ,maxP); sums bounded by checked J/P.
 // Ref validation total (mode0)=(activeJ,activeP,0,status).

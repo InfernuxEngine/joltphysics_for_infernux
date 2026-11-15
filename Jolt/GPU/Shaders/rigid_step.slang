@@ -5,6 +5,7 @@
 
 #include "rigid_joints.slang"
 #include "rigid_convex.slang"
+#include "rigid_sleep_math.slang"
 
 ConstantBuffer<StepParams> step_params;
 ConstantBuffer<StageWork> stage_work;
@@ -17,6 +18,26 @@ RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<uint4> convex_geometry;
+RWStructuredBuffer<BodySleepRecord> body_sleep;
+
+bool jph_sleep_awake_dynamic(uint body)
+{
+    if (body == InvalidQueryBodySlot) return false;
+    return jph_dynamic(body_models[body]) && body_sleep[body].runtime.state.x != 0u;
+}
+bool jph_sleep_pair_awake(uint a,uint b)
+{
+    return jph_sleep_awake_dynamic(a) || jph_sleep_awake_dynamic(b);
+}
+bool jph_sleep_dormant_joint(JointDirectory directory)
+{
+    // Preserve the existing nonresident warm/rotor cleanup path. Sleep is
+    // activity, not residency, and never replaces that separate boundary.
+    bool resident = jph_resident(body_models[directory.bodies.y]);
+    if(directory.bodies.x != InvalidQueryBodySlot)
+        resident = resident && jph_resident(body_models[directory.bodies.x]);
+    return resident && !jph_sleep_pair_awake(directory.bodies.x,directory.bodies.y);
+}
 
 bool jph_selected_range(uint index, uint base, uint count)
 {
@@ -310,6 +331,7 @@ void jph_step_joint(uint index, uint phase)
     JointDirectory directory = jph_joint_load_directory(index);
     if (!jph_selected_joint(index, directory) || !jph_selected_body(directory.bodies.y)
         || (directory.bodies.x != InvalidQueryBodySlot && !jph_selected_body(directory.bodies.x))) return;
+    if (jph_sleep_dormant_joint(directory)) return;
     switch (directory.bodies.z)
     {
     case JointFixed:
@@ -502,6 +524,7 @@ void setup_joints(uint3 tid : SV_DispatchThreadID)
     JointDirectory directory = jph_joint_load_directory(index);
     if (!jph_selected_joint(index, directory) || !jph_selected_body(directory.bodies.y)
         || (directory.bodies.x != InvalidQueryBodySlot && !jph_selected_body(directory.bodies.x))) return;
+    if (jph_sleep_dormant_joint(directory)) return;
     switch (directory.bodies.z)
     {
     case JointFixed:
@@ -579,6 +602,7 @@ void finish_joints(uint3 tid : SV_DispatchThreadID)
     if (index >= joint_stream[0].value.x) return;
     JointDirectory directory = jph_joint_load_directory(index);
     if (!jph_selected_joint(index, directory)) return;
+    if (jph_sleep_dormant_joint(directory)) return;
     // All actual payloads share the first flags word. Previous dt belongs to
     // flags.z; Hinge rotor.w retains its cached physical armature.
     uint4 flags = joint_stream[directory.layout.y].value;
@@ -607,6 +631,11 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
     if (!jph_selected_body(index))
         return;
     BodyModel model = body_models[index];
+    BodySleepRuntime sleep = body_sleep[index].runtime;
+    // Overwrite the derived activity on every selected row, including early
+    // exits for residency/motion/target stop. World endpoints have no slot.
+    sleep.state.w = 0u;
+    body_sleep[index].runtime = sleep;
     if (!jph_resident(model))
         return;
     KinematicTarget target = kinematic_targets[index];
@@ -615,6 +644,7 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
         !(motion == MotionStatic && (target.state.x & TargetTemporaryStatic) != 0u))
         return;
     BodyState state = body_states[index];
+    BodyState previous_state = state;
     if ((target.state.x & TargetPending) != 0u)
     {
         // Capture this logical tick's start once. Requested time belongs to
@@ -656,6 +686,18 @@ void prepare_kinematics(uint3 tid : SV_DispatchThreadID)
     }
     body_states[index] = state;
     kinematic_targets[index] = target;
+    bool moving = any(state.linearVelocity.xyz != float3(0)) || any(state.angularVelocity.xyz != float3(0));
+    bool changed = any(state.positionCOM.xyz != previous_state.positionCOM.xyz)
+        || !(all(state.rotation == previous_state.rotation) || all(state.rotation == -previous_state.rotation));
+    if (motion == MotionKinematic && (moving || changed) && sleep.state.x == 0u) {
+        float3 p0,p1,p2;
+        sleep_test_points(state,body_sleep[index].author.rootHalfExtent.xyz,p0,p1,p2);
+        sleep_reset(sleep,p0,p1,p2);sleep.state.x=1u;
+    }
+    BodyModel effective = jph_effective_model(model,target);
+    sleep.state.w = motion == MotionStatic && (effective.meta.z & ~MotionNotResident) == MotionKinematic
+        && (moving || changed) ? 1u : 0u;
+    body_sleep[index].runtime = sleep;
 }
 
 [shader("compute")]
@@ -667,7 +709,7 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     if (!jph_selected_body(index))
         return;
     BodyModel model = body_models[index];
-    if (!jph_dynamic(model) || !jph_resident(model))
+    if (!jph_dynamic(model) || !jph_resident(model) || body_sleep[index].runtime.state.x == 0u)
         return;
     BodyState state = body_states[index];
     BodyForces forces = body_forces[index];
@@ -901,6 +943,7 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     uint a = contact.meta.x;
     uint b = contact.meta.y;
     if (!jph_selected_body(a) || !jph_selected_body(b)) return;
+    if (!jph_sleep_pair_awake(a,b)) return;
     BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
     BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
     BodyState sa = body_states[a];
@@ -941,6 +984,7 @@ void jph_solve_patch_velocity(uint patch_index)
     uint a = contact.meta.x;
     uint b = contact.meta.y;
     if (!jph_selected_body(a) || !jph_selected_body(b)) return;
+    if (!jph_sleep_pair_awake(a,b)) return;
     BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
     BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
     BodyState sa = body_states[a];
@@ -1060,6 +1104,8 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
     if (!jph_nonstatic(model) || !jph_resident(model))
         return;
+    if ((body_models[index].meta.z & ~MotionNotResident) != MotionStatic
+        && body_sleep[index].runtime.state.x == 0u) return;
     BodyState state = body_states[index];
     float dt = step_params.gravityDt.w;
     jph_project_motion(model, state);
@@ -1088,6 +1134,7 @@ void jph_solve_contact_position(uint source_row)
     uint a = contact.meta.x;
     uint b = contact.meta.y;
     if (!jph_selected_body(a) || !jph_selected_body(b)) return;
+    if (!jph_sleep_pair_awake(a,b)) return;
     BodyModel ma = body_models[a];
     BodyModel mb = body_models[b];
     BodyState sa = body_states[a];
@@ -1113,3 +1160,5 @@ void solve_position(uint3 tid : SV_DispatchThreadID)
         jph_solve_contact_position(patch * MaxContactPointsPerPair + point);
     }
 }
+
+#include "rigid_sleep.slang"

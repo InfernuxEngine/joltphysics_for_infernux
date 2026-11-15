@@ -23,9 +23,10 @@ enum class Resource : std::uint32_t
     KinematicTargets = 1u << 8,
     ContactPatches = 1u << 9,
     Joints = 1u << 10,
-    StageWork = 1u << 11,
-    ConstraintSchedule = 1u << 12,
-    ConvexGeometry = 1u << 13,
+    SleepStates = 1u << 11,
+    StageWork = 1u << 12,
+    ConstraintSchedule = 1u << 13,
+    ConvexGeometry = 1u << 14,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -82,7 +83,7 @@ inline constexpr const char *StepSourcePath = "Jolt/GPU/Shaders/rigid_step.slang
 inline constexpr StageDefinition Stages[] = {
     {Stage::ApplyForces, "apply_forces", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
-            | Mask(Resource::BodyForces) | Mask(Resource::BodyStates),
+            | Mask(Resource::BodyForces) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates)},
     {Stage::BuildBounds, "build_bounds", Domain::Shapes, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates)
@@ -96,43 +97,43 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
-            | Mask(Resource::ContactPatches), Mask(Resource::Contacts)},
+            | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates), Mask(Resource::Contacts)},
     {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
-            | Mask(Resource::ContactPatches),
+            | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates)},
+            | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
     {Stage::SolvePosition, "solve_position", Domain::IslandContacts, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
-            | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates),
+            | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates)},
     {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces)
             | Mask(Resource::KinematicTargets), Mask(Resource::BodyForces) | Mask(Resource::KinematicTargets)},
     {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::KinematicTargets), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets)},
+            | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)},
     {Stage::SetupJoints, "setup_joints", Domain::Joints, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
-            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::Joints)},
     {Stage::FinishJoints, "finish_joints", Domain::Joints, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Joints), Mask(Resource::Joints)},
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Joints) | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::Joints)},
     {Stage::WarmJoints, "warm_joints", Domain::IslandJoints, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
-            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
     {Stage::SolveJointVelocity, "solve_joint_velocity", Domain::IslandJoints, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
-            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
     {Stage::SolveJointPosition, "solve_joint_position", Domain::IslandJoints, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
-            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints),
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
 };
 
@@ -146,10 +147,11 @@ inline constexpr StageDefinition Stages[] = {
 // Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner appends FinishTick once after all substeps, clearing forces and arming
 // the target arrival stop without snapping pose. Control-only jobs use neither
-// PrepareKinematics nor FinishTick. Contact warmstart, sleeping, CCD, general
-// pair-ignore filters, event delivery and locked DOFs are not implemented by this
-// correctness baseline; a host must reject unsupported capabilities. Bodies
-// address zero or more Sphere/Box/Capsule leaves in their COM frame, including explicit
+// PrepareKinematics nor FinishTick. Sleeping composes engine-owned bounded
+// control producers around this numerical recipe; contact publication and pair
+// policy retain their existing producers. Contact warmstart and CCD require
+// separate implementations. Bodies address zero or more cooked primitive/Hull
+// leaves in their COM frame, including explicit
 // COM offsets. Each collected canonical leaf pair owns four Contact records;
 // sensors record real overlap but do not participate in response. The collector
 // supplies actual candidate counts and runtime world ranges before narrowphase.
@@ -194,8 +196,8 @@ inline constexpr StageDefinition Stages[] = {
 // and canonical candidate ordinals; ContactPatch word addresses still add the
 // ContactPatches[0] bank base. No impulses, Contact records or Joint runtime move.
 // ConstraintSchedule replaces the numerical consumer's Worlds storage binding.
-// ContactVelocity uses seven storage ports, Joint numerical stages five and
-// ContactPosition four. No numerical consumer binds labels, ranges or ID lists
+// With the shared sleep activity input ContactVelocity uses eight storage
+// ports, Joint numerical stages six and ContactPosition five. No numerical consumer binds labels, ranges or ID lists
 // through separate storage buffers. Graph stages have independent recipes.
 // The complete plan workset owns frozen input identities and source allocations
 // through all accepted graph/numerical receipts. An invalid plan is never

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infernux contributors
 // SPDX-License-Identifier: MIT
 #include "../ConstraintTypes.h"
+#include "../SleepTypes.h"
 
 ConstantBuffer<ConstraintParams> constraint_params;
 ConstantBuffer<StageWork> stage_work;
@@ -11,6 +12,7 @@ StructuredBuffer<WorldRange> worlds;
 StructuredBuffer<QueryRecordWord> joint_stream;
 StructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<Contact> contacts;
+StructuredBuffer<BodySleepRecord> body_sleep;
 // Cross-target scalar atomic resources. Atomic<uint> has uint's 4-byte layout;
 // unlike HLSL Interlocked intrinsics on ordinary uint, its methods support WGSL.
 // Every access uses the atomic wrapper, including dispatch-separated init/copy.
@@ -77,7 +79,7 @@ void constraint_seed(uint3 tid : SV_DispatchThreadID)
     cs_store(h + 1u, uint4(0u));
     cs_store(h + 2u, uint4(constraint_params.islands.x, constraint_params.sources.z,
         constraint_params.sources.w, constraint_params.sources.x));
-    cs_store(h + 3u, uint4(constraint_params.sources.y, constraint_params.limits.x, 0u, 0u));
+    cs_store(h + 3u, uint4(constraint_params.sources.y, constraint_params.limits.x, constraint_params.limits.w, constraint_params.counts.x));
     cs_store(constraint_params.layout.y, uint4(constraint_params.counts.x != 0u ? 1u : 0u, 0u, 0u, 0u));
 }
 
@@ -143,8 +145,14 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
             if (cs_writer(ma)) a = e.x;
         }
     }
-    bool active = resident && state.x != 0u && (e.w & JointEnabled) != 0u
+    bool active = resident && (constraint_params.select.z == 0u || state.x != 0u) && (e.w & JointEnabled) != 0u
         && (a != ConstraintInvalid || b != ConstraintInvalid);
+    if (constraint_params.select.z != 0u) {
+        bool awake = false;
+        if (b != ConstraintInvalid) awake = body_sleep[b].runtime.state.x != 0u;
+        if (a != ConstraintInvalid) awake = awake || body_sleep[a].runtime.state.x != 0u;
+        active = active && awake;
+    }
     cs_ref(ConstraintJoint, j, world, a, b, active, status);
 }
 
@@ -206,7 +214,33 @@ void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
         }
     }
     active = active && (a != ConstraintInvalid || b != ConstraintInvalid);
+    if (constraint_params.select.z != 0u) {
+        bool awake = false;
+        if (a != ConstraintInvalid) awake = body_sleep[a].runtime.state.x != 0u;
+        if (b != ConstraintInvalid) awake = awake || body_sleep[b].runtime.state.x != 0u;
+        active = active && awake;
+    }
     cs_ref(ConstraintPatch, p, world, a, b, active, status);
+}
+
+// The one validated CC labels every resident Dynamic, including an isolated
+// vertex without a numeric island. Other slots have an explicit Invalid row.
+[shader("compute")][numthreads(64,1,1)]
+void constraint_write_body_roots(uint3 tid:SV_DispatchThreadID)
+{
+    uint body;if(!cs_item(tid.x,constraint_params.counts.x,body)) return;
+    cs_store(constraint_params.limits.w+body,uint4(labels_old[body].load(),0u,0u,0u));
+}
+[shader("compute")][numthreads(1,1,1)]
+void constraint_finalize_topology(uint3 tid:SV_DispatchThreadID)
+{
+    if(tid.x!=0u) return;
+    uint4 control=cs_load(constraint_params.layout.y);
+    uint status=control.z;
+    if(control.w!=1u) status|=ConstraintNotConverged;
+    // This is deliberately not an installable numerical schedule yet.
+    cs_store(constraint_params.layout.x,uint4(0u,0u,0u,status|ConstraintNotReady));
+    cs_store(constraint_params.layout.x+1u,uint4(0u));
 }
 
 [shader("compute")][numthreads(64, 1, 1)]

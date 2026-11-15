@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "rigid_math.slang"
+#include "rigid_sleep_math.slang"
 
 ConstantBuffer<BodyMutationParams> mutation_params;
 ConstantBuffer<StageWork> stage_work;
@@ -11,6 +12,7 @@ StructuredBuffer<CenterOfMassUpdate> center_of_mass_updates;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
+RWStructuredBuffer<BodySleepRecord> body_sleep;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -30,6 +32,13 @@ void initialize_capacity(uint3 tid : SV_DispatchThreadID)
     body_states[index] = state;
     body_forces[index] = forces;
     kinematic_targets[index] = jph_empty_kinematic_target();
+    BodySleepRecord sleep;
+    sleep.author.rootHalfExtent = sleep.author.rootBoundsCenter = float4(0);
+    sleep.author.policy = uint4(0);
+    sleep.runtime.sphere0 = sleep.runtime.sphere1 = sleep.runtime.sphere2 = float4(0);
+    sleep.runtime.clock = float4(0);
+    sleep.runtime.state = uint4(0);
+    body_sleep[index] = sleep;
 }
 
 [shader("compute")]
@@ -42,6 +51,12 @@ void initialize_bodies(uint3 tid : SV_DispatchThreadID)
     body_states[initial.bodyIndex.x] = initial.state;
     body_forces[initial.bodyIndex.x] = initial.forces;
     kinematic_targets[initial.bodyIndex.x] = jph_empty_kinematic_target();
+    BodySleepRuntime sleep = body_sleep[initial.bodyIndex.x].runtime;
+    float3 p0,p1,p2;
+    sleep_test_points(initial.state, body_sleep[initial.bodyIndex.x].author.rootHalfExtent.xyz, p0,p1,p2);
+    sleep_reset(sleep,p0,p1,p2);
+    sleep.state.x=1u;
+    body_sleep[initial.bodyIndex.x].runtime=sleep;
 }
 
 [shader("compute")]
@@ -60,4 +75,11 @@ void update_centers_of_mass(uint3 tid : SV_DispatchThreadID)
     if (jph_has_kinematic_move(target))
         target.rootCOMDt.xyz += change.deltaLocalCOM.xyz;
     kinematic_targets[change.bodyIndex.x] = target;
+    if (any(change.deltaLocalCOM.xyz != float3(0))) {
+        BodySleepRuntime sleep = body_sleep[change.bodyIndex.x].runtime;
+        float3 p0,p1,p2;
+        sleep_test_points(state, body_sleep[change.bodyIndex.x].author.rootHalfExtent.xyz,p0,p1,p2);
+        sleep_reset(sleep,p0,p1,p2);
+        body_sleep[change.bodyIndex.x].runtime=sleep;
+    }
 }

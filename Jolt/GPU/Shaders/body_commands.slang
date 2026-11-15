@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "rigid_math.slang"
+#include "rigid_sleep_math.slang"
 
 ConstantBuffer<BodyCommandParams> command_params;
 StructuredBuffer<BodyCommand> body_commands;
@@ -11,6 +12,20 @@ StructuredBuffer<BodyModel> body_models;
 RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
+RWStructuredBuffer<BodySleepRecord> body_sleep;
+
+void command_reset_sleep(BodyState state,float3 extent,inout BodySleepRuntime sleep)
+{
+    float3 p0,p1,p2;sleep_test_points(state,extent,p0,p1,p2);
+    sleep_reset(sleep,p0,p1,p2);
+}
+void command_wake(BodyModel model,BodyState state,float3 extent,inout BodySleepRuntime sleep,bool resetActive)
+{
+    if(jph_nonstatic(model) && (resetActive || sleep.state.x==0u)) {
+        command_reset_sleep(state,extent,sleep);
+        sleep.state.x=1u;
+    }
+}
 
 float3 command_world_inertia(BodyModel model, BodyState state, float3 value)
 {
@@ -40,6 +55,8 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
     BodyState state = body_states[body];
     BodyForces forces = body_forces[body];
     KinematicTarget target = kinematic_targets[body];
+    BodySleepRuntime sleep = body_sleep[body].runtime;
+    float3 sleep_extent = body_sleep[body].author.rootHalfExtent.xyz;
     // The validated immutable plan bounds every span to 64. Each dispatch has
     // at most one span for any body, so no atomics or global command scan occur.
     for (uint offset = 0; offset < span.range.z; ++offset)
@@ -47,10 +64,25 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
         BodyCommand command = body_commands[span.range.y + offset];
         uint kind = command.meta.y;
         uint mode = command.meta.z;
-        if (kind <= CommandSetPose)
+        if (kind == CommandSleep)
         {
+            command_cancel_move(state,target);
+            sleep.state.zw=uint2(0u);
+            if (jph_nonstatic(model)) {
+                state.linearVelocity = state.angularVelocity = float4(0);
+                sleep.state.x=0u;
+            }
+        }
+        else if (kind == CommandWake)
+            command_wake(model,state,sleep_extent,sleep,true);
+        else if (kind <= CommandSetPose)
+        {
+            BodyState previous=state;
             if ((mode & CommandPreserveKinematicMove) == 0u)
+            {
                 command_cancel_move(state, target);
+                sleep.state.w=0u;
+            }
             if (kind == CommandSetPosition)
                 state.positionCOM.xyz = command.value.xyz + jph_rotate(state.rotation, command.rootCOM.xyz);
             else if (kind == CommandSetRotation)
@@ -66,6 +98,9 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             }
             // A pose command changes the principal frame before later FIFO Jv.
             jph_project_motion(model, state);
+            if(any(previous.positionCOM.xyz!=state.positionCOM.xyz) ||
+               !(all(previous.rotation==state.rotation) || all(previous.rotation==-state.rotation)))
+                command_wake(model,state,sleep_extent,sleep,true);
         }
         else if (kind == CommandResetMotion)
         {
@@ -74,6 +109,10 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             forces.force = float4(0.0f);
             forces.torque = float4(0.0f);
             target.state = uint4(0u);
+            command_reset_sleep(state,sleep_extent,sleep);
+            // This is the existing explicit full motion-state/episode reset,
+            // not Sleep or a retained-preserve boundary.
+            sleep.state.x=jph_nonstatic(model)?1u:0u;
         }
         else if (kind >= CommandMovePosition && kind <= CommandMovePose)
         {
@@ -106,6 +145,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             {
                 // New model is accepted first. Keep forces and target identity.
                 jph_project_motion(model, state);
+                command_reset_sleep(state,sleep_extent,sleep);
                 continue;
             }
             if (action == MotionBoundaryTypeChange)
@@ -144,6 +184,14 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             }
             target.state = uint4(0u);
             jph_project_motion(model, state);
+            if (action != MotionBoundarySuspendPreserve)
+                command_reset_sleep(state,sleep_extent,sleep);
+            else
+                sleep.state.w=0u; // Preserve the hidden episode's three spheres/timer/activity.
+            if (action == MotionBoundaryTypeChange)
+                sleep.state.x=jph_nonstatic(model)?1u:0u;
+            else if (action == MotionBoundarySuspendReset)
+                sleep.state.x=1u;
         }
         else if (kind == CommandSetLinearVelocity || kind == CommandSetAngularVelocity)
         {
@@ -152,14 +200,19 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
                 // Explicit velocity supersedes the whole arrival stop while
                 // preserving the other channel's actual current velocity.
                 target.state = uint4(0u);
+                sleep.state.w=0u;
                 if (kind == CommandSetLinearVelocity)
                     state.linearVelocity.xyz = jph_clamp_speed(jph_project_linear(model, command.value.xyz), model.damping.z);
                 else
                     state.angularVelocity.xyz = jph_clamp_speed(jph_project_angular(model, state, command.value.xyz), model.damping.w);
+                if (any(command.value.xyz != float3(0)))
+                    command_wake(model,state,sleep_extent,sleep,false);
             }
         }
         else if (jph_dynamic(model))
         {
+            if (any(command.value.xyz != float3(0)))
+                command_wake(model,state,sleep_extent,sleep,mode == CommandForce || mode == CommandAcceleration);
             if (kind == CommandAddTorque)
             {
                 float3 torque = command.value.xyz;
@@ -201,4 +254,5 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
     body_states[body] = state;
     body_forces[body] = forces;
     kinematic_targets[body] = target;
+    body_sleep[body].runtime = sleep;
 }

@@ -74,6 +74,8 @@ JPH_GPU_CONSTANT(CommandMovePosition, 9);
 JPH_GPU_CONSTANT(CommandMoveRotation, 10);
 JPH_GPU_CONSTANT(CommandMovePose, 11);
 JPH_GPU_CONSTANT(CommandMotionBoundary, 12);
+JPH_GPU_CONSTANT(CommandSleep, 13);
+JPH_GPU_CONSTANT(CommandWake, 14);
 // meta.z is decoded by command kind, independently of ForceMode.
 JPH_GPU_CONSTANT(CommandPreserveKinematicMove, 1);
 JPH_GPU_CONSTANT(CommandTemporaryStatic, 1);
