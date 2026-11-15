@@ -27,6 +27,7 @@ enum class Resource : std::uint32_t
     StageWork = 1u << 12,
     ConstraintSchedule = 1u << 13,
     ConvexGeometry = 1u << 14,
+    ArticulationControl = 1u << 15,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -105,7 +106,7 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+        Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
     {Stage::SolvePosition, "solve_position", Domain::IslandContacts, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
@@ -124,15 +125,15 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::FinishJoints, "finish_joints", Domain::Joints, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Joints) | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::Joints)},
     {Stage::WarmJoints, "warm_joints", Domain::IslandJoints, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
+        Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
     {Stage::SolveJointVelocity, "solve_joint_velocity", Domain::IslandJoints, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
+        Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
     {Stage::SolveJointPosition, "solve_joint_position", Domain::IslandJoints, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
+        Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
 };

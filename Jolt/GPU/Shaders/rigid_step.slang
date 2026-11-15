@@ -60,6 +60,7 @@ bool jph_selected_joint(uint index, JointDirectory author)
 }
 
 #include "island_owner_schedule.slang"
+#include "rigid_articulations.slang"
 
 void jph_joint_models(JointDirectory author, out BodyModel m1, out BodyModel m2)
 {
@@ -328,6 +329,7 @@ void jph_step_joint_typed(uint phase, JointDirectory directory, JointSixAuthor a
 
 void jph_step_joint(uint index, uint phase)
 {
+    if (jph_articulation_admitted(index, true)) return;
     JointDirectory directory = jph_joint_load_directory(index);
     if (!jph_selected_joint(index, directory) || !jph_selected_body(directory.bodies.y)
         || (directory.bodies.x != InvalidQueryBodySlot && !jph_selected_body(directory.bodies.x))) return;
@@ -1095,6 +1097,7 @@ void integrate(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
+    if (jph_articulation_admitted(index, false)) return;
     if (!jph_selected_body(index))
         return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
