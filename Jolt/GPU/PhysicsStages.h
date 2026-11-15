@@ -112,8 +112,8 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates)},
     {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyForces)
-            | Mask(Resource::KinematicTargets), Mask(Resource::BodyForces) | Mask(Resource::KinematicTargets)},
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
+            | Mask(Resource::KinematicTargets), Mask(Resource::KinematicTargets)},
     {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)},
@@ -145,8 +145,8 @@ inline constexpr StageDefinition Stages[] = {
 // SolvePosition for each solve.x iteration, FinishJoints. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
-// owner appends FinishTick once after all substeps, clearing forces and arming
-// the target arrival stop without snapping pose. Control-only jobs use neither
+// owner retires final active-set forces before sleep Commit, then appends
+// FinishTick once to arm the target arrival stop without snapping pose. Control-only jobs use neither
 // PrepareKinematics nor FinishTick. Sleeping composes engine-owned bounded
 // control producers around this numerical recipe; contact publication and pair
 // policy retain their existing producers. Contact warmstart and CCD require

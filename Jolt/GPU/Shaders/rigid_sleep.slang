@@ -130,6 +130,11 @@ void sleep_update_history(uint3 tid:SV_DispatchThreadID)
         if(any(pose.linearVelocity.xyz!=float3(0)) || any(pose.angularVelocity.xyz!=float3(0))) sleep_fail(SleepBadState);
         return;
     }
+    // Retire forces for the final active set before Commit may put it to sleep.
+    if(sleep_params.operation.z!=0u) {
+        BodyForces cleared;cleared.force=cleared.torque=float4(0);
+        body_forces[body]=cleared;
+    }
     BodySleepParameters parameters;parameters.timing=sleep_params.timing;
     uint vote=sleep_update_vote(record.author,record.runtime,pose,parameters);
     if(vote==2u) {sleep_fail(SleepBadState);return;}

@@ -736,10 +736,6 @@ void finish_tick(uint3 tid : SV_DispatchThreadID)
         return;
     if (!jph_resident(body_models[index]))
         return;
-    BodyForces cleared;
-    cleared.force = float4(0.0f);
-    cleared.torque = float4(0.0f);
-    body_forces[index] = cleared;
     KinematicTarget target = kinematic_targets[index];
     if ((target.state.x & TargetActive) != 0u)
         target.state.x = (target.state.x & TargetTemporaryStatic) | TargetDrivenLastTick;
