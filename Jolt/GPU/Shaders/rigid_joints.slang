@@ -354,6 +354,7 @@ JointHingeState jph_joint_initialize(JointHingeAuthor a, BodyState s1, BodyState
 {
     JointHingeState s;
     s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    s.poseDriveRelative = float4(0.0f, 0.0f, 0.0f, 1.0f);
     float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
     if (a.bodies.x == InvalidQueryBodySlot)
     {
@@ -386,7 +387,8 @@ JointHingeState jph_joint_initialize(JointHingeAuthor a, BodyState s1, BodyState
         float3 axis = jph_rotate(jph_quat_mul(s1.rotation, s.frame1), float3(0.0f, 0.0f, 1.0f));
         s.rotor.x = dot(axis, s2.angularVelocity.xyz - s1.angularVelocity.xyz);
     }
-    if (!(all(isfinite(s.anchor1))
+    if (!(all(isfinite(s.poseDriveRelative))
+        && all(isfinite(s.anchor1))
         && all(isfinite(s.anchor2))
         && all(isfinite(s.collapsed1))
         && all(isfinite(s.collapsed2))
@@ -494,6 +496,7 @@ JointSwingState jph_joint_initialize(JointSwingAuthor a, BodyState s1, BodyState
 {
     JointSwingState s;
     s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    s.poseDriveRelative = float4(0.0f, 0.0f, 0.0f, 1.0f);
     float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
     if (a.bodies.x == InvalidQueryBodySlot)
     {
@@ -523,7 +526,8 @@ JointSwingState jph_joint_initialize(JointSwingAuthor a, BodyState s1, BodyState
     s.angularMotorSetupY = float4(0.0f);
     s.angularMotorSetupZ = float4(0.0f);
 
-    if (!(all(isfinite(s.anchor1))
+    if (!(all(isfinite(s.poseDriveRelative))
+        && all(isfinite(s.anchor1))
         && all(isfinite(s.anchor2))
         && all(isfinite(s.collapsed1))
         && all(isfinite(s.collapsed2))
@@ -546,6 +550,7 @@ JointSixState jph_joint_initialize(JointSixAuthor a, BodyState s1, BodyState s2)
 {
     JointSixState s;
     s.flags = uint4(1u, JointStatusSuccess, 0u, 0u);
+    s.poseDriveRelative = float4(0.0f, 0.0f, 0.0f, 1.0f);
     float3 world_anchor = s2.positionCOM.xyz + jph_rotate(s2.rotation, a.ownerAnchor.xyz - a.rootCOM2.xyz);
     if (a.bodies.x == InvalidQueryBodySlot)
     {
@@ -587,7 +592,8 @@ JointSixState jph_joint_initialize(JointSixAuthor a, BodyState s1, BodyState s2)
     s.sixLimitImpulse = float4(0.0f);
     s.sixMotorImpulse = float4(0.0f);
 
-    if (!(all(isfinite(s.anchor1))
+    if (!(all(isfinite(s.poseDriveRelative))
+        && all(isfinite(s.anchor1))
         && all(isfinite(s.anchor2))
         && all(isfinite(s.collapsed1))
         && all(isfinite(s.collapsed2))
@@ -1330,6 +1336,12 @@ void jph_joint_setup(JointHingeAuthor a, inout JointHingeState state,
                      BodyModel m1, inout BodyState s1, BodyModel m2, inout BodyState s2,
                      float dt, bool warm_start)
 {
+    if ((state.flags.w & JointPoseDriveActive) != 0u)
+    {
+        float4 target = normalize(jph_quat_mul(jph_quat_mul(jph_joint_conjugate(state.frame1), state.poseDriveRelative), state.frame2));
+        a.motor.x = target.w == 0.0f ? 3.14159265358979323846f : 2.0f * atan(target.z / target.w);
+    }
+
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
         return;
     float previous_dt = asfloat(state.flags.z);
@@ -1903,6 +1915,7 @@ bool jph_joint_state_finite(JointFixedState state)
 bool jph_joint_state_finite(JointHingeState state)
 {
     return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.poseDriveRelative))
         && all(isfinite(state.anchor1))
         && all(isfinite(state.anchor2))
         && all(isfinite(state.collapsed1))
@@ -1946,6 +1959,7 @@ bool jph_joint_state_finite(JointDistanceState state)
 bool jph_joint_state_finite(JointSwingState state)
 {
     return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.poseDriveRelative))
         && all(isfinite(state.anchor1))
         && all(isfinite(state.anchor2))
         && all(isfinite(state.collapsed1))
@@ -1966,6 +1980,7 @@ bool jph_joint_state_finite(JointSwingState state)
 bool jph_joint_state_finite(JointSixState state)
 {
     return isfinite(asfloat(state.flags.z))
+        && all(isfinite(state.poseDriveRelative))
         && all(isfinite(state.anchor1))
         && all(isfinite(state.anchor2))
         && all(isfinite(state.collapsed1))

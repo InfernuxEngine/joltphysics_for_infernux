@@ -13,13 +13,12 @@ StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
 StructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<QueryRecordWord> query_candidates;
-RWStructuredBuffer<QuerySpan> query_spans;
+RWStructuredBuffer<QueryRecordWord> query_control;
 RWStructuredBuffer<QuerySummary> query_summary;
 RWStructuredBuffer<QueryRecordWord> query_hits;
 ConstantBuffer<QueryExportParams> query_export_params;
 RWStructuredBuffer<uint> query_export_values;
 ConstantBuffer<QueryCastParams> query_cast_params;
-RWStructuredBuffer<QueryCastState> query_cast_states;
 
 // One 16-byte immutable request stream: all Input128 records precede the
 // explicit Primitive64 suffix. Identity records likewise share one resource.
@@ -47,6 +46,45 @@ QueryPrimitive query_load_primitive(uint index)
     primitive.position = asfloat(query_inputs[base + 2u].value);
     primitive.rotation = asfloat(query_inputs[base + 3u].value);
     return primitive;
+}
+
+// The first request-count UInt4 words retain the public QuerySpan prefix.
+// Four CA words per request follow it, independently of candidate record width.
+QuerySpan query_load_span(uint index)
+{
+    QuerySpan span;
+    span.range = query_control[index].value;
+    return span;
+}
+
+void query_store_span(uint index, QuerySpan span)
+{
+    query_control[index].value = span.range;
+}
+
+uint query_cast_state_word(uint index)
+{
+    return query_params.counts.x + index * 4u;
+}
+
+QueryCastState query_load_cast_state(uint index)
+{
+    uint base = query_cast_state_word(index);
+    QueryCastState state;
+    state.cursor = query_control[base].value;
+    state.progress = asfloat(query_control[base + 1u].value);
+    state.normal = asfloat(query_control[base + 2u].value);
+    state.iteration = query_control[base + 3u].value;
+    return state;
+}
+
+void query_store_cast_state(uint index, QueryCastState state)
+{
+    uint base = query_cast_state_word(index);
+    query_control[base].value = state.cursor;
+    query_control[base + 1u].value = asuint(state.progress);
+    query_control[base + 2u].value = asuint(state.normal);
+    query_control[base + 3u].value = state.iteration;
 }
 
 uint query_record_words()
@@ -1125,10 +1163,10 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
                 break;
         }
     }
-    query_cast_states[index] = cast;
+    query_store_cast_state(index, cast);
     QuerySpan span;
     span.range = uint4(0u, count, status, 0u);
-    query_spans[index] = span;
+    query_store_span(index, span);
 }
 
 [shader("compute")]
@@ -1136,17 +1174,17 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
 void query_resume_casts(uint3 tid : SV_DispatchThreadID)
 {
     uint index = tid.x;
-    if (index >= query_params.counts.x || query_spans[index].range.z != QueryPending)
+    if (index >= query_params.counts.x || query_load_span(index).range.z != QueryPending)
         return;
     QueryInput request = query_load_input(index);
     if (request.meta.x != QueryShapeCast)
         return;
-    QueryCastState cast = query_cast_states[index];
+    QueryCastState cast = query_load_cast_state(index);
     query_cast_advance(request, index * query_params.sizes.y, cast);
-    query_cast_states[index] = cast;
+    query_store_cast_state(index, cast);
     QuerySpan span;
     span.range = uint4(0u, cast.cursor.z, cast.cursor.w, 0u);
-    query_spans[index] = span;
+    query_store_span(index, span);
 }
 
 [shader("compute")]
@@ -1160,14 +1198,14 @@ void query_scan(uint3 tid : SV_DispatchThreadID)
     bool pending = false;
     for (uint index = 0u; index < query_params.counts.x; ++index)
     {
-        QuerySpan span = query_spans[index];
+        QuerySpan span = query_load_span(index);
         span.range.x = count;
         count += span.range.y;
         if (span.range.z == QueryPending)
             pending = true;
         else
             status = max(status, span.range.z);
-        query_spans[index] = span;
+        query_store_span(index, span);
     }
     QuerySummary summary;
     summary.counts = uint4(count, status != QuerySuccess ? status : pending ? QueryPending : QuerySuccess, query_params.counts.x, 0u);
@@ -1189,13 +1227,13 @@ void query_compact(uint3 tid : SV_DispatchThreadID)
         while (low < high)
         {
             uint middle = low + (high - low) / 2u;
-            QuerySpan span = query_spans[middle];
+            QuerySpan span = query_load_span(middle);
             if (span.range.x + span.range.y <= index)
                 low = middle + 1u;
             else
                 high = middle;
         }
-        QuerySpan source = query_spans[low];
+        QuerySpan source = query_load_span(low);
         source_record = low * query_params.sizes.y + index - source.range.x;
     }
     // One writer per final index, including the unused tail. A sparse scatter
@@ -1240,7 +1278,7 @@ void query_export(uint3 tid : SV_DispatchThreadID)
         while (low < high)
         {
             uint middle = low + (high - low) / 2u;
-            QuerySpan span = query_spans[middle];
+            QuerySpan span = query_load_span(middle);
             if (span.range.x + span.range.y <= source_row) low = middle + 1u;
             else high = middle;
         }

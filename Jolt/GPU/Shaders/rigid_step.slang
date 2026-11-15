@@ -389,7 +389,14 @@ void jph_setup_joint_typed(JointDirectory directory, JointHingeAuthor author, Jo
     BodyState s1, s2;
     jph_joint_bodies(directory, m1, s1, m2, s2);
     if (!jph_resident(m1) || !jph_resident(m2))
+    {
+        // Suspension clears warm reactions, not the physical rotor speed.
+        float old_armature = runtime.rotor.w;
+        float speed = old_armature > 0.0f ? runtime.rotor.x - runtime.rotor.y / old_armature : runtime.rotor.x;
         jph_joint_clear_impulses(runtime);
+        runtime.rotor.xz = float2(speed);
+        if (!isfinite(speed)) runtime.flags.y = JointStatusNumericalFailure;
+    }
     else
     {
         // This stage stores runtime only. All global setup units precede any

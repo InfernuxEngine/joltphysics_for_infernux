@@ -223,6 +223,9 @@ float3 jph_six_motor_error(JointSixAuthor a, JphSwingLimits c, float4 q, inout u
 void jph_joint_setup(JointSixAuthor a, inout JointSixState state, BodyModel m1, inout BodyState s1, BodyModel m2,
                      inout BodyState s2, float dt, bool warm_start)
 {
+    if ((state.flags.w & JointPoseDriveActive) != 0u)
+        a.angularTarget = normalize(jph_quat_mul(jph_quat_mul(jph_joint_conjugate(state.frame1), state.poseDriveRelative), state.frame2));
+
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess)
         return;
     if ((a.bodies.w & JointEnabled) == 0u || (!jph_dynamic(m1) && !jph_dynamic(m2))) {

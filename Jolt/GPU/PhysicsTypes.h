@@ -195,6 +195,10 @@ JPH_GPU_CONSTANT(JointResetSwingMotor, 8);
 JPH_GPU_CONSTANT(JointResetTwistMotor, 16);
 JPH_GPU_CONSTANT(JointResetMobility, 32);
 JPH_GPU_CONSTANT(JointResetSixClassification, 64);
+JPH_GPU_CONSTANT(JointResetPoseDrive, 128);
+JPH_GPU_CONSTANT(JointPoseDriveActive, 1);
+JPH_GPU_CONSTANT(JointPoseDriveClear, 0);
+JPH_GPU_CONSTANT(JointPoseDriveSet, 1);
 // Per-axis reset bits: translation limits, translation motors, angular motors.
 JPH_GPU_CONSTANT(JointResetSixLimitShift, 8);
 JPH_GPU_CONSTANT(JointResetSixLinearMotorShift, 11);
@@ -211,6 +215,8 @@ JPH_GPU_CONSTANT(JointStatusNumericalFailure, 2);
 // Hinge rotor.w is the cached accepted armature; other kinds have no rotor.
 struct JPH_GPU_ALIGN JointDirectory { JPH_GPU_UINT4 bodies; JPH_GPU_UINT4 identity; JPH_GPU_UINT4 layout; };
 JPH_GPU_CONSTANT(JointDirectoryWords, 3);
+// One captured runtime intent: current row, stable ID low/high, operation.
+struct JPH_GPU_ALIGN JointPoseDrive { JPH_GPU_UINT4 meta; JPH_GPU_FLOAT4 relative; };
 struct JPH_GPU_ALIGN JointFixedAuthor {
 #ifndef __cplusplus
     uint4 bodies, identity;
@@ -232,7 +238,7 @@ JPH_GPU_CONSTANT(JointHingeAuthorWords, 10);
 struct JPH_GPU_ALIGN JointHingeState {
     JPH_HINGE_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
-JPH_GPU_CONSTANT(JointHingeStateWords, 12);
+JPH_GPU_CONSTANT(JointHingeStateWords, 13);
 struct JPH_GPU_ALIGN JointSliderAuthor {
 #ifndef __cplusplus
     uint4 bodies, identity;
@@ -265,7 +271,7 @@ JPH_GPU_CONSTANT(JointSwingAuthorWords, 13);
 struct JPH_GPU_ALIGN JointSwingState {
     JPH_SWING_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
-JPH_GPU_CONSTANT(JointSwingStateWords, 16);
+JPH_GPU_CONSTANT(JointSwingStateWords, 17);
 struct JPH_GPU_ALIGN JointSixAuthor {
 #ifndef __cplusplus
     uint4 bodies, identity;
@@ -276,7 +282,7 @@ JPH_GPU_CONSTANT(JointSixAuthorWords, 26);
 struct JPH_GPU_ALIGN JointSixState {
     JPH_SIX_STATE_FIELDS(JPH_PAYLOAD_F,JPH_PAYLOAD_U)
 };
-JPH_GPU_CONSTANT(JointSixStateWords, 28);
+JPH_GPU_CONSTANT(JointSixStateWords, 29);
 #undef JPH_PAYLOAD_F
 #undef JPH_PAYLOAD_U
 #ifdef __cplusplus
@@ -700,18 +706,24 @@ JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
 JPH_GPU_CHECK_TYPE(WorldRange, 32);
 JPH_GPU_CHECK_TYPE(JointDirectory, 48);
+JPH_GPU_CHECK_TYPE(JointPoseDrive, 32);
+static_assert(offsetof(JointPoseDrive, meta) == 0);
+static_assert(offsetof(JointPoseDrive, relative) == 16);
+static_assert(offsetof(JointHingeState, poseDriveRelative) == 192);
+static_assert(offsetof(JointSwingState, poseDriveRelative) == 256);
+static_assert(offsetof(JointSixState, poseDriveRelative) == 448);
 JPH_GPU_CHECK_TYPE(JointFixedAuthor, 96);
 JPH_GPU_CHECK_TYPE(JointFixedState, 144);
 JPH_GPU_CHECK_TYPE(JointHingeAuthor, 160);
-JPH_GPU_CHECK_TYPE(JointHingeState, 192);
+JPH_GPU_CHECK_TYPE(JointHingeState, 208);
 JPH_GPU_CHECK_TYPE(JointSliderAuthor, 128);
 JPH_GPU_CHECK_TYPE(JointSliderState, 176);
 JPH_GPU_CHECK_TYPE(JointDistanceAuthor, 160);
 JPH_GPU_CHECK_TYPE(JointDistanceState, 128);
 JPH_GPU_CHECK_TYPE(JointSwingAuthor, 208);
-JPH_GPU_CHECK_TYPE(JointSwingState, 256);
+JPH_GPU_CHECK_TYPE(JointSwingState, 272);
 JPH_GPU_CHECK_TYPE(JointSixAuthor, 416);
-JPH_GPU_CHECK_TYPE(JointSixState, 448);
+JPH_GPU_CHECK_TYPE(JointSixState, 464);
 JPH_GPU_CHECK_TYPE(JointReadback, 48);
 JPH_GPU_CHECK_TYPE(JointParams, 16);
 static_assert(offsetof(JointFixedAuthor, ownerAnchor) == 0);

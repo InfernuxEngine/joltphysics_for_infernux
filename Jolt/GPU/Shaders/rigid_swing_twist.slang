@@ -438,6 +438,9 @@ void jph_swing_constraint_axes(uint swingType, JphSwingLimits c, float4 world1, 
 void jph_swing_setup(JointSwingAuthor a, inout JointSwingState state,
     BodyModel m1, BodyState s1, BodyModel m2, BodyState s2, float dt)
 {
+    if ((state.flags.w & JointPoseDriveActive) != 0u)
+        a.angularTarget = normalize(jph_quat_mul(jph_quat_mul(jph_joint_conjugate(state.frame1), state.poseDriveRelative), state.frame2));
+
     JphSwingLimits c = jph_swing_limits(a);
     float4 world1 = jph_quat_mul(s1.rotation, state.frame1);
     float4 world2 = jph_quat_mul(s2.rotation, state.frame2);

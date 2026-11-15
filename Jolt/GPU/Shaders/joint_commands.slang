@@ -9,6 +9,7 @@ StructuredBuffer<uint> joint_remap;
 StructuredBuffer<QueryRecordWord> old_joint_stream;
 StructuredBuffer<BodyState> body_states;
 StructuredBuffer<uint> joint_query_rows;
+StructuredBuffer<JointPoseDrive> joint_pose_drives;
 RWStructuredBuffer<JointReadback> joint_motion;
 
 void jph_update_joint_state(JointFixedAuthor a, inout JointFixedState state, uint flags)
@@ -20,6 +21,11 @@ void jph_update_joint_state(JointFixedAuthor a, inout JointFixedState state, uin
 void jph_update_joint_state(JointHingeAuthor a, inout JointHingeState state, uint flags)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if ((flags & JointResetPoseDrive) != 0u)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+    }
     // Cache physical rotor speed before clearing its warm reaction. Previous
     // dt now lives in flags.z and must survive every author/mobility reset.
     float old_armature = state.rotor.w;
@@ -58,6 +64,11 @@ void jph_update_joint_state(JointDistanceAuthor a, inout JointDistanceState stat
 void jph_update_joint_state(JointSwingAuthor a, inout JointSwingState state, uint flags)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if ((flags & JointResetPoseDrive) != 0u)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+    }
     if ((flags & JointResetMobility) != 0u)
     {
         jph_joint_clear_impulses(state);
@@ -71,6 +82,11 @@ void jph_update_joint_state(JointSwingAuthor a, inout JointSwingState state, uin
 void jph_update_joint_state(JointSixAuthor a, inout JointSixState state, uint flags)
 {
     if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if ((flags & JointResetPoseDrive) != 0u)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+    }
     if ((flags & (JointResetMobility | JointResetSixClassification)) != 0u)
     { jph_joint_clear_impulses(state); return; }
     if ((flags & JointResetSwingLimits) != 0u)
@@ -417,5 +433,92 @@ void read_joint_status(uint3 tid : SV_DispatchThreadID, uint3 lane : SV_GroupThr
     result.orientation = float4(0.0f);
         result.status = uint4(joint_status_values[0], joint_status_failures[0], 0u, 0u);
         joint_motion[joint_params.counts.z + group.x] = result;
+    }
+}
+
+
+void jph_pose_drive(inout JointHingeState state, JointPoseDrive request, bool identityMatches)
+{
+    if (!identityMatches) { state.flags.y = JointStatusInvalid; return; }
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if (request.meta.w == JointPoseDriveClear)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+        return;
+    }
+    float4 target = normalize(request.relative);
+    if (request.meta.w != JointPoseDriveSet || !all(isfinite(target)))
+    { state.flags.y = JointStatusNumericalFailure; return; }
+    state.poseDriveRelative = target;
+    state.flags.w |= JointPoseDriveActive;
+}
+
+void jph_pose_drive(inout JointSwingState state, JointPoseDrive request, bool identityMatches)
+{
+    if (!identityMatches) { state.flags.y = JointStatusInvalid; return; }
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if (request.meta.w == JointPoseDriveClear)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+        return;
+    }
+    float4 target = normalize(request.relative);
+    if (request.meta.w != JointPoseDriveSet || !all(isfinite(target)))
+    { state.flags.y = JointStatusNumericalFailure; return; }
+    state.poseDriveRelative = target;
+    state.flags.w |= JointPoseDriveActive;
+}
+
+void jph_pose_drive(inout JointSixState state, JointPoseDrive request, bool identityMatches)
+{
+    if (!identityMatches) { state.flags.y = JointStatusInvalid; return; }
+    if (state.flags.x == 0u || state.flags.y != JointStatusSuccess) return;
+    if (request.meta.w == JointPoseDriveClear)
+    {
+        state.flags.w &= ~JointPoseDriveActive;
+        state.poseDriveRelative = float4(0, 0, 0, 1);
+        return;
+    }
+    float4 target = normalize(request.relative);
+    if (request.meta.w != JointPoseDriveSet || !all(isfinite(target)))
+    { state.flags.y = JointStatusNumericalFailure; return; }
+    state.poseDriveRelative = target;
+    state.flags.w |= JointPoseDriveActive;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void drive_joint_pose(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= joint_params.counts.z) return;
+    JointPoseDrive request = joint_pose_drives[tid.x];
+    if (request.meta.x >= joint_params.counts.x) return; // Host validates the complete captured range.
+    JointDirectory directory = jph_joint_load_directory(request.meta.x);
+    bool identityMatches = all(directory.identity.xy == request.meta.yz);
+    switch (directory.bodies.z)
+    {
+    case JointHinge:
+    {
+        JointHingeState state; jph_joint_load_state(directory, state);
+        jph_pose_drive(state, request, identityMatches);
+        jph_joint_store_state(directory, state);
+        break;
+    }
+    case JointSwingTwist:
+    {
+        JointSwingState state; jph_joint_load_state(directory, state);
+        jph_pose_drive(state, request, identityMatches);
+        jph_joint_store_state(directory, state);
+        break;
+    }
+    case JointSixDOF:
+    {
+        JointSixState state; jph_joint_load_state(directory, state);
+        jph_pose_drive(state, request, identityMatches);
+        jph_joint_store_state(directory, state);
+        break;
+    }
     }
 }

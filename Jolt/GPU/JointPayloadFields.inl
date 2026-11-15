@@ -76,7 +76,9 @@
     F(angularImpulse) \
     F(axisImpulse) \
     F(rotor) \
-    F(setup)
+    F(setup) \
+    F(poseDriveRelative)
+
 #define JPH_SLIDER_STATE_FIELDS(F,U) \
     U(flags) \
     F(anchor1) \
@@ -114,7 +116,9 @@
     F(angularMotorImpulse) \
     F(angularMotorSetupX) \
     F(angularMotorSetupY) \
-    F(angularMotorSetupZ)
+    F(angularMotorSetupZ) \
+    F(poseDriveRelative)
+
 #define JPH_ALL_AUTHOR_FIELDS(F,U) \
     F(ownerAnchor) \
     F(ownerLocalAnchor) \
@@ -210,4 +214,5 @@
     F(sixMotorSetupY) \
     F(sixMotorSetupZ) \
     F(sixLimitImpulse) \
-    F(sixMotorImpulse)
+    F(sixMotorImpulse) \
+    F(poseDriveRelative)
