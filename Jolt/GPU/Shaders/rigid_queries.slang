@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "rigid_math.slang"
+#include "rigid_convex.slang"
 
 ConstantBuffer<QueryParams> query_params;
 StructuredBuffer<QueryRecordWord> query_inputs;
@@ -13,18 +14,18 @@ StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
 StructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<QueryRecordWord> query_candidates;
-RWStructuredBuffer<QueryRecordWord> query_control;
+RWStructuredBuffer<uint4> query_control;
+StructuredBuffer<uint4> query_geometry;
 RWStructuredBuffer<QuerySummary> query_summary;
 RWStructuredBuffer<QueryRecordWord> query_hits;
 ConstantBuffer<QueryExportParams> query_export_params;
 RWStructuredBuffer<uint> query_export_values;
 ConstantBuffer<QueryCastParams> query_cast_params;
 
-// One 16-byte immutable request stream: all Input128 records precede the
-// explicit Primitive64 suffix. Identity records likewise share one resource.
+// One immutable request stream: Input144 records precede Primitive80 suffix. Identity records likewise share one resource.
 QueryInput query_load_input(uint index)
 {
-    uint base = index * 8u;
+    uint base = index * 9u;
     QueryInput request;
     request.meta = query_inputs[base].value;
     request.filter = query_inputs[base + 1u].value;
@@ -34,17 +35,19 @@ QueryInput query_load_input(uint index)
     request.rotation = asfloat(query_inputs[base + 5u].value);
     request.geometry = asfloat(query_inputs[base + 6u].value);
     request.lifetime = query_inputs[base + 7u].value;
+    request.geometryReference = query_inputs[base + 8u].value;
     return request;
 }
 
 QueryPrimitive query_load_primitive(uint index)
 {
-    uint base = query_params.counts.x * 8u + index * 4u;
+    uint base = query_params.counts.x * 9u + index * 5u;
     QueryPrimitive primitive;
     primitive.meta = query_inputs[base].value;
     primitive.geometry = asfloat(query_inputs[base + 1u].value);
     primitive.position = asfloat(query_inputs[base + 2u].value);
     primitive.rotation = asfloat(query_inputs[base + 3u].value);
+    primitive.geometryReference = query_inputs[base + 4u].value;
     return primitive;
 }
 
@@ -53,13 +56,13 @@ QueryPrimitive query_load_primitive(uint index)
 QuerySpan query_load_span(uint index)
 {
     QuerySpan span;
-    span.range = query_control[index].value;
+    span.range = query_control[index];
     return span;
 }
 
 void query_store_span(uint index, QuerySpan span)
 {
-    query_control[index].value = span.range;
+    query_control[index] = span.range;
 }
 
 uint query_cast_state_word(uint index)
@@ -71,20 +74,20 @@ QueryCastState query_load_cast_state(uint index)
 {
     uint base = query_cast_state_word(index);
     QueryCastState state;
-    state.cursor = query_control[base].value;
-    state.progress = asfloat(query_control[base + 1u].value);
-    state.normal = asfloat(query_control[base + 2u].value);
-    state.iteration = query_control[base + 3u].value;
+    state.cursor = query_control[base];
+    state.progress = asfloat(query_control[base + 1u]);
+    state.normal = asfloat(query_control[base + 2u]);
+    state.iteration = query_control[base + 3u];
     return state;
 }
 
 void query_store_cast_state(uint index, QueryCastState state)
 {
     uint base = query_cast_state_word(index);
-    query_control[base].value = state.cursor;
-    query_control[base + 1u].value = asuint(state.progress);
-    query_control[base + 2u].value = asuint(state.normal);
-    query_control[base + 3u].value = state.iteration;
+    query_control[base] = state.cursor;
+    query_control[base + 1u] = asuint(state.progress);
+    query_control[base + 2u] = asuint(state.normal);
+    query_control[base + 3u] = state.iteration;
 }
 
 uint query_record_words()
@@ -447,6 +450,20 @@ void query_leaf_bounds(ShapeModel shape, BodyState state, out float3 low, out fl
     }
     else if (shape.meta.x == ShapeCapsule)
         extent += abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * shape.geometry.y;
+    else if (shape.meta.x == ShapeCylinder)
+    {
+        float3 axis = jph_rotate(rotation, float3(0, 1, 0));
+        extent = abs(axis) * shape.geometry.y + shape.geometry.x * sqrt(max(float3(0), 1.0f - axis * axis));
+    }
+    else if (shape.meta.x == ShapeConvexHull)
+    {
+        uint4 ref = shape.geometryReference;
+        float3 a = asfloat(query_geometry[ref.x + 3u]).xyz, b = asfloat(query_geometry[ref.x + 4u]).xyz;
+        center += jph_rotate(rotation, 0.5f * (a + b));
+        float3 h = 0.5f * (b - a);
+        extent = abs(jph_rotate(rotation, float3(h.x, 0, 0))) +
+                 abs(jph_rotate(rotation, float3(0, h.y, 0))) + abs(jph_rotate(rotation, float3(0, 0, h.z)));
+    }
     low = center - extent;
     high = center + extent;
 }
@@ -1054,6 +1071,8 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
         state.cursor.w = QueryPending;
 }
 
+#include "rigid_convex_queries.slang"
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void query_evaluate(uint3 tid : SV_DispatchThreadID)
@@ -1072,7 +1091,12 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
     cast.progress = float4(0.0f, 3.402823466e+38f, 0.0f, request.positionMaximum.w);
     cast.normal = float4(0.0f);
     cast.iteration = uint4(0u);
-    if (request.meta.x == QueryShapeCast)
+    if (cvx_query_slots() != 0u && cvx_query_deferred(request))
+    {
+        cast.cursor.y = 0u;
+        cast.cursor.w = status = QueryPending;
+    }
+    else if (request.meta.x == QueryShapeCast)
     {
         cast.cursor.y = 0u;
         query_cast_advance(request, begin, cast);

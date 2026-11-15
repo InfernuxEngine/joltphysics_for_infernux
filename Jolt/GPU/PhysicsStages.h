@@ -25,6 +25,7 @@ enum class Resource : std::uint32_t
     Joints = 1u << 10,
     StageWork = 1u << 11,
     ConstraintSchedule = 1u << 12,
+    ConvexGeometry = 1u << 13,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -84,7 +85,8 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyForces) | Mask(Resource::BodyStates),
         Mask(Resource::BodyStates)},
     {Stage::BuildBounds, "build_bounds", Domain::Shapes, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates),
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::BodyStates)
+            | Mask(Resource::ConvexGeometry),
         Mask(Resource::Bounds)},
     {Stage::CollidePairs, "narrowphase_candidates", Domain::Patches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels)

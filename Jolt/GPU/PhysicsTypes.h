@@ -35,6 +35,8 @@ struct alignas(16) UInt4 { std::uint32_t x, y, z, w; };
 JPH_GPU_CONSTANT(ShapeSphere, 0);
 JPH_GPU_CONSTANT(ShapeBox, 1);
 JPH_GPU_CONSTANT(ShapeCapsule, 2);
+JPH_GPU_CONSTANT(ShapeCylinder, 3);
+JPH_GPU_CONSTANT(ShapeConvexHull, 4);
 JPH_GPU_CONSTANT(ShapeSensor, 1);
 JPH_GPU_CONSTANT(PatchActive, 1);
 JPH_GPU_CONSTANT(PatchSensor, 2);
@@ -115,6 +117,8 @@ struct JPH_GPU_ALIGN ShapeModel
     JPH_GPU_UINT4 meta;
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
     // Capsule: (0, half cylinder height, 0, radius), with the core along local Y.
+    // Cylinder: (radius, half height, convex radius,0), exact local-Y cylinder.
+    // Hull: (convex radius,0,0,0); full/core/topology in geometryReference.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
     // Primitive center in the body COM frame, xyz; w is zero padding. A collider
@@ -131,6 +135,8 @@ struct JPH_GPU_ALIGN ShapeModel
     // Collider ID low/high words, lifetime generation low/high words.
     // SubShapeID/prefix-bit metadata remains in the accepted host leaf directory.
     JPH_GPU_UINT4 source;
+    // Immutable cold record absolute word offset/length; zw zero. Inline shapes use zero.
+    JPH_GPU_UINT4 geometryReference;
 };
 
 struct JPH_GPU_ALIGN ColliderPairKey
@@ -598,6 +604,8 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_FLOAT4 geometry; // Same cooked geometry law as ShapeModel.
     // Source Sweep Collider generation low/high; zw zero. Other queries use zero.
     JPH_GPU_UINT4 lifetime;
+    // Exact explicit first operand; never inferred from current global cook.
+    JPH_GPU_UINT4 geometryReference;
 };
 
 struct JPH_GPU_ALIGN QueryCastParams
@@ -624,6 +632,7 @@ struct JPH_GPU_ALIGN QueryPrimitive
     JPH_GPU_FLOAT4 geometry;
     JPH_GPU_FLOAT4 position;
     JPH_GPU_FLOAT4 rotation;
+    JPH_GPU_UINT4 geometryReference;
 };
 
 struct JPH_GPU_ALIGN QueryBodyIdentity
@@ -700,7 +709,7 @@ static_assert(sizeof(UInt4) == 16 && alignof(UInt4) == 16);
     static_assert(sizeof(type) == bytes && alignof(type) == 16); \
     static_assert(std::is_standard_layout_v<type> && std::is_trivially_copyable_v<type>)
 JPH_GPU_CHECK_TYPE(BodyModel, 80);
-JPH_GPU_CHECK_TYPE(ShapeModel, 112);
+JPH_GPU_CHECK_TYPE(ShapeModel, 128);
 JPH_GPU_CHECK_TYPE(BodyState, 64);
 JPH_GPU_CHECK_TYPE(BodyForces, 32);
 JPH_GPU_CHECK_TYPE(KinematicTarget, 64);
@@ -846,13 +855,13 @@ JPH_GPU_CHECK_TYPE(BodyCommandSpan, 16);
 JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
 JPH_GPU_CHECK_TYPE(QueryParams, 64);
 static_assert(offsetof(QueryParams, selection) == 32 && offsetof(QueryParams, selectedCounts) == 48);
-JPH_GPU_CHECK_TYPE(QueryInput, 128);
+JPH_GPU_CHECK_TYPE(QueryInput, 144);
 JPH_GPU_CHECK_TYPE(ColliderPairKey, 32);
 JPH_GPU_CHECK_TYPE(QueryCastParams, 16);
 JPH_GPU_CHECK_TYPE(QueryCastState, 64);
 static_assert(offsetof(QueryCastState, progress) == 16 && offsetof(QueryCastState, normal) == 32
     && offsetof(QueryCastState, iteration) == 48);
-JPH_GPU_CHECK_TYPE(QueryPrimitive, 64);
+JPH_GPU_CHECK_TYPE(QueryPrimitive, 80);
 JPH_GPU_CHECK_TYPE(QueryBodyIdentity, 16);
 JPH_GPU_CHECK_TYPE(QueryHit, 64);
 JPH_GPU_CHECK_TYPE(QueryRecordWord, 16);
@@ -873,8 +882,9 @@ static_assert(offsetof(QueryMotionState, positionInverseMass) == 16 && offsetof(
     && offsetof(QueryMotionState, inertia2) == 176);
 JPH_GPU_CHECK_TYPE(QuerySpan, 16);
 JPH_GPU_CHECK_TYPE(QuerySummary, 16);
+static_assert(offsetof(QueryPrimitive, geometryReference) == 64);
 static_assert(offsetof(QueryInput, geometry) == 96 && offsetof(QueryInput, filter) == 16
-    && offsetof(QueryInput, lifetime) == 112);
+    && offsetof(QueryInput, lifetime) == 112 && offsetof(QueryInput, geometryReference) == 128);
 static_assert(offsetof(ColliderPairKey, a) == 0 && offsetof(ColliderPairKey, b) == 16);
 static_assert(offsetof(QueryHit, positionDistance) == 16 && offsetof(QueryHit, pointADepth) == 48);
 static_assert(offsetof(BodyCommand, value) == 16 && offsetof(BodyCommand, auxiliary) == 32
@@ -889,7 +899,7 @@ static_assert(offsetof(BodyModel, meta) == 0 && offsetof(BodyModel, mass) == 16
 static_assert(offsetof(ShapeModel, meta) == 0 && offsetof(ShapeModel, geometry) == 16
     && offsetof(ShapeModel, localPositionCOM) == 32 && offsetof(ShapeModel, localRotation) == 48
     && offsetof(ShapeModel, material) == 64 && offsetof(ShapeModel, surface) == 80
-    && offsetof(ShapeModel, source) == 96);
+    && offsetof(ShapeModel, source) == 96 && offsetof(ShapeModel, geometryReference) == 112);
 static_assert(offsetof(WorldRange, bodies) == 0 && offsetof(WorldRange, leaves) == 16);
 static_assert(offsetof(ContactPatch, leaves) == 0);
 static_assert(offsetof(BodyState, rotation) == 16 && offsetof(BodyState, angularVelocity) == 48);

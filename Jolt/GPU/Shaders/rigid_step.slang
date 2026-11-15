@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "rigid_joints.slang"
+#include "rigid_convex.slang"
 
 ConstantBuffer<StepParams> step_params;
 ConstantBuffer<StageWork> stage_work;
@@ -15,6 +16,7 @@ RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
+StructuredBuffer<uint4> convex_geometry;
 
 bool jph_selected_range(uint index, uint base, uint count)
 {
@@ -721,10 +723,26 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
         extent = float3(geometry.w);
     else if (shape.meta.x == ShapeCapsule)
         extent = abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y + geometry.w;
+    else if (shape.meta.x == ShapeCylinder)
+    {
+        float3 axis = jph_rotate(rotation, float3(0, 1, 0));
+        extent = abs(axis) * geometry.y + geometry.x * sqrt(max(float3(0), float3(1) - axis * axis));
+    }
     else
-        extent = abs(jph_rotate(rotation, float3(1.0f, 0.0f, 0.0f))) * geometry.x
-               + abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y
-               + abs(jph_rotate(rotation, float3(0.0f, 0.0f, 1.0f))) * geometry.z;
+    {
+        float3 half = geometry.xyz;
+        if (shape.meta.x == ShapeConvexHull)
+        {
+            uint base = shape.geometryReference.x;
+            float3 low = asfloat(convex_geometry[base + 3u]).xyz;
+            float3 high = asfloat(convex_geometry[base + 4u]).xyz;
+            center += jph_rotate(rotation, low * .5f + high * .5f);
+            half = high * .5f - low * .5f;
+        }
+        extent = abs(jph_rotate(rotation, float3(1, 0, 0))) * half.x
+               + abs(jph_rotate(rotation, float3(0, 1, 0))) * half.y
+               + abs(jph_rotate(rotation, float3(0, 0, 1))) * half.z;
+    }
     // Expand each leaf by half the contact band, so the pair band is exactly
     // the configured speculative distance, not twice that distance.
     extent += 0.5f * step_params.contact.x;
@@ -783,6 +801,10 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     float4 qa = jph_leaf_rotation(shape_a, sa);
     float4 qb = jph_leaf_rotation(shape_b, sb);
     float speculative_distance = sensor ? 0.0f : step_params.contact.x;
+    // The producer's generic jobs own these candidates. SetupContacts cannot
+    // consume this initialized prefix until every persistent slot completes.
+    if (shape_a.meta.x > ShapeCapsule || shape_b.meta.x > ShapeCapsule)
+        return;
     if ((shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox) ||
         shape_a.meta.x == ShapeCapsule || shape_b.meta.x == ShapeCapsule)
     {
