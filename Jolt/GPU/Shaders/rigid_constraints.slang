@@ -239,8 +239,10 @@ void constraint_finalize_topology(uint3 tid:SV_DispatchThreadID)
     uint4 control=cs_load(constraint_params.layout.y);
     uint status=control.z;
     if(control.w!=1u) status|=ConstraintNotConverged;
-    // This is deliberately not an installable numerical schedule yet.
-    cs_store(constraint_params.layout.x,uint4(0u,0u,0u,status|ConstraintNotReady));
+    // The host sets select.w only for a completed empty candidate set and zero
+    // selected joint rows. In that case there is no numerical assembly after CC.
+    if (constraint_params.select.w == 0u) status |= ConstraintNotReady;
+    cs_store(constraint_params.layout.x,uint4(0u,0u,0u,status));
     cs_store(constraint_params.layout.x+1u,uint4(0u));
 }
 

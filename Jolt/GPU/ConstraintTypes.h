@@ -57,7 +57,7 @@ struct CS_ALIGN ConstraintParams
     CS_U4 scan;         // input base, exclusive-prefix base, block-total base, input length.
     CS_U4 scanParent;   // scanned parent-prefix base, combine mode (0 or 1), 0, 0.
     CS_U4 merge;        // source bank, target bank, length (J or P), run width power-of-two<=2^31.
-    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, 0, 0.
+    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, ready empty schedule.
     CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, CC-check total word.
     CS_U4 round;        // round body-check total word; yzw zero padding.
     // One accepted layout address, never a stable RuntimeWorld identity.
