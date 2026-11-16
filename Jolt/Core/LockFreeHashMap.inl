@@ -12,73 +12,78 @@ JPH_NAMESPACE_BEGIN
 
 inline LFHMAllocator::~LFHMAllocator()
 {
-#if JPH_DEFAULT_ALLOCATE_ALIGNMENT < 16
-	AlignedFree(mObjectStore);
-#else
-	Free(mObjectStore);
-#endif
+	for (uint32 page = 0; page < mNumPages; ++page)
+		if (uint8 *data = mPages[page].load(memory_order_relaxed))
+			AlignedFree(data);
+	delete [] mPages;
 }
 
-inline void LFHMAllocator::Init(uint inObjectStoreSizeBytes)
+inline void LFHMAllocator::Init(uint inObjectStoreSizeBytes, uint inMaxEntrySizeBytes)
 {
-	JPH_ASSERT(mObjectStore == nullptr);
-
+	JPH_ASSERT(mPages == nullptr);
+	JPH_ASSERT(inMaxEntrySizeBytes > 0 && inMaxEntrySizeBytes <= cPageSize);
 	mObjectStoreSizeBytes = inObjectStoreSizeBytes;
-#if JPH_DEFAULT_ALLOCATE_ALIGNMENT < 16
-	mObjectStore = reinterpret_cast<uint8 *>(JPH::AlignedAllocate(inObjectStoreSizeBytes, 16));
-#else
-	mObjectStore = reinterpret_cast<uint8 *>(JPH::Allocate(inObjectStoreSizeBytes));
-#endif
+	mMaxEntrySizeBytes = inMaxEntrySizeBytes;
+	mNumPages = uint32((uint64(inObjectStoreSizeBytes) + cPageSize - 1) / cPageSize);
+	mPages = new atomic<uint8 *> [mNumPages];
+	for (uint32 page = 0; page < mNumPages; ++page)
+		mPages[page].store(nullptr, memory_order_relaxed);
 }
 
 inline void LFHMAllocator::Clear()
 {
-	mWriteOffset = 0;
+	mWriteOffset.store(0, memory_order_relaxed);
 }
 
 inline void LFHMAllocator::Allocate(uint32 inBlockSize, uint32 &ioBegin, uint32 &ioEnd)
 {
-	// If we're already beyond the end of our buffer then don't do an atomic add.
-	// It's possible that many keys are inserted after the allocator is full, making it possible
-	// for mWriteOffset (uint32) to wrap around to zero. When this happens, there will be a memory corruption.
-	// This way, we will be able to progress the write offset beyond the size of the buffer
-	// worst case by max <CPU count> * inBlockSize.
 	if (mWriteOffset.load(memory_order_relaxed) >= mObjectStoreSizeBytes)
 		return;
 
-	// Atomically fetch a block from the pool
-	uint32 begin = mWriteOffset.fetch_add(inBlockSize, memory_order_relaxed);
-	uint32 end = min(begin + inBlockSize, mObjectStoreSizeBytes);
-
-	if (ioEnd == begin)
-	{
-		// Block is allocated straight after our previous block
-		begin = ioBegin;
-	}
-	else
-	{
-		// Block is a new block
-		begin = min(begin, mObjectStoreSizeBytes);
-	}
-
-	// Store the begin and end of the resulting block
-	ioBegin = begin;
-	ioEnd = end;
+	// Preserve the existing context block layout and contiguous block merging.
+	uint64 begin = mWriteOffset.fetch_add(inBlockSize, memory_order_relaxed);
+	if (ioEnd != begin)
+		ioBegin = uint32(min(begin, uint64(mObjectStoreSizeBytes)));
+	ioEnd = uint32(min(begin + inBlockSize, uint64(mObjectStoreSizeBytes)));
 }
 
-template <class T>
-inline uint32 LFHMAllocator::ToOffset(const T *inData) const
+inline uint8 *LFHMAllocator::AllocateEntry(uint32 inOffset, uint32 inSize)
 {
-	const uint8 *data = reinterpret_cast<const uint8 *>(inData);
-	JPH_ASSERT(data >= mObjectStore && data < mObjectStore + mObjectStoreSizeBytes);
-	return uint32(data - mObjectStore);
+	JPH_ASSERT(inOffset < mObjectStoreSizeBytes && inSize <= mObjectStoreSizeBytes - inOffset);
+	if (inSize > mMaxEntrySizeBytes)
+		return nullptr;
+
+	uint32 page_index = inOffset / cPageSize;
+	atomic<uint8 *> &slot = mPages[page_index];
+	uint8 *page = slot.load(memory_order_acquire);
+	if (page == nullptr)
+	{
+		lock_guard lock(mPageMutex);
+		page = slot.load(memory_order_relaxed);
+		if (page == nullptr)
+		{
+			uint32 page_begin = page_index * cPageSize;
+			uint32 data_size = min(cPageSize, mObjectStoreSizeBytes - page_begin);
+			// An entry belongs to the page containing its first byte. The
+			// physical suffix makes the entire entry contiguous even at a page
+			// boundary, without charging padding to the logical byte budget.
+			uint32 overflow = min(mMaxEntrySizeBytes - 1, mObjectStoreSizeBytes - page_begin - data_size);
+			page = reinterpret_cast<uint8 *>(AlignedAllocate(data_size + overflow, 16));
+			if (page == nullptr)
+				return nullptr;
+			slot.store(page, memory_order_release);
+		}
+	}
+	return page + (inOffset & (cPageSize - 1));
 }
 
 template <class T>
 inline T *LFHMAllocator::FromOffset(uint32 inOffset) const
 {
 	JPH_ASSERT(inOffset < mObjectStoreSizeBytes);
-	return reinterpret_cast<T *>(mObjectStore + inOffset);
+	uint8 *page = mPages[inOffset / cPageSize].load(memory_order_acquire);
+	JPH_ASSERT(page != nullptr);
+	return reinterpret_cast<T *>(page + (inOffset & (cPageSize - 1)));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////
@@ -94,7 +99,7 @@ inline LFHMAllocatorContext::LFHMAllocatorContext(LFHMAllocator &inAllocator, ui
 inline bool LFHMAllocatorContext::Allocate(uint32 inSize, uint32 inAlignment, uint32 &outWriteOffset)
 {
 	// Calculate needed bytes for alignment
-	JPH_ASSERT(IsPowerOf2(inAlignment));
+	JPH_ASSERT(inAlignment <= 16 && IsPowerOf2(inAlignment));
 	uint32 alignment_mask = inAlignment - 1;
 	uint32 alignment = (inAlignment - (mBegin & alignment_mask)) & alignment_mask;
 
@@ -184,7 +189,7 @@ void LockFreeHashMap<Key, Value>::SetNumBuckets(uint32 inNumBuckets)
 
 template <class Key, class Value>
 template <class... Params>
-inline typename LockFreeHashMap<Key, Value>::KeyValue *LockFreeHashMap<Key, Value>::Create(LFHMAllocatorContext &ioContext, const Key &inKey, uint64 inKeyHash, int inExtraBytes, Params &&... inConstructorParams)
+inline typename LockFreeHashMap<Key, Value>::KeyValue *LockFreeHashMap<Key, Value>::Create(LFHMAllocatorContext &ioContext, const Key &inKey, uint64 inKeyHash, int inExtraBytes, uint32 *outHandle, Params &&... inConstructorParams)
 {
 	// This is not a multi map, test the key hasn't been inserted yet
 	JPH_ASSERT(Find(inKey, inKeyHash) == nullptr);
@@ -197,13 +202,18 @@ inline typename LockFreeHashMap<Key, Value>::KeyValue *LockFreeHashMap<Key, Valu
 	if (!ioContext.Allocate(size, alignof(KeyValue), write_offset))
 		return nullptr;
 
+	KeyValue *kv = reinterpret_cast<KeyValue *>(mAllocator.AllocateEntry(write_offset, size));
+	if (kv == nullptr)
+		return nullptr;
+	if (outHandle != nullptr)
+		*outHandle = write_offset;
+
 #ifdef JPH_ENABLE_ASSERTS
 	// Increment amount of entries in map
 	mNumKeyValues.fetch_add(1, memory_order_relaxed);
 #endif // JPH_ENABLE_ASSERTS
 
 	// Construct the key/value pair
-	KeyValue *kv = mAllocator.template FromOffset<KeyValue>(write_offset);
 	JPH_ASSERT(intptr_t(kv) % alignof(KeyValue) == 0);
 #ifdef JPH_DEBUG
 	memset(kv, 0xcd, size);
@@ -242,12 +252,6 @@ inline const typename LockFreeHashMap<Key, Value>::KeyValue *LockFreeHashMap<Key
 
 	// Not found
 	return nullptr;
-}
-
-template <class Key, class Value>
-inline uint32 LockFreeHashMap<Key, Value>::ToHandle(const KeyValue *inKeyValue) const
-{
-	return mAllocator.ToOffset(inKeyValue);
 }
 
 template <class Key, class Value>

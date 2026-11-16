@@ -28,6 +28,14 @@ JPH_NAMESPACE_BEGIN
 struct PhysicsSettings;
 class PhysicsUpdateContext;
 
+template <class Constraint, class Point>
+constexpr uint32 ContactConstraintStorageSize(uint32 inNumContactPoints)
+{
+	constexpr size_t alignment = alignof(Constraint);
+	const size_t bytes = sizeof(Constraint) + (inNumContactPoints - 1) * sizeof(Point);
+	return uint32((bytes + alignment - 1) & ~(alignment - 1));
+}
+
 /// A contact constraint manager manages all contacts between two bodies
 ///
 /// WARNING: This class is an internal part of PhysicsSystem, it has no functions that can be called by users of the library.
@@ -400,9 +408,8 @@ private:
 
 		/// Find / create cached entry for SubShapeIDPair -> CachedManifold
 		const MKeyValue *		Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const;
-		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
+		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints, uint32 *outHandle = nullptr);
 		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
-		uint32					ToHandle(const MKeyValue *inKeyValue) const;
 		const MKeyValue *		FromHandle(uint32 inHandle) const { return mCachedManifolds.FromHandle(inHandle); }
 		MKeyValue *				FromHandle(uint32 inHandle) { return mCachedManifolds.FromHandle(inHandle); }
 
@@ -528,7 +535,7 @@ private:
 
 public:
 	/// Maximum size a single constraint can take
-	static constexpr uint32		cMaxConstraintSize = sizeof(ContactConstraint<EMotionType::Dynamic, EMotionType::Dynamic>) + (MaxContactPoints - 1) * sizeof(WorldContactPoint<EMotionType::Dynamic, EMotionType::Dynamic>);
+	static constexpr uint32		cMaxConstraintSize = ContactConstraintStorageSize<ContactConstraint<EMotionType::Dynamic, EMotionType::Dynamic>, WorldContactPoint<EMotionType::Dynamic, EMotionType::Dynamic>>(MaxContactPoints);
 
 	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!
 	static constexpr uint		cMaxContactConstraintsLimit = ~uint(0) / cMaxConstraintSize;

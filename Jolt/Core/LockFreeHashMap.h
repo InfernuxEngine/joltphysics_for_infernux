@@ -6,6 +6,7 @@
 
 #include <Jolt/Core/NonCopyable.h>
 #include <Jolt/Core/Atomics.h>
+#include <Jolt/Core/Mutex.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -17,8 +18,9 @@ public:
 	inline					~LFHMAllocator();
 
 	/// Initialize the allocator
-	/// @param inObjectStoreSizeBytes Number of bytes to reserve for all key value pairs
-	inline void				Init(uint inObjectStoreSizeBytes);
+	/// @param inObjectStoreSizeBytes Logical capacity for all key value pairs
+	/// @param inMaxEntrySizeBytes Largest single key value pair, including any trailing data
+	inline void				Init(uint inObjectStoreSizeBytes, uint inMaxEntrySizeBytes);
 
 	/// Clear all allocations
 	inline void				Clear();
@@ -29,18 +31,21 @@ public:
 	/// @param ioEnd Should be the byte beyond the current memory block on input, will contain the byte beyond the allocated block on return.
 	inline void				Allocate(uint32 inBlockSize, uint32 &ioBegin, uint32 &ioEnd);
 
-	/// Convert a pointer to an offset
-	template <class T>
-	inline uint32			ToOffset(const T *inData) const;
+	/// Resolve a freshly reserved offset, allocating the physical page on first write.
+	inline uint8 *			AllocateEntry(uint32 inOffset, uint32 inSize);
 
-	/// Convert an offset to a pointer
+	/// Convert an offset published by a map to a pointer.
 	template <class T>
 	inline T *				FromOffset(uint32 inOffset) const;
 
 private:
-	uint8 *					mObjectStore = nullptr;			///< This contains a contiguous list of objects (possibly of varying size)
-	uint32					mObjectStoreSizeBytes = 0;		///< The size of mObjectStore in bytes
-	atomic<uint32>			mWriteOffset { 0 };				///< Next offset to write to in mObjectStore
+	static constexpr uint32	cPageSize = 32 * 1024;
+	atomic<uint8 *> *		mPages = nullptr;
+	uint32					mNumPages = 0;
+	uint32					mObjectStoreSizeBytes = 0;
+	uint32					mMaxEntrySizeBytes = 0;
+	alignas(JPH_CACHE_LINE_SIZE) Mutex mPageMutex;
+	atomic<uint64>			mWriteOffset { 0 };		///< Widen the reservation counter so even a final partial block cannot wrap
 };
 
 /// Allocator context object for a lock free hash map that allocates a larger memory block at once and hands it out in smaller portions.
@@ -107,23 +112,21 @@ public:
 		template <class K, class V> friend class LockFreeHashMap;
 
 		Key					mKey;							///< Key for this entry
-		uint32				mNextOffset;					///< Offset in mObjectStore of next KeyValue entry with same hash
+		uint32				mNextOffset;					///< Logical offset of next KeyValue entry with same hash
 		Value				mValue;							///< Value for this entry + optionally extra bytes
 	};
 
 	/// Insert a new element, returns null if map full.
 	/// Multiple threads can be inserting in the map at the same time.
+	/// If outHandle is supplied, the logical offset is returned there on success.
 	template <class... Params>
-	inline KeyValue *		Create(LFHMAllocatorContext &ioContext, const Key &inKey, uint64 inKeyHash, int inExtraBytes, Params &&... inConstructorParams);
+	inline KeyValue *		Create(LFHMAllocatorContext &ioContext, const Key &inKey, uint64 inKeyHash, int inExtraBytes, uint32 *outHandle, Params &&... inConstructorParams);
 
 	/// Find an element, returns null if not found
 	inline const KeyValue *	Find(const Key &inKey, uint64 inKeyHash) const;
 
 	/// Value of an invalid handle
 	const static uint32		cInvalidHandle = uint32(-1);
-
-	/// Get convert key value pair to uint32 handle
-	inline uint32			ToHandle(const KeyValue *inKeyValue) const;
 
 	/// Convert uint32 handle back to key and value
 	inline const KeyValue *	FromHandle(uint32 inHandle) const;
@@ -175,7 +178,7 @@ private:
 	atomic<uint32>			mNumKeyValues = 0;				///< Number of key value pairs in the store
 #endif // JPH_ENABLE_ASSERTS
 
-	atomic<uint32> *		mBuckets = nullptr;				///< This contains the offset in mObjectStore of the first object with a particular hash
+	atomic<uint32> *		mBuckets = nullptr;				///< This contains the logical offset of the first object with a particular hash
 	uint32					mNumBuckets = 0;				///< Current number of buckets
 	uint32					mMaxBuckets = 0;				///< Maximum number of buckets
 };
