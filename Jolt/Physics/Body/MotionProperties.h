@@ -98,6 +98,10 @@ public:
 	inline float			GetGravityFactor() const										{ return mGravityFactor; }
 	void					SetGravityFactor(float inGravityFactor)							{ mGravityFactor = inGravityFactor; }
 
+	/// Set the allowed degrees of freedom for prescribed motion with zero inverse mass and inertia.
+	/// Install valid mass properties before switching the body to dynamic motion.
+	void					SetKinematicDOFs(EAllowedDOFs inAllowedDOFs);
+
 	/// Set the mass and inertia tensor
 	void					SetMassProperties(EAllowedDOFs inAllowedDOFs, const MassProperties &inMassProperties);
 
@@ -147,6 +151,14 @@ public:
 
 	// Get the total amount of torque applied to the center of mass this time step (through Body::AddForce/Body::AddTorque calls). Note that it will reset to zero after PhysicsSystem::Update.
 	JPH_INLINE Vec3			GetAccumulatedTorque() const									{ return Vec3::sLoadFloat3Unsafe(mTorque); }
+
+	/// Preserve pending loads when replacing the motion representation between updates.
+	/// These loads still expire at the end of the next PhysicsSystem::Update.
+	JPH_INLINE void			SetAccumulatedForceAndTorque(Vec3Arg inForce, Vec3Arg inTorque)
+	{
+		inForce.StoreFloat3(&mForce);
+		inTorque.StoreFloat3(&mTorque);
+	}
 
 	// Reset the total accumulated force, note that this will be done automatically after every time step.
 	JPH_INLINE void			ResetForce()													{ mForce = Float3(0, 0, 0); }

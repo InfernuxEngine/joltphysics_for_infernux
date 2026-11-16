@@ -9,6 +9,14 @@
 
 JPH_NAMESPACE_BEGIN
 
+void MotionProperties::SetKinematicDOFs(EAllowedDOFs inAllowedDOFs)
+{
+	mAllowedDOFs = inAllowedDOFs;
+	mInvMass = 0.0f;
+	mInvInertiaDiagonal = Vec3::sZero();
+	mInertiaRotation = Quat::sIdentity();
+}
+
 void MotionProperties::SetMassProperties(EAllowedDOFs inAllowedDOFs, const MassProperties &inMassProperties)
 {
 	// Store allowed DOFs

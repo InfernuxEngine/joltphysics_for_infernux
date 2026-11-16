@@ -359,6 +359,13 @@ BodyCreationSettings Body::GetBodyCreationSettings() const
 	result.mGravityFactor = mMotionProperties != nullptr? mMotionProperties->GetGravityFactor() : 1.0f;
 	result.mNumVelocityStepsOverride = mMotionProperties != nullptr? mMotionProperties->GetNumVelocityStepsOverride() : 0;
 	result.mNumPositionStepsOverride = mMotionProperties != nullptr? mMotionProperties->GetNumPositionStepsOverride() : 0;
+	result.SetShape(GetShape());
+
+	// Preserve automatic mass initialization for kinematic shapes without mass properties.
+	if (IsKinematic() && (mShape->MustBeStatic() || result.mAllowedDOFs == EAllowedDOFs::None) && mMotionProperties->mInvMass == 0.0f
+		&& mMotionProperties->mInvInertiaDiagonal == Vec3::sZero())
+		return result;
+
 	result.mOverrideMassProperties = EOverrideMassProperties::MassAndInertiaProvided;
 
 	// Invert inertia and mass
@@ -390,8 +397,6 @@ BodyCreationSettings Body::GetBodyCreationSettings() const
 		result.mMassPropertiesOverride.mInertia = Mat44::sScale(Vec3::sReplicate(FLT_MAX));
 	}
 
-	result.SetShape(GetShape());
-
 	return result;
 }
 
@@ -420,7 +425,12 @@ void Body::ApplyBodyCreationSettings(const BodyCreationSettings &inBodyCreationS
 		mp->SetAngularDamping(inBodyCreationSettings.mAngularDamping);
 		mp->SetMaxLinearVelocity(inBodyCreationSettings.mMaxLinearVelocity);
 		mp->SetMaxAngularVelocity(inBodyCreationSettings.mMaxAngularVelocity);
-		mp->SetMassProperties(inBodyCreationSettings.mAllowedDOFs, inBodyCreationSettings.GetMassProperties());
+		if (IsKinematic() && (inBodyCreationSettings.mAllowedDOFs == EAllowedDOFs::None
+			|| (mShape->MustBeStatic()
+				&& inBodyCreationSettings.mOverrideMassProperties == EOverrideMassProperties::CalculateMassAndInertia)))
+			mp->SetKinematicDOFs(inBodyCreationSettings.mAllowedDOFs);
+		else
+			mp->SetMassProperties(inBodyCreationSettings.mAllowedDOFs, inBodyCreationSettings.GetMassProperties());
 		mp->SetLinearVelocity(inBodyCreationSettings.mLinearVelocity); // Needs to happen after setting the max linear/angular velocity and setting allowed DOFs
 		mp->SetAngularVelocity(inBodyCreationSettings.mAngularVelocity);
 		mp->SetGravityFactor(inBodyCreationSettings.mGravityFactor);
