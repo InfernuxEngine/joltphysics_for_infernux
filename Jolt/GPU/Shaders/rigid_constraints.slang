@@ -19,6 +19,7 @@ StructuredBuffer<BodySleepRecord> body_sleep;
 RWStructuredBuffer<Atomic<uint>> labels_old;
 RWStructuredBuffer<Atomic<uint>> labels_next;
 RWStructuredBuffer<ConstraintScheduleWord> constraint_schedule;
+RWStructuredBuffer<ConstraintScheduleWord> topology_arguments;
 
 uint4 cs_load(uint p) { return constraint_schedule[p].value; }
 void cs_store(uint p, uint4 v) { constraint_schedule[p].value = v; }
@@ -313,24 +314,44 @@ void constraint_check_round(uint3 tid : SV_DispatchThreadID)
     cs_store(constraint_params.layout.z + v, uint4(old != next ? 1u : 0u, 0u, 0u, status));
 }
 
-// Host uses hierarchical mode0 reduction on all B round-check rows, then this
-// 1-lane commit; only after completion may it swap label Old/Next bindings.
-[shader("compute")][numthreads(1, 1, 1)]
-void constraint_commit_round(uint3 tid : SV_DispatchThreadID)
+// The same CC commit is used at ordinary and topology-tail boundaries.
+uint4 cs_round_control()
 {
-    if (tid.x != 0u) return;
     uint4 prev = cs_load(constraint_params.layout.y);
     uint4 check = cs_load(constraint_params.round.x);
     if (prev.x == 0u)
-    {
-        cs_store(constraint_params.layout.y, uint4(0u, prev.y, prev.z | check.w, 0u));
-        return;
-    }
+        return uint4(0u, prev.y, prev.z | check.w, 0u);
     uint completed = prev.y + 1u;
     uint status = prev.z | check.w;
     if (prev.y == ConstraintInvalid || completed > constraint_params.counts.x
         || (completed == constraint_params.counts.x && check.x != 0u)) status |= ConstraintNotConverged;
-    cs_store(constraint_params.layout.y, uint4(check.x, completed, status, 0u));
+    return uint4(check.x, completed, status, 0u);
+}
+
+[shader("compute")][numthreads(1, 1, 1)]
+void constraint_commit_round(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    cs_store(constraint_params.layout.y, cs_round_control());
+}
+
+[shader("compute")][numthreads(1, 1, 1)]
+void constraint_commit_round_and_gate_topology(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    uint4 control = cs_round_control();
+    cs_store(constraint_params.layout.y, control);
+    // (previous scheduled rounds, tail records, proposed scheduled rounds, 0).
+    // Records arrive disabled, with the host-validated X bound in padding.
+    bool ready = control.x == 0u && control.z == 0u && control.w == 0u
+        && control.y > stage_work.range.x && control.y <= stage_work.range.z
+        && stage_work.range.z <= constraint_params.counts.x;
+    const uint max_topology_arguments = 15u;
+    for (uint i = 0u; i < min(stage_work.range.y, max_topology_arguments); ++i)
+    {
+        uint groups = topology_arguments[i].value.w;
+        topology_arguments[i].value = uint4(ready ? groups : 0u, 1u, 1u, 0u);
+    }
 }
 
 // Independent post-convergence verification reads the SWAPPED final Old.
