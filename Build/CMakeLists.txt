@@ -2,9 +2,8 @@ cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
 project(JoltPhysics VERSION 5.6.0 LANGUAGES CXX)
 
-# The engine owns GPU devices, compilation and scheduling. This target supplies
-# geometry, cooking and authored mass data; it does not embed a CPU world.
-option(JPH_GPU_RUNTIME "Build authoring support for the Slang GPU runtime" ON)
+# The engine owns Slang GPU devices, compilation and scheduling. This library
+# supplies shared geometry plus the native CPU solver; both paths may coexist.
 
 # When turning this option on, the library will be compiled using assertions. By default asserts are enabled in Debug build.
 option(USE_ASSERTS "Enable asserts" OFF)
@@ -370,18 +369,11 @@ endif()
 # Check if we're the root CMakeLists.txt, if not we are included by another CMake file and we should disable everything except for the main library
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 	# Ability to turn ON/OFF individual applications
-	set(JPH_CPU_APPLICATIONS_DEFAULT ON)
-	if(JPH_GPU_RUNTIME)
-		set(JPH_CPU_APPLICATIONS_DEFAULT OFF)
-	endif()
-	option(TARGET_UNIT_TESTS "Build Unit Tests" ${JPH_CPU_APPLICATIONS_DEFAULT})
-	option(TARGET_HELLO_WORLD "Build Hello World" ${JPH_CPU_APPLICATIONS_DEFAULT})
-	option(TARGET_PERFORMANCE_TEST "Build Performance Test" ${JPH_CPU_APPLICATIONS_DEFAULT})
-	option(TARGET_SAMPLES "Build Samples" ${JPH_CPU_APPLICATIONS_DEFAULT})
-	option(TARGET_VIEWER "Build JoltViewer" ${JPH_CPU_APPLICATIONS_DEFAULT})
-	if(JPH_GPU_RUNTIME AND (TARGET_UNIT_TESTS OR TARGET_HELLO_WORLD OR TARGET_PERFORMANCE_TEST OR TARGET_SAMPLES OR TARGET_VIEWER))
-		message(FATAL_ERROR "CPU reference applications require -DJPH_GPU_RUNTIME=OFF")
-	endif()
+	option(TARGET_UNIT_TESTS "Build Unit Tests" ON)
+	option(TARGET_HELLO_WORLD "Build Hello World" ON)
+	option(TARGET_PERFORMANCE_TEST "Build Performance Test" ON)
+	option(TARGET_SAMPLES "Build Samples" ON)
+	option(TARGET_VIEWER "Build JoltViewer" ON)
 
 	if (TARGET_UNIT_TESTS)
 		# Create UnitTests executable
