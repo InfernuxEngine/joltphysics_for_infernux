@@ -95,6 +95,12 @@ public:
 	/// The collision result (inCollisionResult) is reported relative to inBaseOffset.
 	virtual ValidateResult	OnContactValidate([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] RVec3Arg inBaseOffset, [[maybe_unused]] const CollideShapeResult &inCollisionResult) { return ValidateResult::AcceptAllContactsForThisBodyPair; }
 
+	/// Validate a continuous sweep before it limits the body's travel. Per-subshape
+	/// sensors must be rejected here: changing the selected closest contact to a
+	/// sensor in OnContactAdded cannot recover a solid contact behind it. CCD does
+	/// not generate sensor overlaps; those remain part of discrete detection.
+	virtual ValidateResult	OnCCDContactValidate(const Body &inBody1, const Body &inBody2, RVec3Arg inBaseOffset, const CollideShapeResult &inCollisionResult) { return OnContactValidate(inBody1, inBody2, inBaseOffset, inCollisionResult); }
+
 	/// Called whenever a new contact point is detected.
 	///
 	/// Note that this callback is called when all bodies are locked, so don't use any locking functions! See detailed class description of ContactListener.

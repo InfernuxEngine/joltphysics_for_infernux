@@ -120,8 +120,8 @@ void MotionProperties::ApplyGyroscopicForceInternal(QuatArg inBodyRotation, floa
 	float new_local_momentum_len_sq = new_local_momentum.LengthSq();
 	new_local_momentum = new_local_momentum_len_sq > 0.0f? new_local_momentum * Sqrt(local_momentum.LengthSq() / new_local_momentum_len_sq) : Vec3::sZero();
 
-	// Convert back to world space angular velocity
-	mAngularVelocity = inertia_space_to_world_space * (mInvInertiaDiagonal * new_local_momentum);
+	// Convert to world space and preserve the locked rotation axes.
+	mAngularVelocity = LockAngular(inertia_space_to_world_space * (mInvInertiaDiagonal * new_local_momentum));
 }
 
 void MotionProperties::ApplyForceTorqueAndDragInternal(QuatArg inBodyRotation, Vec3Arg inGravity, float inDeltaTime)

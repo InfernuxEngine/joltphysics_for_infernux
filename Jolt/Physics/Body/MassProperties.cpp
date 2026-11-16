@@ -25,8 +25,15 @@ bool MassProperties::DecomposePrincipalMomentsOfInertia(Mat44 &outRotation, Vec3
 {
 	// Using eigendecomposition to get the principal components of the inertia tensor
 	// See: https://en.wikipedia.org/wiki/Eigendecomposition_of_a_matrix
+	// Work at unit magnitude so tiny robot links and large bodies follow the
+	// same numerical path. A valid inertia tensor is positive semidefinite.
+	const float magnitude = mInertia.GetDiagonal3().ReduceMax();
+	if (!(magnitude > 0.0f) || !isfinite(magnitude))
+		return false;
 	Matrix<3, 3> inertia;
-	inertia.CopyPart(mInertia, 0, 0, 3, 3, 0, 0);
+	for (uint column = 0; column < 3; ++column)
+		for (uint row = 0; row < 3; ++row)
+			inertia(row, column) = float(double(mInertia(row, column)) / magnitude);
 	Matrix<3, 3> eigen_vec = Matrix<3, 3>::sIdentity();
 	Vector<3> eigen_val;
 	if (!EigenValueSymmetric(inertia, eigen_vec, eigen_val))
@@ -41,7 +48,7 @@ bool MassProperties::DecomposePrincipalMomentsOfInertia(Mat44 &outRotation, Vec3
 	for (int i = 0; i < 3; ++i)
 	{
 		outRotation.SetColumn3(i, Vec3(reinterpret_cast<Float3 &>(eigen_vec.GetColumn(indices[i]))));
-		outDiagonal.SetComponent(i, eigen_val[indices[i]]);
+		outDiagonal.SetComponent(i, eigen_val[indices[i]] * magnitude);
 	}
 
 	// Make sure that the rotation matrix is a right handed matrix
@@ -51,9 +58,13 @@ bool MassProperties::DecomposePrincipalMomentsOfInertia(Mat44 &outRotation, Vec3
 #ifdef JPH_ENABLE_ASSERTS
 	// Validate that the solution is correct, for each axis we want to make sure that the difference in inertia is
 	// smaller than some fraction of the inertia itself in that axis
-	Mat44 new_inertia = outRotation * Mat44::sScale(outDiagonal) * outRotation.Inversed();
+	Vec3 normalized_diagonal(eigen_val[indices[0]], eigen_val[indices[1]], eigen_val[indices[2]]);
+	Mat44 new_inertia = outRotation * Mat44::sScale(normalized_diagonal) * outRotation.Inversed();
 	for (int i = 0; i < 3; ++i)
-		JPH_ASSERT(new_inertia.GetColumn3(i).IsClose(mInertia.GetColumn3(i), mInertia.GetColumn3(i).LengthSq() * 1.0e-10f));
+	{
+		Vec3 column(inertia(0, i), inertia(1, i), inertia(2, i));
+		JPH_ASSERT(new_inertia.GetColumn3(i).IsClose(column, column.LengthSq() * 1.0e-10f));
+	}
 #endif
 
 	return true;
