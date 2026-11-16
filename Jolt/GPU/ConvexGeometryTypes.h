@@ -18,7 +18,9 @@ JPH_CONVEX_CONSTANT(ConvexGeometryHeaderWords, 5);
 
 // Header[0]=(ShapeConvexHull,totalWords,vertexCount,faceCount).
 // Header[1]=(fullVertices,coreVertices,planes,faceDirectory), relative words.
-// Header[2]=(loopIndicesWord,loopIndexCount,0,0); indices are packed uint4.
+// Header[2]=(loopIndicesWord,loopIndexCount,meshRayVertices,0); indices are packed uint4.
+// Mesh triangles append three original mesh-local Float4(xyz,0) vertices at
+// meshRayVertices. Other hulls have a zero offset and no ray vertex region.
 // Header[3/4]=Float4(COM-local full bounds min/max.xyz,0).
 // Full/core points are Float4(xyz,0). Planes use native n.dot(x)+constant=0.
 // Face directory=(first loop INDEX,index count,plane INDEX,0).

@@ -130,13 +130,15 @@ struct JPH_GPU_ALIGN ShapeModel
     // Hull: (convex radius,0,0,0); full/core/topology in geometryReference.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;
-    // Primitive center in the body COM frame, xyz; w is zero padding. A collider
-    // center already included in the body's COM must not be added a second time.
+    // Primitive center in the body COM frame, xyz. A collider center already
+    // included in the body's COM must not be added a second time.
+    // For mesh triangles, w carries the common mesh ray origin X in body COM
+    // space. Its YZ are in material.zw. Other shapes have zero padding here.
     JPH_GPU_FLOAT4 localPositionCOM;
     // Primitive frame relative to the body frame, normalized quaternion xyzw.
     // This does not rotate the body's principal inertia frame.
     JPH_GPU_FLOAT4 localRotation;
-    // Friction, restitution, then two zero padding values.
+    // Friction and restitution in xy. Mesh triangle ray origin YZ in zw, zero otherwise.
     JPH_GPU_FLOAT4 material;
     // Layer index [0, 31], collision mask, friction combine, bounce combine.
     // Both masks must admit the opposite leaf's layer for a pair to collide.

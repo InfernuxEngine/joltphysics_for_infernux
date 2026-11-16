@@ -173,6 +173,62 @@ QueryHit cvx_query_ray_hit(QueryInput request,uint leaf,CvxOperand target,float 
     hit.normalFraction=float4(worldNormal,request.positionMaximum.w>0?distance/request.positionMaximum.w:0);
     hit.pointADepth=float4(hit.positionDistance.xyz,0); return hit;
 }
+float2 cvx_query_triangle_project(float3 point,uint x,uint y,uint z,float2 shear)
+{
+    precise float2 projected=float2(point[x],point[y])-shear*point[z];
+    return projected;
+}
+float cvx_query_triangle_edge(float2 a,float2 b)
+{
+    // Evaluate opposite windings in the same operand order, even on targets
+    // that contract multiply-subtract, then restore the directed edge sign.
+    bool reversed=b.x<a.x || (b.x==a.x && b.y<a.y);
+    float2 lo=reversed?b:a,hi=reversed?a:b;
+    precise float edge=lo.x*hi.y-lo.y*hi.x;
+    return reversed?-edge:edge;
+}
+void cvx_query_triangle_ray(uint b,QueryInput request,uint leaf,CvxOperand target)
+{
+    uint count,first;
+    if(!cvx_hull_header(query_geometry,target,count,first,true)) { cvx_query_failure(b,63u); return; }
+    uint base=target.geometryReference.x;
+    uint vertices=query_geometry[base+2u].z;
+    if(vertices==0u) { cvx_query_failure(b,63u); return; }
+
+    ShapeModel shape=shape_models[leaf];
+    BodyState body=body_states[shape.meta.y-query_params.selection.y];
+    float3 meshOriginCOM=float3(shape.localPositionCOM.w,shape.material.zw);
+    float3 originInBody=jph_inverse_rotate(body.rotation,request.positionMaximum.xyz-body.positionCOM.xyz);
+    float3 origin=jph_inverse_rotate(shape.localRotation,originInBody-meshOriginCOM);
+    float3 directionInBody=jph_inverse_rotate(body.rotation,jph_capsule_unit(request.direction.xyz));
+    float3 direction=jph_inverse_rotate(shape.localRotation,directionInBody);
+    if(!all(isfinite(origin)) || !all(isfinite(direction))) { cvx_query_failure(b,62u); return; }
+
+    // Project along the dominant ray axis. Adjacent leaves use the same ray
+    // frame and project the same bit-identical mesh vertices.
+    float3 d=abs(direction);
+    uint z=d.x>=d.y && d.x>=d.z?0u:(d.y>=d.z?1u:2u);
+    uint x=(z+1u)%3u,y=(z+2u)%3u;
+    if(direction[z]==0.0f) { cvx_query_next_leaf(b); return; }
+    float2 shear=float2(direction[x],direction[y])/direction[z];
+    float3 a=asfloat(query_geometry[base+vertices]).xyz-origin;
+    float3 p=asfloat(query_geometry[base+vertices+1u]).xyz-origin;
+    float3 c=asfloat(query_geometry[base+vertices+2u]).xyz-origin;
+    float2 pa=cvx_query_triangle_project(a,x,y,z,shear);
+    float2 pb=cvx_query_triangle_project(p,x,y,z,shear);
+    float2 pc=cvx_query_triangle_project(c,x,y,z,shear);
+    float3 weights=float3(cvx_query_triangle_edge(pb,pc),cvx_query_triangle_edge(pc,pa),
+                          cvx_query_triangle_edge(pa,pb));
+    if(!all(isfinite(weights))) { cvx_query_failure(b,62u); return; }
+    float area=weights.x+weights.y+weights.z;
+    if(!isfinite(area)) { cvx_query_failure(b,62u); return; }
+    if(area==0.0f || (any(weights<0.0f) && any(weights>0.0f))) { cvx_query_next_leaf(b); return; }
+
+    float distance=dot(weights/area,float3(a[z],p[z],c[z]))/direction[z];
+    if(!isfinite(distance)) { cvx_query_failure(b,62u); return; }
+    if(distance<0.0f || distance>request.positionMaximum.w) { cvx_query_next_leaf(b); return; }
+    cvx_query_collect_begin(b,cvx_query_ray_hit(request,leaf,target,distance,float3(0.0f)));
+}
 void cvx_query_ray_begin(uint b,QueryInput request,uint leaf,CvxOperand target)
 {
     float3 origin=jph_inverse_rotate(target.rotation,request.positionMaximum.xyz-target.center.xyz);
@@ -351,7 +407,8 @@ void cvx_query_visit(uint b,QueryInput request)
         if(shape.meta.x<=ShapeCapsule) {
             uint status; QueryHit hit=query_leaf(request,shape,body_states[slot-query_params.selection.y],leaf,status);
             if(status!=QuerySuccess) { cvx_query_failure(b,66u); return; } cvx_query_collect_begin(b,hit);
-        } else cvx_query_ray_begin(b,request,leaf,target);
+        } else if(cvx_is_triangle(target)) cvx_query_triangle_ray(b,request,leaf,target);
+        else cvx_query_ray_begin(b,request,leaf,target);
         return;
     }
     bool analytic=request.meta.z<=ShapeCapsule && shape.meta.x<=ShapeCapsule;

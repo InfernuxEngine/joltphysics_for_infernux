@@ -126,7 +126,8 @@ bool cvx_hull_header(StructuredBuffer<uint4> g,CvxOperand o,out uint count,out u
     if(r.y<5u || any(r.zw!=uint2(0)) || r.x>words || r.y>words-r.x) return false;
     uint4 h=g[r.x],v=g[r.x+1u],l=g[r.x+2u];
     first=full?v.x:v.y; count=h.z;
-    return h.x==CvxHull && h.y==r.y && count>0u && first>=5u && first<=r.y && count<=r.y-first && all(l.zw==uint2(0));
+    bool rayRange=l.z==0u || (count==3u && h.w==2u && l.z>=5u && l.z<=r.y && r.y-l.z==3u);
+    return h.x==CvxHull && h.y==r.y && count>0u && first>=5u && first<=r.y && count<=r.y-first && l.w==0u && rayRange;
 }
 void cvx_support_begin(RWStructuredBuffer<uint4> s,uint b,float3 direction,uint next)
 {
