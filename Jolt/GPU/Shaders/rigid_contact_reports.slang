@@ -9,7 +9,7 @@ StructuredBuffer<BodyState> body_states;
 StructuredBuffer<KinematicTarget> kinematic_targets;
 StructuredBuffer<uint> contact_report_interest;
 // count, status, then source-patch -> compact row. Entire map initialized once.
-RWStructuredBuffer<uint> contact_report_indices;
+RWStructuredBuffer<Atomic<uint>> contact_report_indices;
 RWStructuredBuffer<QueryRecordWord> contact_report_words;
 
 bool cr_range(uint x, uint first, uint count) { return x >= first && x - first < count; }
@@ -18,7 +18,7 @@ void cr_word(uint row, uint word, uint4 v)
     QueryRecordWord q; q.value = v; contact_report_words[row * 22u + word] = q;
 }
 uint4 cr_read(uint row, uint word) { return contact_report_words[row * 22u + word].value; }
-void cr_bad() { uint previous; InterlockedOr(contact_report_indices[1], 1u, previous); }
+void cr_bad() { contact_report_indices[1].or(1u); }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -28,7 +28,7 @@ void contact_report_initialize(uint3 id : SV_DispatchThreadID)
     if (id.x >= p.range.y) return;
     uint ordinal = p.range.x + id.x;
     if (ordinal >= p.range.z) return;
-    contact_report_indices[2u + ordinal] = 0xffffffffu;
+    contact_report_indices[2u + ordinal].store(0xffffffffu);
     for (uint word = 0u; word < 22u; ++word) cr_word(ordinal, word, uint4(0u));
 }
 
@@ -58,9 +58,9 @@ void contact_report_seed(uint3 id : SV_DispatchThreadID)
         || !cr_range(first.meta.y, p.selection.y, p.selection.z)
         || body_models[first.meta.x].meta.w != p.selection.x
         || body_models[first.meta.y].meta.w != p.selection.x) { cr_bad(); return; }
-    uint row; InterlockedAdd(contact_report_indices[0], 1u, row);
+    uint row = contact_report_indices[0].add(1u);
     if (row >= p.range.z) { cr_bad(); return; }
-    contact_report_indices[2u + ordinal] = row;
+    contact_report_indices[2u + ordinal].store(row);
     cr_word(row, 0u, uint4(patch.leaves.xy, first.meta.xy));
     cr_word(row, 1u, uint4(p.range.w, patch.leaves.z, patch.leaves.w, ordinal));
     BodyModel ma = jph_effective_model(body_models[first.meta.x], kinematic_targets[first.meta.x]);
@@ -88,7 +88,7 @@ void contact_report_finish(uint3 id : SV_DispatchThreadID)
     if (id.x >= p.range.y) return;
     uint ordinal = p.range.x + id.x;
     if (ordinal >= p.range.z) return;
-    uint row = contact_report_indices[2u + ordinal];
+    uint row = contact_report_indices[2u + ordinal].load();
     if (row == 0xffffffffu) return;
     if (row >= p.range.z) { cr_bad(); return; }
     uint4 meta = cr_read(row, 1u);

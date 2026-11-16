@@ -49,21 +49,26 @@ bool cvx_query_backfacing(QueryInput request,CvxOperand target)
     return (request.meta.x==QueryOverlap || request.meta.x==QueryPenetration)
            && cvx_triangle_backfacing(target,request.positionMaximum.xyz);
 }
-float cvx_query_extent(CvxOperand o)
+bool cvx_query_extent(CvxOperand o,out float extent)
 {
+    extent=0;
     if(o.meta.x==ShapeConvexHull) {
         uint count,first;
-        if(!cvx_hull_header(query_geometry,o,count,first,true)) return asfloat(0x7fc00000u);
+        if(!cvx_hull_header(query_geometry,o,count,first,true)) return false;
         float3 lo=asfloat(query_geometry[o.geometryReference.x+3u]).xyz,hi=asfloat(query_geometry[o.geometryReference.x+4u]).xyz;
-        return max(jph_capsule_max_abs(lo),jph_capsule_max_abs(hi));
-    }
-    if(o.meta.x==ShapeCylinder) return max(o.geometry.x,o.geometry.y);
-    if(o.meta.x==ShapeCapsule) return o.geometry.y+o.geometry.w;
-    return max(jph_capsule_max_abs(o.geometry.xyz),o.geometry.w);
+        extent=max(jph_capsule_max_abs(lo),jph_capsule_max_abs(hi));
+    } else if(o.meta.x==ShapeCylinder) extent=max(o.geometry.x,o.geometry.y);
+    else if(o.meta.x==ShapeCapsule) extent=o.geometry.y+o.geometry.w;
+    else extent=max(jph_capsule_max_abs(o.geometry.xyz),o.geometry.w);
+    return true;
 }
-float cvx_query_scale(CvxOperand a,CvxOperand p)
+bool cvx_query_scale(CvxOperand a,CvxOperand p,out float scale)
 {
-    return max(jph_capsule_max_abs(p.center.xyz-a.center.xyz),max(cvx_query_extent(a),cvx_query_extent(p)));
+    scale=0;
+    float extentA,extentP;
+    if(!cvx_query_extent(a,extentA) || !cvx_query_extent(p,extentP)) return false;
+    scale=max(jph_capsule_max_abs(p.center.xyz-a.center.xyz),max(extentA,extentP));
+    return true;
 }
 void cvx_query_finish(uint b,uint status)
 {
@@ -297,7 +302,7 @@ void cvx_query_metric_begin(uint b,QueryInput request,CvxOperand target)
 {
     QueryCastState state=query_load_cast_state(query_control[b+48u].x);
     CvxOperand a=cvx_query_request(request,state.progress.x);
-    float scale=cvx_query_scale(a,target);
+    float scale;if(!cvx_query_scale(a,target,scale)) { cvx_query_failure(b,63u); return; }
     // ClosestPoint and native default ShapeCast use full geometry. Collision
     // and penetration retain native core+margin -> full EPA. Existing six
     // analytic query pairs keep their already shipped law in query_leaf/CA.

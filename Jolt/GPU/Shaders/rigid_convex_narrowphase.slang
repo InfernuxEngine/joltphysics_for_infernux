@@ -22,23 +22,28 @@ CvxOperand cvx_step_operand(ShapeModel shape,BodyState state)
     o.rotation=jph_quat_mul(state.rotation,shape.localRotation); o.geometry=shape.geometry;
     o.geometryReference=shape.geometryReference; return o;
 }
-float cvx_operand_extent(StructuredBuffer<uint4> g,CvxOperand o)
+bool cvx_operand_extent(StructuredBuffer<uint4> g,CvxOperand o,out float extent)
 {
+    extent=0;
     if(o.meta.x==CvxHull) {
         uint count,first;
-        if(!cvx_hull_header(g,o,count,first,true)) return asfloat(0x7fc00000u);
+        if(!cvx_hull_header(g,o,count,first,true)) return false;
         float3 low=asfloat(g[o.geometryReference.x+3u]).xyz,high=asfloat(g[o.geometryReference.x+4u]).xyz;
-        float3 v=max(abs(low),abs(high)); return max(v.x,max(v.y,v.z));
-    }
-    if(o.meta.x==CvxCylinder) return max(o.geometry.x,o.geometry.y);
-    if(o.meta.x==CvxCapsule) return o.geometry.y+o.geometry.w;
-    if(o.meta.x==CvxBox) return max(o.geometry.x,max(o.geometry.y,o.geometry.z));
-    return o.geometry.w;
+        float3 v=max(abs(low),abs(high)); extent=max(v.x,max(v.y,v.z));
+    } else if(o.meta.x==CvxCylinder) extent=max(o.geometry.x,o.geometry.y);
+    else if(o.meta.x==CvxCapsule) extent=o.geometry.y+o.geometry.w;
+    else if(o.meta.x==CvxBox) extent=max(o.geometry.x,max(o.geometry.y,o.geometry.z));
+    else extent=o.geometry.w;
+    return true;
 }
-float cvx_pair_scale(StructuredBuffer<uint4> g,CvxOperand a,CvxOperand p)
+bool cvx_pair_scale(StructuredBuffer<uint4> g,CvxOperand a,CvxOperand p,out float scale)
 {
+    scale=0;
+    float extentA,extentP;
+    if(!cvx_operand_extent(g,a,extentA) || !cvx_operand_extent(g,p,extentP)) return false;
     float3 d=abs(p.center.xyz-a.center.xyz);
-    return max(max(d.x,max(d.y,d.z)),max(cvx_operand_extent(g,a),cvx_operand_extent(g,p)));
+    scale=max(max(d.x,max(d.y,d.z)),max(extentA,extentP));
+    return true;
 }
 
 [shader("compute")]
@@ -70,7 +75,8 @@ void cvx_step_start(uint b,uint slots)
     if(cvx_triangle_backfacing(oa,op.center.xyz) || cvx_triangle_backfacing(op,oa.center.xyz)) {
         cvx_step_next(b,slots); return;
     }
-    float scale=cvx_pair_scale(convex_geometry,oa,op);
+    float scale;
+    if(!cvx_pair_scale(convex_geometry,oa,op,scale)) { cvx_fail(convex_scratch,b,7u); convex_scratch[b+48u].w=2u; return; }
     cvx_begin(convex_scratch,b,oa,op,oa.center.xyz,scale,1e-4f,false);
     convex_scratch[b+48u].y=1u;
 }

@@ -510,9 +510,11 @@ void scan_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     uint length = bp_scan_length();
     uint block_count = bp_blocks(length);
     uint block;
-    if (!bp_item(gid.x, block_count, block)) return; // uniform across group.
+    // The active length can come from storage. Mask reads and writes without
+    // using that value to control whether a lane reaches a barrier.
+    bool active_block = bp_item(gid.x, block_count, block);
     uint first = block * BroadphaseBlockSize;
-    bool valid = lane < length - first;
+    bool valid = active_block && lane < length - first;
     uint4 input = uint4(0u);
     if (valid) input = bp_load(broadphase.scan.x + first + lane);
     bp_shared[lane] = input;
@@ -532,7 +534,8 @@ void scan_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
         if (lane != 0u) exclusive = bp_shared[lane - 1u];
         bp_store(broadphase.scan.y + first + lane, exclusive);
     }
-    if (lane == BroadphaseBlockSize - 1u) bp_store(broadphase.scan.z + block, bp_shared[BroadphaseBlockSize - 1u]);
+    if (active_block && lane == BroadphaseBlockSize - 1u)
+        bp_store(broadphase.scan.z + block, bp_shared[BroadphaseBlockSize - 1u]);
 }
 
 [shader("compute")]
@@ -542,9 +545,9 @@ void reduce_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     uint length = bp_scan_length();
     uint block_count = bp_blocks(length);
     uint block;
-    if (!bp_item(gid.x, block_count, block)) return;
+    bool active_block = bp_item(gid.x, block_count, block);
     uint first = block * BroadphaseBlockSize;
-    bool valid = lane < length - first;
+    bool valid = active_block && lane < length - first;
     uint4 input = uint4(0u);
     if (valid) input = bp_load(broadphase.scan.x + first + lane);
     bp_shared[lane] = input;
@@ -554,7 +557,7 @@ void reduce_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
         if (lane < stride) bp_shared[lane] = bp_combine(bp_shared[lane], bp_shared[lane + stride]);
         GroupMemoryBarrierWithGroupSync();
     }
-    if (lane == 0u) bp_store(broadphase.scan.z + block, bp_shared[0u]);
+    if (active_block && lane == 0u) bp_store(broadphase.scan.z + block, bp_shared[0u]);
 }
 
 [shader("compute")]

@@ -197,12 +197,32 @@ void sleep_capture_old_bounds(uint3 tid:SV_DispatchThreadID)
     sleep_aabbs[0]=float4(low,0);sleep_aabbs[1]=float4(high,0);
     sleep_aabbs[2]=pose.positionCOM;sleep_aabbs[3]=pose.rotation;
 }
+
+bool sleep_bounds_target(uint lane,out uint body)
+{
+    if(!sleep_work_item(lane,body) || !sleep_body(body)) return false;
+    return jph_resident(body_models[body]) && jph_dynamic(body_models[body]) && body!=sleep_params.operation.x;
+}
+bool sleep_checked_bounds(uint body,out float3 low,out float3 high)
+{
+    sleep_root_bounds(body,low,high);
+    if(all(isfinite(low)) && all(isfinite(high))) return true;
+    sleep_fail(SleepBadState);return false;
+}
+bool sleep_current_bounds_hit(float3 low,float3 high,out bool hit)
+{
+    hit=false;
+    uint source=sleep_params.operation.x;
+    if(!sleep_body(source)) {sleep_fail(SleepBadRoot);return false;}
+    float3 a,b;if(!sleep_checked_bounds(source,a,b)) return false;
+    hit=!any(low>b) && !any(a>high);
+    return true;
+}
+
 [shader("compute")][numthreads(64,1,1)]
 void sleep_wake_bounds(uint3 tid:SV_DispatchThreadID)
 {
-    uint body;if(!sleep_work_item(tid.x,body) || !sleep_body(body)) return;
-    if(!jph_resident(body_models[body]) || !jph_dynamic(body_models[body])) return;
-    if(body==sleep_params.operation.x) return;
+    uint body;if(!sleep_bounds_target(tid.x,body)) return;
     if((sleep_params.operation.y&4u)!=0u) {
         if(!sleep_body(sleep_params.operation.x)) {sleep_fail(SleepBadRoot);return;}
         BodyState source=body_states[sleep_params.operation.x];
@@ -210,18 +230,24 @@ void sleep_wake_bounds(uint3 tid:SV_DispatchThreadID)
         if(all(source.positionCOM.xyz==sleep_aabbs[2].xyz)
            && (all(source.rotation==oldq) || all(source.rotation==-oldq))) return;
     }
-    float3 low,high;sleep_root_bounds(body,low,high);
-    if(!all(isfinite(low)) || !all(isfinite(high))) {sleep_fail(SleepBadState);return;}
+    float3 low,high;if(!sleep_checked_bounds(body,low,high)) return;
     bool hit=false;
     if((sleep_params.operation.y&1u)!=0u)
         hit=!any(low>sleep_aabbs[1].xyz) && !any(sleep_aabbs[0].xyz>high);
     if((sleep_params.operation.y&2u)!=0u) {
-        float3 a,b;
-        if(!sleep_body(sleep_params.operation.x)) {sleep_fail(SleepBadRoot);return;}
-        sleep_root_bounds(sleep_params.operation.x,a,b);
-        if(!all(isfinite(a)) || !all(isfinite(b))) {sleep_fail(SleepBadState);return;}
-        hit=hit || (!any(low>b) && !any(a>high));
+        bool currentHit;
+        if(!sleep_current_bounds_hit(low,high,currentHit)) return;
+        hit=hit || currentHit;
     }
+    if(hit) sleep_activate(body,true);
+}
+
+[shader("compute")][numthreads(64,1,1)]
+void sleep_wake_new_bounds(uint3 tid:SV_DispatchThreadID)
+{
+    uint body;if(!sleep_bounds_target(tid.x,body)) return;
+    float3 low,high;if(!sleep_checked_bounds(body,low,high)) return;
+    bool hit;if(!sleep_current_bounds_hit(low,high,hit)) return;
     if(hit) sleep_activate(body,true);
 }
 [shader("compute")][numthreads(64,1,1)]
