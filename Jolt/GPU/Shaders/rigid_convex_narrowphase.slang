@@ -17,7 +17,7 @@ uint cvx_step_slots()
 }
 CvxOperand cvx_step_operand(ShapeModel shape,BodyState state)
 {
-    CvxOperand o; o.meta=uint4(shape.meta.x,0,0,0);
+    CvxOperand o; o.meta=uint4(shape.meta.x,shape.meta.w,0,0);
     o.center=float4(state.positionCOM.xyz+jph_rotate(state.rotation,shape.localPositionCOM.xyz),0);
     o.rotation=jph_quat_mul(state.rotation,shape.localRotation); o.geometry=shape.geometry;
     o.geometryReference=shape.geometryReference; return o;
@@ -67,6 +67,9 @@ void cvx_step_start(uint b,uint slots)
     ShapeModel a=shape_models[patch.leaves.x],p=shape_models[patch.leaves.y];
     if(a.meta.x<=ShapeCapsule && p.meta.x<=ShapeCapsule) { cvx_step_next(b,slots); return; }
     CvxOperand oa=cvx_step_operand(a,body_states[a.meta.y]),op=cvx_step_operand(p,body_states[p.meta.y]);
+    if(cvx_triangle_backfacing(oa,op.center.xyz) || cvx_triangle_backfacing(op,oa.center.xyz)) {
+        cvx_step_next(b,slots); return;
+    }
     float scale=cvx_pair_scale(convex_geometry,oa,op);
     cvx_begin(convex_scratch,b,oa,op,oa.center.xyz,scale,1e-4f,false);
     convex_scratch[b+48u].y=1u;
@@ -80,6 +83,16 @@ void cvx_step_metric_complete(uint b,uint slots)
     float band=sensor?0.0f:step_params.contact.x;
     if(cvx_f(convex_scratch,b,7).w>band) { cvx_step_next(b,slots); return; }
     if(sensor) { cvx_manifold_primary(convex_scratch,b); convex_scratch[b+49u]=uint4(0); convex_scratch[b+48u].y=3u; return; }
+    BodyState sa=body_states[a.meta.y],sp=body_states[p.meta.y];
+    CvxOperand oa=cvx_step_operand(a,sa),op=cvx_step_operand(p,sp);
+    float3 normal=cvx_f(convex_scratch,b,7).xyz;
+    if(cvx_is_triangle(oa))
+        normal=-cvx_triangle_fix_normal(convex_geometry,oa,cvx_f(convex_scratch,b,8).xyz,-normal,
+                                         sp.linearVelocity.xyz-sa.linearVelocity.xyz);
+    else if(cvx_is_triangle(op))
+        normal=cvx_triangle_fix_normal(convex_geometry,op,cvx_f(convex_scratch,b,9).xyz,normal,
+                                        sa.linearVelocity.xyz-sp.linearVelocity.xyz);
+    float4 metric=cvx_f(convex_scratch,b,7); metric.xyz=normal; cvx_put(convex_scratch,b,7,metric);
     cvx_manifold_begin(convex_scratch,b,max(band,1e-4f),body_states[a.meta.y].positionCOM.xyz);
     convex_scratch[b+48u].y=2u;
 }

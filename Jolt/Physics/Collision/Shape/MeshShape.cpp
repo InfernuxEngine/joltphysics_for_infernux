@@ -1283,6 +1283,40 @@ Shape::Stats MeshShape::GetStats() const
 	return Stats(sizeof(*this) + mMaterials.size() * sizeof(Ref<PhysicsMaterial>) + mTree.size() * sizeof(uint8), visitor.mNumTriangles);
 }
 
+void MeshShape::GetTriangleData(Array<TriangleData> &outTriangles) const
+{
+	outTriangles.clear();
+	struct Visitor
+	{
+		JPH_INLINE bool		ShouldAbort() const
+		{
+			return false;
+		}
+
+		JPH_INLINE bool		ShouldVisitNode([[maybe_unused]] int inStackTop) const
+		{
+			return true;
+		}
+
+		JPH_INLINE int		VisitNodes(Vec4Arg inBoundsMinX, Vec4Arg inBoundsMinY, Vec4Arg inBoundsMinZ, Vec4Arg inBoundsMaxX, Vec4Arg inBoundsMaxY, Vec4Arg inBoundsMaxZ, UVec4 &ioProperties, [[maybe_unused]] int inStackTop) const
+		{
+			// Same complete traversal as GetStats: include every valid child.
+			UVec4 valid = UVec4::sOr(UVec4::sOr(Vec4::sLess(inBoundsMinX, inBoundsMaxX), Vec4::sLess(inBoundsMinY, inBoundsMaxY)), Vec4::sLess(inBoundsMinZ, inBoundsMaxZ));
+			return CountAndSortTrues(valid, ioProperties);
+		}
+
+		JPH_INLINE void		VisitTriangle(Vec3Arg inV0, Vec3Arg inV1, Vec3Arg inV2, uint8 inActiveEdges, SubShapeID inSubShapeID)
+		{
+			mTriangles.push_back({ inV0, inV1, inV2, inSubShapeID, inActiveEdges });
+		}
+
+		Array<TriangleData> &mTriangles;
+	};
+
+	Visitor visitor { outTriangles };
+	WalkTreePerTriangle(SubShapeIDCreator(), visitor);
+}
+
 uint32 MeshShape::GetTriangleUserData(const SubShapeID &inSubShapeID) const
 {
 	// Decode ID

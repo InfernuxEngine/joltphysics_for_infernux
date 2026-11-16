@@ -18,13 +18,55 @@ static const uint CvxSphere=ShapeSphere, CvxBox=ShapeBox, CvxCapsule=ShapeCapsul
 
 struct CvxOperand
 {
-    uint4 meta;                 // type, reserved0,0,0
+    uint4 meta;                 // type, ShapeModel flags,0,0
     float4 center;              // world xyz; w0
     float4 rotation;            // world xyzw
     float4 geometry;            // Existing primitive law; Cylinder r,h,margin,0; Hull margin,0,0,0
     uint4 geometryReference;    // absolute word offset,length,0,0
 };
 struct CvxWitness { float3 a; float3 b; float3 w; };
+
+bool cvx_is_triangle(CvxOperand o) { return (o.meta.y & ShapeOneSidedTriangle) != 0u; }
+float3 cvx_triangle_normal(CvxOperand o) { return jph_rotate(o.rotation, o.geometry.yzw); }
+bool cvx_triangle_backfacing(CvxOperand triangle, float3 otherCenter)
+{
+    return cvx_is_triangle(triangle) && dot(cvx_triangle_normal(triangle), otherCenter-triangle.center.xyz)<0;
+}
+
+// Native ActiveEdges::FixNormal. The host maps the cooked edge bits to the
+// exact three full-geometry vertices; winding is retained separately. Inputs
+// and the result are world-space, with the penetration normal toward the triangle.
+float3 cvx_triangle_fix_normal(StructuredBuffer<uint4> g, CvxOperand triangle,
+                               float3 point, float3 normal, float3 movement)
+{
+    uint active=(triangle.meta.y>>ShapeTriangleActiveEdgeShift)&7u;
+    if(active==7u) return normal;
+    float3 face=-cvx_triangle_normal(triangle);
+    float normalLength=length(normal);
+    if(dot(movement,normal)<dot(movement,face)*normalLength) return normal;
+    if(active==0u) return face;
+    if(dot(face,normal)>0.999848f*normalLength) return normal;
+    uint first=g[triangle.geometryReference.x+1u].x+triangle.geometryReference.x;
+    float3 a=asfloat(g[first]).xyz,b=asfloat(g[first+1u]).xyz,c=asfloat(g[first+2u]).xyz;
+    float3 p=jph_inverse_rotate(triangle.rotation,point-triangle.center.xyz);
+    float3 e=b-a,f=c-a,q=p-a;
+    // Barycentric ratios are scale invariant. Normalize the edge coordinates
+    // before cross products so small valid cooked triangles retain their area.
+    float scale=max(max(abs(e.x),max(abs(e.y),abs(e.z))),max(abs(f.x),max(abs(f.y),abs(f.z))));
+    e/=scale; f/=scale; q/=scale;
+    float3 area=cross(e,f);
+    float denominator=dot(area,area);
+    float v=dot(cross(q,f),area)/denominator,w=dot(cross(e,q),area)/denominator,u=1-v-w;
+    uint edge;
+    if(u>0.9999f) edge=5u;
+    else if(v>0.9999f) edge=3u;
+    else if(w>0.9999f) edge=6u;
+    else if(u<0.0001f) edge=2u;
+    else if(v<0.0001f) edge=4u;
+    else if(w<0.0001f) edge=1u;
+    else return face;
+    return (active&edge)!=0u?normal:face;
+}
 
 float4 cvx_f(RWStructuredBuffer<uint4> s,uint b,uint i) { return asfloat(s[b+i]); }
 void cvx_put(RWStructuredBuffer<uint4> s,uint b,uint i,float4 v) { s[b+i]=asuint(v); }

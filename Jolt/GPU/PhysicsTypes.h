@@ -40,6 +40,10 @@ JPH_GPU_CONSTANT(ShapeCapsule, 2);
 JPH_GPU_CONSTANT(ShapeCylinder, 3);
 JPH_GPU_CONSTANT(ShapeConvexHull, 4);
 JPH_GPU_CONSTANT(ShapeSensor, 1);
+// Exact cooked mesh triangles share the planar hull support/face representation.
+// The original winding and edge policy remain separate from convex geometry.
+JPH_GPU_CONSTANT(ShapeOneSidedTriangle, 2);
+JPH_GPU_CONSTANT(ShapeTriangleActiveEdgeShift, 2);
 JPH_GPU_CONSTANT(PatchActive, 1);
 JPH_GPU_CONSTANT(PatchSensor, 2);
 JPH_GPU_CONSTANT(PatchOverlapping, 4);
@@ -117,11 +121,12 @@ struct JPH_GPU_ALIGN BodyModel
 
 struct JPH_GPU_ALIGN ShapeModel
 {
-    // Shape type, owning body slot, root SubShapeID prefix, ShapeSensor flags.
+    // Shape type, owning body slot, root SubShapeID prefix, sensor/triangle flags.
     JPH_GPU_UINT4 meta;
     // Sphere: xyz padding, w radius. Box: xyz half extents, w convex radius.
     // Capsule: (0, half cylinder height, 0, radius), with the core along local Y.
     // Cylinder: (radius, half height, convex radius,0), exact local-Y cylinder.
+    // Hull: (convex radius,0,0,0); cooked triangle hulls use yzw for their CCW unit normal.
     // Hull: (convex radius,0,0,0); full/core/topology in geometryReference.
     // Box core = half extents - convex radius. The radius is not discarded.
     JPH_GPU_FLOAT4 geometry;

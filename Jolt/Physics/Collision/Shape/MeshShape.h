@@ -5,6 +5,7 @@
 #pragma once
 
 #include <Jolt/Physics/Collision/Shape/Shape.h>
+#include <Jolt/Physics/Collision/Shape/SubShapeID.h>
 #include <Jolt/Physics/Collision/PhysicsMaterial.h>
 #include <Jolt/Core/ByteBuffer.h>
 #include <Jolt/Geometry/Triangle.h>
@@ -159,6 +160,20 @@ public:
 
 	// See Shape::GetVolume
 	virtual float					GetVolume() const override									{ return 0; }
+
+	/// Immutable cooked triangle values in this MeshShape's local coordinates.
+	/// The ID is the real mesh-local SubShapeID, not an enumeration ordinal.
+	struct TriangleData
+	{
+		Vec3					mV0, mV1, mV2;
+		SubShapeID			mSubShapeID;
+		uint8					mActiveEdges;	///< Bits 0/1/2 refer to edges V0..V1 / V1..V2 / V2..V0.
+	};
+
+	/// Copy all cooked triangles, preserving native CCW winding and active edges.
+	/// Clears outTriangles first (retaining its capacity). This is a cold read;
+	/// it applies no pose/scale and does not modify the mesh or its collision law.
+	void						GetTriangleData(Array<TriangleData> &outTriangles) const;
 
 	// When MeshShape::mPerTriangleUserData is true, this function can be used to retrieve the user data that was stored in the mesh shape.
 	uint32							GetTriangleUserData(const SubShapeID &inSubShapeID) const;
