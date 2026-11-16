@@ -235,6 +235,14 @@ public:
 	// FUNCTIONS BELOW THIS LINE ARE FOR INTERNAL USE ONLY
 	////////////////////////////////////////////////////////////
 
+	/// Project stored velocity onto the current DOFs without applying speed limits.
+	JPH_INLINE void			ProjectVelocitiesToAllowedDOFs()
+	{
+		JPH_ASSERT(BodyAccess::sCheckRights(BodyAccess::sVelocityAccess(), BodyAccess::EAccess::ReadWrite));
+		mLinearVelocity = LockTranslation(mLinearVelocity);
+		mAngularVelocity = LockAngular(mAngularVelocity);
+	}
+
 	///@name Update linear and angular velocity (used during constraint solving)
 	///@{
 	inline void				ApplyLinearVelocityStep(Vec3Arg inLinearVelocity)
