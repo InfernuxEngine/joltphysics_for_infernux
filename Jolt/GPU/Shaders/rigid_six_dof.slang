@@ -97,13 +97,13 @@ float jph_six_direction_support(BodyModel m, BodyState s, float3 arm, float3 axi
     float armScale = max(abs(arm.x), max(abs(arm.y), abs(arm.z)));
     if (point && armScale != 0.0f)
         arm /= armScale;
-    float4 principal = jph_quat_mul(s.rotation, m.inertiaRotation);
+    // Mobility rank follows world DOFs, not inertia eigenvectors.
     float support = 0.0f;
     for (uint i = 0u; i < 3u; ++i) {
         if (point && (uint(m.mass.y) & (1u << i)) == 0u)
             support = max(support, abs(axis[i]));
         if ((uint(m.mass.z) & (1u << i)) == 0u) {
-            float3 column = jph_six_axis(principal, i);
+            float3 column = float3(0.0f); column[i] = 1.0f;
             if (point)
                 column = cross(column, arm);
             support = max(support, abs(dot(axis, column)));
@@ -115,10 +115,13 @@ float jph_six_body_inverse_mass(BodyModel m, BodyState s, float3 arm, float3 axi
 {
     if (!jph_dynamic(m))
         return 0.0f;
-    float3 angular = jph_inverse_rotate(jph_quat_mul(s.rotation, m.inertiaRotation), point ? cross(arm, axis) : axis);
-    // Weight before squaring: a real small lever / weak inverse inertia is not
-    // confused with geometric rank, nor needlessly underflowed before weighting.
-    float3 weighted = angular * sqrt(m.invInertiaDiagonal.xyz * jph_allowed_axes(m.mass.z));
+    float3 angular = point ? cross(arm, axis) : axis;
+    // Pworld acts on the Jacobian before the physical principal transform.
+    // Evaluate its positive quadratic form without world-space reconstruction
+    // and cancellation; retain weight-before-square for weak inertia/lever arms.
+    angular = jph_inverse_rotate(jph_quat_mul(s.rotation, m.inertiaRotation),
+        angular * jph_allowed_axes(m.mass.z));
+    float3 weighted = angular * sqrt(m.invInertiaDiagonal.xyz);
     return (point ? m.mass.x * dot(axis * axis, jph_allowed_axes(m.mass.y)) : 0.0f) + dot(weighted, weighted);
 }
 float jph_six_inverse_mass(BodyModel m1, BodyState s1, float3 arm1, BodyModel m2, BodyState s2, float3 arm2,

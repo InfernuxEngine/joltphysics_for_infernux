@@ -170,8 +170,9 @@ float3 jph_project_linear(BodyModel model, float3 value)
 float3 jph_project_angular(BodyModel model, BodyState state, float3 value)
 {
     if (model.mass.z == 0.0f) return value;
-    float4 frame = jph_quat_mul(state.rotation, model.inertiaRotation);
-    return jph_rotate(frame, jph_inverse_rotate(frame, value) * jph_allowed_axes(model.mass.z));
+    // MotionProperties::LockAngular constrains world components, independent
+    // of the body's orientation and a recooked principal-inertia frame.
+    return value * jph_allowed_axes(model.mass.z);
 }
 
 void jph_project_motion(BodyModel model, inout BodyState state)
@@ -195,8 +196,14 @@ float3 jph_inverse_inertia(BodyModel model, BodyState state, float3 v)
     if (!jph_dynamic(model))
         return float3(0.0f);
     float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
+    if (model.mass.z == 0.0f)
+        return jph_rotate(inertia_to_world,
+            model.invInertiaDiagonal.xyz * jph_inverse_rotate(inertia_to_world, v));
+    // Match MotionProperties::MultiplyWorldSpaceInverseInertiaByVector:
+    // mask world-space columns before R * diag(invI) * R^T, then its rows.
+    float3 allowed = jph_allowed_axes(model.mass.z);
     return jph_rotate(inertia_to_world,
-        model.invInertiaDiagonal.xyz * jph_allowed_axes(model.mass.z) * jph_inverse_rotate(inertia_to_world, v));
+        model.invInertiaDiagonal.xyz * jph_inverse_rotate(inertia_to_world, v * allowed)) * allowed;
 }
 
 float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
@@ -210,10 +217,9 @@ float3 jph_point_velocity(BodyModel model, BodyState state, float3 r)
 
 void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt)
 {
-    // With any principal lock, projected w has at most two components;
-    // its gyroscopic acceleration is wholly excluded. Do not renormalize it.
-    if (model.mass.z != 0.0f) return;
-    // Preserve the existing unconstrained gyroscopic arithmetic.
+    // MotionProperties::ApplyGyroscopicForceInternal also runs with partial
+    // world DOF locks; they do not remove gyroscopic coupling in the allowed axes.
+    // Preserve the existing gyroscopic arithmetic, including the unlocked path.
     float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
     float3 local_velocity = jph_inverse_rotate(inertia_to_world, state.angularVelocity.xyz);
     float3 local_momentum = local_velocity / model.invInertiaDiagonal.xyz;

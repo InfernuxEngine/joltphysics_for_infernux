@@ -1135,7 +1135,7 @@ void jph_body_integrate(uint index, StepParams parameters)
     else
         state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
     state.positionCOM.xyz += dt * state.linearVelocity.xyz;
-    // The body rotation also rotates the allowed principal angular subspace.
+    // Angular DOF locks remain fixed in world space as the body rotates.
     jph_project_motion(model, state);
     body_states[index] = state;
 }

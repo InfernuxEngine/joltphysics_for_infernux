@@ -741,7 +741,6 @@ JphPsdRange jph_joint_reachable(BodyModel m1, BodyState s1, float3 arm1,
     for (uint body = 0u; body < 2u; ++body)
     {
         BodyModel model = body == 0u ? m1 : m2;
-        BodyState pose = body == 0u ? s1 : s2;
         float3 arm = body == 0u ? arm1 : arm2;
         if (!jph_dynamic(model)) continue;
         if (point)
@@ -756,7 +755,8 @@ JphPsdRange jph_joint_reachable(BodyModel m1, BodyState s1, float3 arm1,
         // in its three sampled columns. This is geometry, not a small-K test.
         uint angular_bound = point ? (all(arm == float3(0.0f)) ? 0u : min(2u, free_angular)) : free_angular;
         structural_bound += min(dimension, (point ? free_translation : 0u) + angular_bound);
-        float4 principal = jph_quat_mul(pose.rotation, model.inertiaRotation);
+        // For positive raw inertia, range(Pworld * Iinv * Pworld) is the
+        // allowed world-axis subspace, independent of the principal frame.
         for (uint axis = 0u; axis < 3u; ++axis)
         {
             float3 coordinate = float3(0.0f); coordinate[axis] = 1.0f;
@@ -767,7 +767,7 @@ JphPsdRange jph_joint_reachable(BodyModel m1, BodyState s1, float3 arm1,
             }
             if ((angular_locks & (1u << axis)) == 0u)
             {
-                float3 column = jph_rotate(principal, coordinate);
+                float3 column = coordinate;
                 if (point) column = cross(column, arm);
                 if (dimension == 2u) column = float3(dot(row0, column), dot(row1, column), 0.0f);
                 jph_psd_add(factors, column);

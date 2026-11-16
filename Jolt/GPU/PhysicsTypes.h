@@ -105,7 +105,7 @@ struct JPH_GPU_ALIGN BodyModel
     // Zero leaves represent an empty collision body without a dummy primitive.
     JPH_GPU_UINT4 meta;
     // Raw inverse mass, exact world translation freeze bits (0..7), exact
-    // principal-inertia rotation freeze bits (0..7), gravity factor.
+    // world-space rotation freeze bits (0..7), gravity factor.
     JPH_GPU_FLOAT4 mass;
     // Principal inverse inertia; w is padding.
     JPH_GPU_FLOAT4 invInertiaDiagonal;
@@ -691,7 +691,9 @@ struct JPH_GPU_ALIGN QueryShapeState
 
 struct JPH_GPU_ALIGN QueryMotionState
 {
+    // Body slot, valid, public body ID, frozen translation axes (x=1, y=2, z=4).
     JPH_GPU_UINT4 meta;
+    // Body origin xyz and raw scalar physical inverse mass; meta.w projects its three axes.
     JPH_GPU_FLOAT4 positionInverseMass;
     JPH_GPU_FLOAT4 rotation;
     JPH_GPU_FLOAT4 centerOfMass;

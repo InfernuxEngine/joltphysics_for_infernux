@@ -676,7 +676,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
     }
     state.rotation = normalize(state.rotation);
     QueryMotionState output;
-    output.meta = uint4(slot, 1u, query_body_ids[slot - query_params.selection.y].ids.x, model.meta.z);
+    output.meta = uint4(slot, 1u, query_body_ids[slot - query_params.selection.y].ids.x, uint(model.mass.y));
     output.positionInverseMass = float4(state.positionCOM.xyz - jph_rotate(state.rotation, request.geometry.xyz), 0.0f);
     output.rotation = state.rotation;
     output.centerOfMass = float4(state.positionCOM.xyz, 0.0f);
@@ -1288,7 +1288,14 @@ void query_export(uint3 tid : SV_DispatchThreadID)
     else if (field == QueryExportMotionCenterOfMass) value = query_hits[base + 3u].value;
     else if (field == QueryExportMotionLinearVelocity) value = query_hits[base + 4u].value;
     else if (field == QueryExportMotionAngularVelocity) value = query_hits[base + 5u].value;
-    else if (field == QueryExportMotionInverseMass) value = uint4(query_hits[base + 1u].value.w);
+    else if (field == QueryExportMotionInverseMass)
+    {
+        uint frozenTranslation = query_hits[base].value.w;
+        uint inverseMass = query_hits[base + 1u].value.w;
+        value = uint4((frozenTranslation & 1u) != 0u ? 0u : inverseMass,
+                      (frozenTranslation & 2u) != 0u ? 0u : inverseMass,
+                      (frozenTranslation & 4u) != 0u ? 0u : inverseMass, 0u);
+    }
     else if (field == QueryExportMotionInverseInertia)
     {
         for (uint axis = 0u; axis < 3u; ++axis)
