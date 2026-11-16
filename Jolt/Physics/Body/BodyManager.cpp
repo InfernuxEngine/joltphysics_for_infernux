@@ -525,6 +525,11 @@ void BodyManager::ActivateBodies(const BodyID *inBodyIDs, int inNumber)
 
 void BodyManager::DeactivateBodies(const BodyID *inBodyIDs, int inNumber)
 {
+	DeactivateBodies(inBodyIDs, inNumber, false);
+}
+
+void BodyManager::DeactivateBodies(const BodyID *inBodyIDs, int inNumber, bool inRetainVelocity)
+{
 	// Don't take lock if no bodies are to be deactivated
 	if (inNumber <= 0)
 		return;
@@ -556,9 +561,12 @@ void BodyManager::DeactivateBodies(const BodyID *inBodyIDs, int inNumber)
 				body.mMotionProperties->mSimulationStats.Reset();
 			#endif
 
-				// Reset velocity
-				body.mMotionProperties->mLinearVelocity = Vec3::sZero();
-				body.mMotionProperties->mAngularVelocity = Vec3::sZero();
+				// Reset velocity for sleep and ordinary removal.
+				if (!inRetainVelocity)
+				{
+					body.mMotionProperties->mLinearVelocity = Vec3::sZero();
+					body.mMotionProperties->mAngularVelocity = Vec3::sZero();
+				}
 
 				// Call activation listener
 				if (mActivationListener != nullptr)

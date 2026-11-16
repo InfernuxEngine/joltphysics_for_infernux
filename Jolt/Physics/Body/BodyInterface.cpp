@@ -138,6 +138,11 @@ void BodyInterface::AddBody(const BodyID &inBodyID, EActivation inActivationMode
 
 void BodyInterface::RemoveBody(const BodyID &inBodyID)
 {
+	RemoveBody(inBodyID, false);
+}
+
+void BodyInterface::RemoveBody(const BodyID &inBodyID, bool inRetainVelocity)
+{
 	BodyLockWrite lock(*mBodyLockInterface, inBodyID);
 	if (lock.SucceededAndIsInBroadPhase())
 	{
@@ -145,7 +150,7 @@ void BodyInterface::RemoveBody(const BodyID &inBodyID)
 
 		// Deactivate body
 		if (body.IsActive())
-			mBodyManager->DeactivateBodies(&inBodyID, 1);
+			mBodyManager->DeactivateBodies(&inBodyID, 1, inRetainVelocity);
 
 		// Remove from broadphase
 		BodyID id = inBodyID;

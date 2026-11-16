@@ -100,6 +100,8 @@ public:
 
 	/// Remove body from the physics system. Note that you need to add a body to the physics system before you can remove it.
 	void						RemoveBody(const BodyID &inBodyID);
+	/// Remove the body while retaining stored linear/angular velocity for a later add.
+	void						RemoveBody(const BodyID &inBodyID, bool inRetainVelocity);
 
 	/// Check if a body has been added to the physics system.
 	bool						IsAdded(const BodyID &inBodyID) const;

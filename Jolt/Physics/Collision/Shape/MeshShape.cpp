@@ -28,6 +28,7 @@
 #include <Jolt/Core/UnorderedMap.h>
 #include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/Geometry/AABox4.h>
+#include <Jolt/Geometry/ClosestPoint.h>
 #include <Jolt/Geometry/RayAABox.h>
 #include <Jolt/Geometry/Indexify.h>
 #include <Jolt/Geometry/Plane.h>
@@ -840,6 +841,51 @@ void MeshShape::CastRay(const RayCast &inRay, const RayCastSettings &inRayCastSe
 void MeshShape::CollidePoint(Vec3Arg inPoint, const SubShapeIDCreator &inSubShapeIDCreator, CollidePointCollector &ioCollector, const ShapeFilter &inShapeFilter) const
 {
 	sCollidePointUsingRayCast(*this, inPoint, inSubShapeIDCreator, ioCollector, inShapeFilter);
+}
+
+bool MeshShape::GetClosestSurfacePoint(Vec3Arg inPoint, Vec3Arg inScale, Vec3 &outPoint) const
+{
+	JPH_PROFILE_FUNCTION();
+
+	struct Visitor
+	{
+		JPH_INLINE bool	ShouldAbort() const						{ return mClosestDistanceSq == 0.0f; }
+		JPH_INLINE bool	ShouldVisitNode(int inStackTop) const	{ return mDistanceStack[inStackTop] < mClosestDistanceSq; }
+
+		JPH_INLINE int	VisitNodes(Vec4Arg inBoundsMinX, Vec4Arg inBoundsMinY, Vec4Arg inBoundsMinZ, Vec4Arg inBoundsMaxX, Vec4Arg inBoundsMaxY, Vec4Arg inBoundsMaxZ, UVec4 &ioProperties, int inStackTop)
+		{
+			Vec4 bounds_min_x, bounds_min_y, bounds_min_z, bounds_max_x, bounds_max_y, bounds_max_z;
+			AABox4Scale(mScale, inBoundsMinX, inBoundsMinY, inBoundsMinZ, inBoundsMaxX, inBoundsMaxY, inBoundsMaxZ, bounds_min_x, bounds_min_y, bounds_min_z, bounds_max_x, bounds_max_y, bounds_max_z);
+			const Vec4 distance_sq = AABox4DistanceSqToPoint(mPoint, bounds_min_x, bounds_min_y, bounds_min_z, bounds_max_x, bounds_max_y, bounds_max_z);
+			return SortReverseAndStore(distance_sq, mClosestDistanceSq, ioProperties, &mDistanceStack[inStackTop]);
+		}
+
+		JPH_INLINE void	VisitTriangle(Vec3Arg inV0, Vec3Arg inV1, Vec3Arg inV2, uint8, SubShapeID)
+		{
+			uint32 closest_feature;
+			const Vec3 delta = ClosestPoint::GetClosestPointOnTriangle(mScale * inV0 - mPoint,
+				mScale * inV1 - mPoint, mScale * inV2 - mPoint, closest_feature);
+			const float distance_sq = delta.LengthSq();
+			if (distance_sq < mClosestDistanceSq)
+			{
+				mClosestDistanceSq = distance_sq;
+				mClosestPoint = mPoint + delta;
+			}
+		}
+
+		Vec3			mPoint;
+		Vec3			mScale;
+		Vec3			mClosestPoint = Vec3::sZero();
+		float			mClosestDistanceSq = FLT_MAX;
+		float			mDistanceStack[NodeCodec::StackSize] = {};
+	};
+
+	Visitor visitor { inPoint, inScale };
+	WalkTreePerTriangle(SubShapeIDCreator(), visitor);
+	if (visitor.mClosestDistanceSq == FLT_MAX)
+		return false;
+	outPoint = visitor.mClosestPoint;
+	return true;
 }
 
 void MeshShape::CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Arg inScale, const CollideSoftBodyVertexIterator &inVertices, uint inNumVertices, int inCollidingShapeIndex) const
