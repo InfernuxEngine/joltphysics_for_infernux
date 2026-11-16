@@ -106,6 +106,7 @@ public:
 			RVec3			mContactPointOn2;										///< World space contact point on body 2 of closest hit (only valid if mFractionPlusSlop < 1)
 			BodyID			mBodyID1;												///< Body 1 (the body that is performing collision detection)
 			BodyID			mBodyID2;												///< Body 2 (the body of the closest hit, only valid if mFractionPlusSlop < 1)
+			SubShapeID		mSubShapeID1;											///< Sub shape of body 1 that produced the selected hit
 			SubShapeID		mSubShapeID2;											///< Sub shape of body 2 that was hit (only valid if mFractionPlusSlop < 1)
 			float			mFraction = 1.0f;										///< Fraction at which the hit occurred
 			float			mFractionPlusSlop = 1.0f;								///< Fraction at which the hit occurred + extra delta to allow body to penetrate by mMaxPenetration
@@ -168,6 +169,8 @@ public:
 	IslandBuilder *			mIslandBuilder;											///< Keeps track of connected bodies and builds islands for multithreaded velocity/position update
 
 	Steps					mSteps;
+	ContactListener *		mContactReportListener = nullptr;					///< Opt-in read-only reports for this Update
+	bool						mReportContactImpulses = false;
 
 	uint					mNumSoftBodies;											///< Number of active soft bodies in the simulation
 	SoftBodyUpdateContext *	mSoftBodyUpdateContexts = nullptr;						///< Contexts for updating soft bodies

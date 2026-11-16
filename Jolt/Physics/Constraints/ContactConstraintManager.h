@@ -53,11 +53,12 @@ public:
 		uint32 body2ID = 0;
 		uint32 subShapeID1 = 0;
 		uint32 subShapeID2 = 0;
+		uint32 pointIndex = 0;
 		Float3 contactPoint;
 		Float3 normal;
 		Float3 impulse;
 	};
-	void GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses) const;
+	void GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses, bool inRequested = false) const;
 
 	/// Forget previous-step manifold identity and impulses for an episode reset.
 	/// Called only between PhysicsSystem::Update calls.

@@ -235,6 +235,11 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 	context.mStepDeltaTime = step_delta_time;
 	context.mWarmStartImpulseRatio = warm_start_impulse_ratio;
 	context.mSteps.resize(inCollisionSteps);
+	if (ContactListener *listener = mContactManager.GetContactListener(); listener && listener->WantsContactStepReports())
+	{
+		context.mContactReportListener = listener;
+		context.mReportContactImpulses = listener->WantsContactStepImpulses();
+	}
 
 	// Allocate space for body pairs
 	JPH_ASSERT(context.mBodyPairs == nullptr);
@@ -476,6 +481,13 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 						// Setup island builder
 						mIslandBuilder.PrepareContactConstraints(mContactManager.GetMaxConstraints(), temp_allocator);
 
+						if (ContactListener *listener = next_step->mContext->mContactReportListener)
+						{
+							if (next_step->mContext->mReportContactImpulses)
+								mContactManager.GetAppliedContactImpulses(mAppliedContactImpulses, true);
+							listener->OnContactStepCompleted(uint32(next_step - next_step->mContext->mSteps.data() - 1), *this);
+						}
+
 						// Restart the contact manager
 						mContactManager.RecycleConstraintBuffer();
 
@@ -656,7 +668,9 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 	mIslandBuilder.ResetIslands(inTempAllocator);
 
 	// Preserve solved contact lambdas before the temporary constraint storage is recycled.
-	mContactManager.GetAppliedContactImpulses(mAppliedContactImpulses);
+	mContactManager.GetAppliedContactImpulses(mAppliedContactImpulses, context.mReportContactImpulses);
+	if (ContactListener *listener = context.mContactReportListener)
+		listener->OnContactStepCompleted(uint32(inCollisionSteps - 1), *this);
 
 	// Clear the contact manager
 	mContactManager.FinishConstraintBuffer();
@@ -972,7 +986,7 @@ void PhysicsSystem::JobFindCollisions(PhysicsUpdateContext::Step *ioStep, int in
 						if (body_pairs_in_queue >= mStep->mMaxBodyPairsPerQueue)
 						{
 							// Buffer full, process the pair now
-							mStep->mContext->mPhysicsSystem->ProcessBodyPair(mContactAllocator, inPair);
+							mStep->mContext->mPhysicsSystem->ProcessBodyPair(mContactAllocator, inPair, mStep->mContext->mContactReportListener);
 						}
 						else
 						{
@@ -1047,7 +1061,7 @@ void PhysicsSystem::JobFindCollisions(PhysicsUpdateContext::Step *ioStep, int in
 				if (queue.mReadIdx.compare_exchange_strong(pair_idx, pair_idx + 1))
 				{
 					// Process the actual body pair
-					ProcessBodyPair(contact_allocator, bp);
+					ProcessBodyPair(contact_allocator, bp, context->mContactReportListener);
 					break;
 				}
 			}
@@ -1076,7 +1090,7 @@ void PhysicsSystem::sDefaultSimCollideBodyVsBody(const Body &inBody1, const Body
 	}
 }
 
-void PhysicsSystem::ProcessBodyPair(ContactAllocator &ioContactAllocator, const BodyPair &inBodyPair)
+void PhysicsSystem::ProcessBodyPair(ContactAllocator &ioContactAllocator, const BodyPair &inBodyPair, ContactListener *inReportListener)
 {
 	// Fetch body pair
 	Body *body1 = &mBodyManager.GetBody(inBodyPair.mBodyA);
@@ -1105,6 +1119,9 @@ void PhysicsSystem::ProcessBodyPair(ContactAllocator &ioContactAllocator, const 
 	if (body1->GetMotionType() < body2->GetMotionType()
 		|| (body1->GetMotionType() == body2->GetMotionType() && inBodyPair.mBodyB < inBodyPair.mBodyA))
 		std::swap(body1, body2);
+
+	if (inReportListener != nullptr)
+		inReportListener->OnContactPairObserved(*body1, *body2);
 
 	// Check if the contact points from the previous frame are reusable and if so copy them
 	bool pair_handled = false;
@@ -1946,6 +1963,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 							// This is the earliest hit so far, store it
 							mCCDBody.mContactNormal = normal;
 							mCCDBody.mBodyID2 = inResult.mBodyID2;
+							mCCDBody.mSubShapeID1 = inResult.mSubShapeID1;
 							mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
 							mCCDBody.mFraction = fraction;
 							mCCDBody.mFractionPlusSlop = fraction_plus_slop;
@@ -2103,6 +2121,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			manifold.mSubShapeID2 = cast_shape_result.mSubShapeID2;
 			manifold.mPenetrationDepth = cast_shape_result.mPenetrationDepth;
 			manifold.mWorldSpaceNormal = ccd_body.mContactNormal;
+			manifold.mIsCCD = true;
 
 			// Call contact point callbacks
 			if (body2.IsRigidBody())
@@ -2143,7 +2162,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 }
 
 template <EMotionType Type2>
-void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings)
+void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings, Vec3 *outImpulse)
 {
 	MotionProperties *body_mp = ioBody1.GetMotionProperties();
 
@@ -2182,6 +2201,8 @@ void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inIn
 	contact_constraint.SetTotalLambda(0.0f);
 	contact_constraint.CalculateConstraintProperties(inInvM1, inInvI1, inR1PlusU, inv_m2, inv_i2, inR2, inContactNormal, inNormalVelocityBias);
 	contact_constraint.SolveVelocityConstraint(linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, inInvM1, inv_m2, inContactNormal, -FLT_MAX, FLT_MAX);
+	if (outImpulse != nullptr)
+		*outImpulse = contact_constraint.GetTotalLambda() * inContactNormal;
 
 	// Apply friction
 	if (inContactSettings.mCombinedFriction > 0.0f)
@@ -2200,6 +2221,8 @@ void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inIn
 			friction.SetTotalLambda(0.0f);
 			friction.CalculateConstraintProperties(inInvM1, inInvI1, inR1PlusU, inv_m2, inv_i2, inR2, friction_direction, 0.0f);
 			friction.SolveVelocityConstraint(linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, inInvM1, inv_m2, friction_direction, -max_lambda_f, max_lambda_f);
+			if (outImpulse != nullptr)
+				*outImpulse += friction.GetTotalLambda() * friction_direction;
 		}
 	}
 
@@ -2330,13 +2353,18 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 						Vec3 friction_direction = relative_velocity - normal_velocity * ccd_body->mContactNormal;
 
 						// Dispatch to the correct form
-						using DispatchFunc = void (*)(Body &, float, Mat44Arg, Vec3Arg, Body &, Vec3Arg, Vec3Arg, float, Vec3Arg, const ContactSettings &);
+						using DispatchFunc = void (*)(Body &, float, Mat44Arg, Vec3Arg, Body &, Vec3Arg, Vec3Arg, float, Vec3Arg, const ContactSettings &, Vec3 *);
 						static const DispatchFunc table[3] = {
 							sSolveCCDContact<EMotionType::Static>,
 							sSolveCCDContact<EMotionType::Kinematic>,
 							sSolveCCDContact<EMotionType::Dynamic>
 						};
-						table[(int)body2.GetMotionType()](body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body->mContactNormal, normal_velocity_bias, friction_direction, contact_settings);
+						ContactListener *listener = ioContext->mContactReportListener;
+						Vec3 impulse = Vec3::sZero();
+						table[(int)body2.GetMotionType()](body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body->mContactNormal, normal_velocity_bias, friction_direction, contact_settings, ioContext->mReportContactImpulses? &impulse : nullptr);
+						if (listener != nullptr)
+							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, ccd_body->mSubShapeID1,
+								body2, ccd_body->mSubShapeID2, ccd_body->mContactPointOn2, ccd_body->mContactNormal, relative_velocity, impulse);
 					}
 					else
 					{

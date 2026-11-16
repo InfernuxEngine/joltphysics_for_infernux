@@ -305,7 +305,7 @@ private:
 	using ContactAllocator = ContactConstraintManager::ContactAllocator;
 
 	/// Process narrow phase for a single body pair
-	void						ProcessBodyPair(ContactAllocator &ioContactAllocator, const BodyPair &inBodyPair);
+	void						ProcessBodyPair(ContactAllocator &ioContactAllocator, const BodyPair &inBodyPair, ContactListener *inReportListener);
 
 	/// This helper batches up bodies that need to put to sleep to avoid contention on the activation mutex
 	class BodiesToSleep;
@@ -315,7 +315,7 @@ private:
 
 	/// Helper function that solves the velocity of a CCD contact
 	template <EMotionType Type2>
-	static void					sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings);
+	static void					sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings, Vec3 *outImpulse);
 
 	/// Number of constraints to process at once in JobDetermineActiveConstraints
 	static constexpr int		cDetermineActiveConstraintsBatchSize = 64;

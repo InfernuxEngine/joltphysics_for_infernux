@@ -1930,6 +1930,7 @@ void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstr
 		record.body2ID = constraint.mBody2->GetID().GetIndexAndSequenceNumber();
 		record.subShapeID1 = constraint.mSubShapeID1;
 		record.subShapeID2 = constraint.mSubShapeID2;
+		record.pointIndex = i;
 		record.contactPoint = contact.mWorldSpacePosition;
 		normal.StoreFloat3(&record.normal);
 		impulse.StoreFloat3(&record.impulse);
@@ -1937,10 +1938,10 @@ void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstr
 	}
 }
 
-void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses) const
+void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses, bool inRequested) const
 {
 	outImpulses.clear();
-	if (!mRecordAppliedContactImpulses || mConstraints == nullptr)
+	if ((!mRecordAppliedContactImpulses && !inRequested) || mConstraints == nullptr)
 		return;
 
 	using DispatchFunc = void (*)(const ContactConstraintBase &, Array<AppliedContactImpulse> &);

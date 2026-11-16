@@ -11,6 +11,7 @@ JPH_NAMESPACE_BEGIN
 
 class Body;
 class CollideShapeResult;
+class PhysicsSystem;
 
 /// Array of contact points
 using ContactPoints = StaticArray<Vec3, 64>;
@@ -20,7 +21,7 @@ class ContactManifold
 {
 public:
 	/// Swaps shape 1 and 2
-	ContactManifold			SwapShapes() const					{ return { mBaseOffset, -mWorldSpaceNormal, mPenetrationDepth, mSubShapeID2, mSubShapeID1, mRelativeContactPointsOn2, mRelativeContactPointsOn1 }; }
+	ContactManifold			SwapShapes() const					{ return { mBaseOffset, -mWorldSpaceNormal, mPenetrationDepth, mSubShapeID2, mSubShapeID1, mRelativeContactPointsOn2, mRelativeContactPointsOn1, mIsCCD }; }
 
 	/// Access to the world space contact positions
 	inline RVec3			GetWorldSpaceContactPointOn1(uint inIndex) const { return mBaseOffset + mRelativeContactPointsOn1[inIndex]; }
@@ -33,6 +34,7 @@ public:
 	SubShapeID				mSubShapeID2;
 	ContactPoints			mRelativeContactPointsOn1;			///< Contact points on the surface of shape 1 relative to mBaseOffset.
 	ContactPoints			mRelativeContactPointsOn2;			///< Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
+	bool					mIsCCD = false;									///< A CCD candidate used to obtain settings; the solver may discard the hit.
 };
 
 /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.
@@ -127,6 +129,25 @@ public:
 	/// detect this by keeping the old shape (before adding/removing a part) around until the next PhysicsSystem::Update (when the OnContactPersisted
 	/// callbacks are triggered) and resolving the sub shape ID against both the old and new shape to see if they still refer to the same child shape.
 	virtual void			OnContactPersisted([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) { /* Do nothing */ }
+
+	/// Opt in to read-only collision-step reports for this Update. This does not keep an idle simulation active.
+	virtual bool WantsContactStepReports() const noexcept { return false; }
+
+	/// Include the actual finite velocity rows when reporting contact steps.
+	virtual bool WantsContactStepImpulses() const noexcept { return false; }
+
+	/// Observe the pre-solve narrowphase candidate, including body pairs with no cached contacts.
+	virtual void OnContactPairObserved([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2) noexcept { }
+
+	/// All jobs for this substep are complete. Bodies remain locked and the existing impulse array holds this substep's discrete rows.
+	virtual void OnContactStepCompleted([[maybe_unused]] uint32 inStep, [[maybe_unused]] const PhysicsSystem &inSystem) noexcept { }
+
+	/// A rigid-body CCD hit survived resolution. On request, impulse acts on body 2. The relative point velocity precedes this solve.
+	virtual void OnCCDContactSolved([[maybe_unused]] uint32 inStep, [[maybe_unused]] const Body &inBody1,
+		[[maybe_unused]] const SubShapeID &inSubShapeID1, [[maybe_unused]] const Body &inBody2,
+		[[maybe_unused]] const SubShapeID &inSubShapeID2, [[maybe_unused]] RVec3Arg inPoint,
+		[[maybe_unused]] Vec3Arg inNormal, [[maybe_unused]] Vec3Arg inRelativeVelocity,
+		[[maybe_unused]] Vec3Arg inImpulse) noexcept { }
 
 	/// Called whenever a contact was detected last update but is not detected anymore.
 	///
