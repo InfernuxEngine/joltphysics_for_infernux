@@ -1556,6 +1556,7 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 
 	ioContext->mCoupledIslandOrder.clear();
 	ioContext->mCoupledIslandMask.clear();
+	ioContext->mCoupledHasLocalVelocityRows = false;
 	if (!ioContext->mCoupledBodies.empty())
 	{
 		const uint32 islands = mIslandBuilder.GetNumIslands();
@@ -1572,6 +1573,12 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 				ioContext->mCoupledIslandOrder.push_back(i);
 				// A lone endpoint still needs handoffs even with no native rows.
 				ioContext->mCoupledSweeps[i] = mPhysicsSettings.mNumVelocitySteps;
+				if (!ioContext->mCoupledHasLocalVelocityRows)
+				{
+					uint32 *constraints_begin, *constraints_end, *contacts_begin, *contacts_end;
+					ioContext->mCoupledHasLocalVelocityRows = mIslandBuilder.GetConstraintsInIsland(i, constraints_begin, constraints_end)
+						|| mIslandBuilder.GetContactsInIsland(i, contacts_begin, contacts_end);
+				}
 			}
 		}
 		JPH_ASSERT(!ioContext->mCoupledIslandOrder.empty());

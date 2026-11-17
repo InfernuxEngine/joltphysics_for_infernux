@@ -28,7 +28,7 @@ struct AC_ALIGN ArticulationControlHeader {
     AC_U storage; // reasonsByte, preRotorByte, numericScratchByte, totalBytes.
 };
 struct AC_ALIGN ArticulationClassifyWork {
-    AC_U range; // first/count, accepted World row, reference kind (0 joint/1 patch).
+    AC_U range; // first/count, accepted World row, mode (initial refusal or reference kind).
     AC_U references; // jointRefFirst/count, patchRefFirst/count; bases are uint4 words.
 };
 // preRotor is one Float4 per selected joint: physical speed, cached armature,

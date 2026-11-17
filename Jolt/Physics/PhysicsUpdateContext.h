@@ -179,6 +179,7 @@ public:
 	uint32					mCoupledSubstep = 0;
 	bool					mCoupledUpdate = false;
 	bool					mAwaitingCoupledEndpoints = false;
+	bool					mCoupledHasLocalVelocityRows = false;
 	bool					IsCoupledIsland(uint32 inIsland) const { return !mCoupledIslandMask.empty() && mCoupledIslandMask[inIsland] != 0; }
 	ContactListener *		mContactReportListener = nullptr;					///< Opt-in read-only reports for this Update
 	bool						mReportContactImpulses = false;

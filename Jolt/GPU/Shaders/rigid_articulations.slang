@@ -62,7 +62,7 @@ void articulation_classify_begin(uint3 id:SV_DispatchThreadID) {
     if(id.x>=articulation_params.range.y)return;
     uint tree=articulation_params.range.x+id.x;
     if(tree>=ac_header(1u).x)return;
-    ac_store(ac_header(2u).x+4u*tree,0u);
+    ac_store(ac_header(2u).x+4u*tree,articulation_params.range.w);
     uint address=ac_header(1u).w+4u*tree;
     // Previous representation/dirty/capture facts survive this substep begin.
     ac_store(address,ac_load(address)&~(ArtControlEligible|ArtControlAdmitted|ArtControlCandidate));
