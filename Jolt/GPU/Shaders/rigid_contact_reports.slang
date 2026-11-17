@@ -53,7 +53,8 @@ void contact_report_seed(uint3 id : SV_DispatchThreadID)
         : ((patch.leaves.z & PatchActive) != 0u
         && ((p.requests.y & 5u) != 0u || (interest & 1u) != 0u));
     if (!wanted) return;
-    Contact first = contacts[4u * ordinal];
+    bool swept = p.requests.z != 0u;
+    Contact first = contacts[(swept ? 1u : 4u) * ordinal];
     if (!cr_range(first.meta.x, p.selection.y, p.selection.z)
         || !cr_range(first.meta.y, p.selection.y, p.selection.z)
         || body_models[first.meta.x].meta.w != p.selection.x
@@ -63,6 +64,14 @@ void contact_report_seed(uint3 id : SV_DispatchThreadID)
     contact_report_indices[2u + ordinal].store(row);
     cr_word(row, 0u, uint4(patch.leaves.xy, first.meta.xy));
     cr_word(row, 1u, uint4(p.range.w, patch.leaves.z, patch.leaves.w, ordinal));
+    if (swept) {
+        cr_word(row, 2u, uint4(first.meta.w, 1u, first.meta.z, 0u));
+        cr_word(row, 3u, asuint(first.localAnchorA));
+        cr_word(row, 4u, asuint(first.normalDepth));
+        cr_word(row, 5u, asuint(first.localAnchorB));
+        cr_word(row, 6u, asuint(first.impulse));
+        return;
+    }
     BodyModel ma = jph_effective_model(body_models[first.meta.x], kinematic_targets[first.meta.x]);
     BodyModel mb = jph_effective_model(body_models[first.meta.y], kinematic_targets[first.meta.y]);
     BodyState sa = body_states[first.meta.x], sb = body_states[first.meta.y];

@@ -196,6 +196,16 @@ void jph_prepare_drift(BodyModel model, inout BodyState state, float dt)
         state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
 }
 
+BodyState jph_sweep_state(SweepBody sweep)
+{
+    BodyState state;
+    state.positionCOM = sweep.positionCOM;
+    state.rotation = sweep.rotation;
+    state.linearVelocity = sweep.linearVelocity;
+    state.angularVelocity = sweep.angularVelocity;
+    return state;
+}
+
 float3 jph_inverse_linear_mass(BodyModel model, float3 value)
 {
     return jph_inverse_mass(model) * jph_project_linear(model, value);

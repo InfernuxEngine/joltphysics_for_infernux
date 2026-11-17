@@ -113,7 +113,7 @@ struct JPH_GPU_ALIGN BodyModel
     // Raw inverse mass, exact world translation freeze bits (0..7), exact
     // world-space rotation freeze bits (0..7), gravity factor.
     JPH_GPU_FLOAT4 mass;
-    // Principal inverse inertia; w is padding.
+    // Principal inverse inertia xyz; w is the inner radius for linear CCD, or zero.
     JPH_GPU_FLOAT4 invInertiaDiagonal;
     // Principal inertia frame relative to the body frame, quaternion xyzw.
     JPH_GPU_FLOAT4 inertiaRotation;
@@ -375,8 +375,20 @@ struct JPH_GPU_ALIGN JointParams
 
 struct JPH_GPU_ALIGN Aabb
 {
-    JPH_GPU_FLOAT4 minimum; // xyz; w padding.
+    JPH_GPU_FLOAT4 minimum; // xyz; during CCD, w is positive for initiators, -1 for other dynamic, 0 for prescribed.
     JPH_GPU_FLOAT4 maximum; // xyz; w padding.
+};
+
+// Selected-world motion after velocity solving and before translation.
+struct JPH_GPU_ALIGN SweepBody
+{
+    JPH_GPU_FLOAT4 positionCOM;
+    JPH_GPU_FLOAT4 rotation;
+    JPH_GPU_FLOAT4 linearVelocity;
+    JPH_GPU_FLOAT4 angularVelocity;
+    JPH_GPU_FLOAT4 displacement;    // full substep translation xyz and signed sweep role w (initiator inner radius).
+    JPH_GPU_FLOAT4 linearResponse;  // velocity change xyz and travel fraction w.
+    JPH_GPU_FLOAT4 angularResponse; // angular velocity change xyz, w zero.
 };
 
 struct JPH_GPU_ALIGN ContactPatch
@@ -415,7 +427,7 @@ struct JPH_GPU_ALIGN StepParams
     JPH_GPU_FLOAT4 gravityDt;
     // Speculative distance, penetration slop, max position correction, Baumgarte.
     JPH_GPU_FLOAT4 contact;
-    // Minimum restitution speed, then three padding values.
+    // Minimum restitution speed, linear sweep threshold and max penetration (relative to inner radius), w zero.
     JPH_GPU_FLOAT4 restitution;
     // One accepted layout address, never a stable RuntimeWorld identity.
     // selection=(world row, body base, leaf base, joint base).
@@ -872,6 +884,7 @@ static_assert(offsetof(JointSwingState, angularMotorSetupY) == 224);
 static_assert(offsetof(JointSwingState, angularMotorSetupZ) == 240);
 static_assert(offsetof(JointReadback, orientation) == 16 && offsetof(JointReadback, status) == 32);
 JPH_GPU_CHECK_TYPE(Aabb, 32);
+JPH_GPU_CHECK_TYPE(SweepBody, 112);
 JPH_GPU_CHECK_TYPE(ContactPatch, 16);
 JPH_GPU_CHECK_TYPE(Contact, 80);
 JPH_GPU_CHECK_TYPE(StepParams, 112);

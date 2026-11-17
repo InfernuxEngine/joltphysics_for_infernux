@@ -113,7 +113,8 @@ void init_words(uint3 tid : SV_DispatchThreadID)
 void init_contacts(uint3 tid : SV_DispatchThreadID)
 {
     uint item;
-    if (!bp_item(tid.x, max(1u, broadphase.candidates.z * MaxContactPointsPerPair), item)) return;
+    uint points = broadphase.round.y != 0u ? 1u : MaxContactPointsPerPair;
+    if (!bp_item(tid.x, max(1u, broadphase.candidates.z * points), item)) return;
     Contact empty;
     empty.meta = uint4(0u);
     empty.normalDepth = empty.localAnchorA = empty.localAnchorB = empty.impulse = float4(0.0f);
@@ -132,7 +133,8 @@ void publish_resident_count(uint3 tid : SV_DispatchThreadID)
     if (header.y == 0u && header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
     bp_store(bp_header(), header);
     uint4 solve = resident_step[1u].value;
-    solve.zw = header.z == 0u ? uint2(header.x * MaxContactPointsPerPair, header.x) : uint2(0u);
+    uint points = broadphase.round.y != 0u ? 1u : MaxContactPointsPerPair;
+    solve.zw = header.z == 0u ? uint2(header.x * points, header.x) : uint2(0u);
     resident_step[1u].value = solve;
 }
 
@@ -435,6 +437,9 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
     BodyModel ma = body_models[a.meta.y], mb = body_models[b.meta.y];
     if ((ma.meta.z & MotionNotResident) != 0u || (mb.meta.z & MotionNotResident) != 0u) return false;
     bool sensor = ((a.meta.w | b.meta.w) & ShapeSensor) != 0u;
+    if (broadphase.round.y != 0u && (sensor ||
+        !((ba.minimum.w > 0.0f && bb.minimum.w == 0.0f) || (bb.minimum.w > 0.0f && ba.minimum.w == 0.0f))))
+        return false;
     if (!sensor && (ma.meta.z & ~MotionNotResident) != MotionDynamic
         && (mb.meta.z & ~MotionNotResident) != MotionDynamic) return false;
     if ((a.surface.y & (1u << b.surface.x)) == 0u

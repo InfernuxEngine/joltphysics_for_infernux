@@ -17,7 +17,7 @@ struct CR_ALIGN ContactReportParams
 {
     CR_U4 range;     // Window first/count, logical patch count, substep.
     CR_U4 selection; // World row, global body base/count, global leaf base.
-    CR_U4 requests;  // Leaf count, collision/trigger/impulse stream bits, zero, zero.
+    CR_U4 requests;  // Leaf count, collision/trigger/impulse stream bits, swept impacts, zero.
 };
 struct CR_ALIGN ContactReportPoint
 {

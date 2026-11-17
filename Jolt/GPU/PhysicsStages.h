@@ -29,6 +29,7 @@ enum class Resource : std::uint32_t
     ConvexGeometry = 1u << 14,
     ArticulationControl = 1u << 15,
     ContactHistory = 1u << 16,
+    SweepBodies = 1u << 17,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -51,6 +52,9 @@ enum class Stage : std::uint32_t
     SolveJointPosition,
     WarmContacts,
     StoreContactHistory,
+    CaptureSweepMotion,
+    BuildSweptBounds,
+    IntegrateSwept,
 };
 
 enum class Domain : std::uint32_t
@@ -148,6 +152,16 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::StoreContactHistory, "store_contact_history", Domain::Patches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Contacts) | Mask(Resource::ContactPatches)
             | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::ContactHistory)},
+    {Stage::CaptureSweepMotion, "capture_sweep_motion", Domain::Bodies, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
+            | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::SweepBodies)},
+    {Stage::BuildSweptBounds, "build_swept_bounds", Domain::Shapes, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ShapeModels) | Mask(Resource::SweepBodies)
+            | Mask(Resource::ConvexGeometry), Mask(Resource::Bounds)},
+    {Stage::IntegrateSwept, "integrate_swept", Domain::Bodies, 64, 1, 1,
+        Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
+            | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)
+            | Mask(Resource::SweepBodies), Mask(Resource::BodyStates)},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of

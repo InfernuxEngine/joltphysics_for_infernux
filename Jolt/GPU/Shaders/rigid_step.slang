@@ -20,6 +20,7 @@ RWStructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<uint4> convex_geometry;
 RWStructuredBuffer<BodySleepRecord> body_sleep;
 RWStructuredBuffer<QueryRecordWord> contact_history;
+RWStructuredBuffer<SweepBody> sweep_bodies;
 ConstantBuffer<BodyBatchHeader> body_batch_header;
 StructuredBuffer<StepParams> body_batch_selections;
 StructuredBuffer<BodyBatchTile> body_batch_tiles;
@@ -1225,15 +1226,18 @@ void solve_velocity(uint3 tid : SV_DispatchThreadID)
         jph_solve_patch_velocity(jph_island_patch_source(begin, local));
 }
 
+bool jph_can_drift(uint index, BodyModel model)
+{
+    return jph_nonstatic(model) && jph_resident(model)
+        && ((body_models[index].meta.z & ~MotionNotResident) == MotionStatic || body_sleep[index].runtime.state.x != 0u);
+}
+
 void jph_body_integrate(uint index, StepParams parameters)
 {
     if (!jph_selected_body(index, parameters))
         return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
-    if (!jph_nonstatic(model) || !jph_resident(model))
-        return;
-    if ((body_models[index].meta.z & ~MotionNotResident) != MotionStatic
-        && body_sleep[index].runtime.state.x == 0u) return;
+    if (!jph_can_drift(index, model)) return;
     BodyState state = body_states[index];
     float dt = parameters.gravityDt.w;
     jph_prepare_drift(model, state, dt);
@@ -1251,6 +1255,71 @@ void integrate(uint3 tid : SV_DispatchThreadID)
     uint index = stage_work.range.x + tid.x;
     if (jph_articulation_admitted(index, false)) return;
     jph_body_integrate(index, step_params);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void capture_sweep_motion(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
+    BodyState state = body_states[index];
+    if (jph_can_drift(index, model))
+        jph_prepare_drift(model, state, step_params.gravityDt.w);
+    else
+        state.linearVelocity = state.angularVelocity = float4(0.0f);
+    float3 displacement = state.linearVelocity.xyz * step_params.gravityDt.w;
+    float role = 0.0f;
+    if (jph_dynamic(model))
+    {
+        float radius = model.invInertiaDiagonal.w;
+        float threshold = radius * step_params.restitution.y;
+        role = radius > 0.0f && dot(displacement, displacement) > threshold * threshold ? radius : -1.0f;
+    }
+    SweepBody sweep;
+    sweep.positionCOM = state.positionCOM;
+    sweep.rotation = state.rotation;
+    sweep.linearVelocity = state.linearVelocity;
+    sweep.angularVelocity = state.angularVelocity;
+    sweep.displacement = float4(displacement, role);
+    sweep.linearResponse = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    sweep.angularResponse = float4(0.0f);
+    sweep_bodies[index - step_params.selection.y] = sweep;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_swept_bounds(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    ShapeModel shape = shape_models[index];
+    SweepBody motion = sweep_bodies[shape.meta.y - step_params.selection.y];
+    CvxOperand operand = cvx_leaf_operand(shape, jph_sweep_state(motion));
+    Aabb swept = cvx_leaf_bounds(convex_geometry, operand, 0.5f * step_params.contact.x);
+    swept.minimum.xyz += min(float3(0.0f), motion.displacement.xyz);
+    swept.maximum.xyz += max(float3(0.0f), motion.displacement.xyz);
+    swept.minimum.w = motion.displacement.w;
+    bounds[index] = swept;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void integrate_swept(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint index = stage_work.range.x + tid.x;
+    if (jph_articulation_admitted(index, false)) return;
+    BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
+    if (!jph_can_drift(index, model)) return;
+    SweepBody sweep = sweep_bodies[index - step_params.selection.y];
+    BodyState state = jph_sweep_state(sweep);
+    state.positionCOM.xyz += sweep.linearResponse.w * sweep.displacement.xyz;
+    state.linearVelocity.xyz += sweep.linearResponse.xyz;
+    state.angularVelocity.xyz += sweep.angularResponse.xyz;
+    jph_project_motion(model, state);
+    body_states[index] = state;
 }
 
 // One original row, retaining raw models and per-row BodyState load/store.
