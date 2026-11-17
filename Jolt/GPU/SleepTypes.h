@@ -42,7 +42,7 @@ struct S_ALIGN BodySleepParameters {
 struct S_ALIGN SleepWorkParameters {
     S_F4 timing;    // substep simulated dt, configured quiet seconds/point velocity,0.
     S_U4 selected;  // world row, body base, body count, total body slots.
-    S_U4 layout;    // schedule body-root word base, root-vote status scalar index,
+    S_U4 layout;    // schedule local body-root word base, local root-vote status scalar index,
                    // source first, source count (joint/patch/query domain).
                    // For batched bounds wakes, zw locate/count sorted source–target exclusions.
     S_U4 operation; // source body slot or UINT_MAX, old/new AABB bits, finalFixed01, queryCount.

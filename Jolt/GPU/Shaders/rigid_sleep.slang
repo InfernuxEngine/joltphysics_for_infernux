@@ -26,8 +26,10 @@ bool sleep_body(uint body)
 }
 uint sleep_root(uint body)
 {
-    uint root=constraint_schedule[sleep_params.layout.x+body].value.x;
-    if(root>=sleep_params.selected.w || !sleep_body(root)) {sleep_fail(SleepBadRoot);return SleepInvalid;}
+    uint local=body-sleep_params.selected.y;
+    if(local>=sleep_params.selected.z) {sleep_fail(SleepBadRoot);return SleepInvalid;}
+    uint root=constraint_schedule[sleep_params.layout.x+local].value.x;
+    if(root>=sleep_params.selected.z) {sleep_fail(SleepBadRoot);return SleepInvalid;}
     return root;
 }
 bool sleep_active_endpoint(uint body)
@@ -63,9 +65,9 @@ void sleep_seed_pair(uint a,uint b)
 void sleep_clear_votes(uint3 tid:SV_DispatchThreadID)
 {
     uint body;if(!sleep_work_item(tid.x,body)) return;
-    if(body==sleep_params.selected.y) body_sleep_roots[sleep_params.layout.y].store(0u);
-    if(body>=sleep_params.selected.y && body-sleep_params.selected.y<sleep_params.selected.z)
-        body_sleep_roots[body].store(0u);
+    uint local=body-sleep_params.selected.y;
+    body_sleep_roots[local].store(0u);
+    if(local==0u) body_sleep_roots[sleep_params.layout.y].store(0u);
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_seed_awake_bodies(uint3 tid:SV_DispatchThreadID)
@@ -151,7 +153,8 @@ void sleep_read_external_votes(uint3 tid:SV_DispatchThreadID)
     uint body=sleep_requests[index];
     uint root=sleep_root(body);
     bool ready=root!=SleepInvalid && (body_sleep_roots[root].load()&2u)==0u;
-    sleep_results[index]=uint4(root,ready?1u:0u,body,0u);
+    uint packed_root=root==SleepInvalid?SleepInvalid:sleep_params.selected.y+root;
+    sleep_results[index]=uint4(packed_root,ready?1u:0u,body,0u);
 }
 
 [shader("compute")][numthreads(64,1,1)]

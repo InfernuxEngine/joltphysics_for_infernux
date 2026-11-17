@@ -9,7 +9,6 @@ ConstantBuffer<ConstraintParams> constraint_params;
 ConstantBuffer<StageWork> stage_work;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
-StructuredBuffer<WorldRange> worlds;
 StructuredBuffer<QueryRecordWord> joint_stream;
 StructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<Contact> contacts;
@@ -41,17 +40,16 @@ bool cs_writer(BodyModel m)
 }
 bool cs_body(uint body, uint world)
 {
-    if (body >= constraint_params.counts.x || world >= constraint_params.counts.w) return false;
-    BodyModel m = body_models[body];
-    WorldRange w = worlds[world];
-    return world == constraint_params.selection.x && m.meta.w == world
-        && cs_in_range(body, constraint_params.selection.y, constraint_params.selectedCounts.x)
-        && cs_in_range(body, w.bodies.x, w.bodies.y);
+    if (world != constraint_params.selection.x || !cs_in_range(body, constraint_params.selection.y, constraint_params.counts.x))
+        return false;
+    return body_models[body].meta.w == world;
 }
-uint cs_initial_root(uint body)
+uint cs_local_body(uint packed) { return packed - constraint_params.selection.y; }
+uint cs_packed_body(uint local) { return constraint_params.selection.y + local; }
+uint cs_initial_root(uint local)
 {
-    BodyModel model = body_models[body];
-    return cs_writer(model) && cs_body(body, model.meta.w) ? body : ConstraintInvalid;
+    BodyModel model = body_models[cs_packed_body(local)];
+    return cs_writer(model) && model.meta.w == constraint_params.selection.x ? local : ConstraintInvalid;
 }
 
 // With no candidate pairs or selected joints, each resident dynamic is its
@@ -86,7 +84,8 @@ uint cs_ref_count(uint kind)
 void cs_ref(uint kind, uint ordinal, uint world, uint a, uint b, bool active, uint status)
 {
     uint p = cs_ref_base(kind) + 2u * ordinal;
-    cs_store(p, uint4(world, a, b, ordinal));
+    uint source = kind == ConstraintJoint ? constraint_params.selection.w + ordinal : ordinal;
+    cs_store(p, uint4(world, a, b, source));
     cs_store(p + 1u, uint4(kind, active && status == 0u ? 1u : 0u, status, 0u));
 }
 uint cs_blocks(uint n) { return n / ConstraintBlockSize + (n % ConstraintBlockSize != 0u ? 1u : 0u); }
@@ -117,19 +116,15 @@ void constraint_seed(uint3 tid : SV_DispatchThreadID)
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
 {
-    uint j;
-    if (!cs_item(tid.x, constraint_params.counts.y, j)) return;
-    if (!cs_in_range(j, constraint_params.selection.w, constraint_params.selectedCounts.z))
-    {
-        cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, 0u);
-        return;
-    }
+    uint item;
+    if (!cs_item(tid.x, constraint_params.counts.y, item)) return;
+    uint j = constraint_params.selection.w + item;
     uint4 header = joint_stream[0].value;
     uint status = 0u;
-    if (header.x != constraint_params.counts.y || header.w != 0u ||
+    if (header.x != constraint_params.counts.w || header.w != 0u ||
         header.y < 1u + JointDirectoryWords * header.x || header.z < header.y)
     {
-        cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
+        cs_ref(ConstraintJoint, item, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
         return;
     }
     uint author = 1u + JointDirectoryWords * j;
@@ -151,19 +146,17 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
         || author_words > header.y - layout.x || layout.y < header.y || layout.y > header.z
         || state_words > header.z - layout.y)
     {
-        cs_ref(ConstraintJoint, j, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
+        cs_ref(ConstraintJoint, item, ConstraintInvalid, ConstraintInvalid, ConstraintInvalid, false, ConstraintBadJoint);
         return;
     }
     uint4 state = joint_stream[layout.y].value;
     if (state.y != JointStatusSuccess) status |= ConstraintBadJoint;
-    if (world >= constraint_params.counts.w || !cs_body(e.y, world)
+    if (!cs_body(e.y, world)
         || (e.x != InvalidQueryBodySlot && !cs_body(e.x, world))) status |= ConstraintBadModel;
     uint a = ConstraintInvalid, b = ConstraintInvalid;
     bool resident = false;
     if ((status & ConstraintBadModel) == 0u)
     {
-        WorldRange w = worlds[world];
-        if (!cs_in_range(j, w.leaves.z, w.leaves.w)) status |= ConstraintBadJoint;
         BodyModel mb = body_models[e.y];
         resident = cs_resident(mb);
         if (cs_writer(mb)) b = e.y;
@@ -182,7 +175,7 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
         if (a != ConstraintInvalid) awake = awake || body_sleep[a].runtime.state.x != 0u;
         active = active && awake;
     }
-    cs_ref(ConstraintJoint, j, world, a, b, active, status);
+    cs_ref(ConstraintJoint, item, world, a, b, active, status);
 }
 
 // Candidate count is an iteration extent ONLY. Actual responding patch flags
@@ -199,27 +192,20 @@ void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
     bool patch_sensor = (patch.z & PatchSensor) != 0u;
     bool active = responds && !patch_sensor;
     if (responds && patch_sensor) status |= ConstraintBadManifold;
-    if (patch.x >= constraint_params.limits.y || patch.y >= constraint_params.limits.y)
+    if (!cs_in_range(patch.x, constraint_params.selection.z, constraint_params.limits.y)
+        || !cs_in_range(patch.y, constraint_params.selection.z, constraint_params.limits.y))
         status |= ConstraintBadModel;
     else
     {
         ShapeModel sa = shape_models[patch.x], sb = shape_models[patch.y];
-        if (sa.meta.y >= constraint_params.counts.x || sb.meta.y >= constraint_params.counts.x)
+        world = constraint_params.selection.x;
+        if (!cs_body(sa.meta.y, world) || !cs_body(sb.meta.y, world))
             status |= ConstraintBadModel;
         else
         {
             BodyModel ma = body_models[sa.meta.y], mb = body_models[sb.meta.y];
-            world = ma.meta.w;
-            if (!cs_body(sa.meta.y, world) || !cs_body(sb.meta.y, world)) status |= ConstraintBadModel;
-            else
-            {
-                WorldRange w = worlds[world];
-                if (!cs_in_range(p, w.bodies.z, w.bodies.w)
-                    || !cs_in_range(patch.x, w.leaves.x, w.leaves.y)
-                    || !cs_in_range(patch.y, w.leaves.x, w.leaves.y)
-                    || !cs_in_range(patch.x, ma.meta.x, ma.meta.y)
-                    || !cs_in_range(patch.y, mb.meta.x, mb.meta.y)) status |= ConstraintBadModel;
-            }
+            if (!cs_in_range(patch.x, ma.meta.x, ma.meta.y)
+                || !cs_in_range(patch.y, mb.meta.x, mb.meta.y)) status |= ConstraintBadModel;
             if (cs_writer(ma)) a = sa.meta.y;
             if (cs_writer(mb)) b = sb.meta.y;
             bool sensor = ((sa.meta.w | sb.meta.w) & ShapeSensor) != 0u;
@@ -281,10 +267,8 @@ void constraint_init_labels(uint3 tid : SV_DispatchThreadID)
 }
 bool cs_label(uint vertex, uint label)
 {
-    if (vertex >= constraint_params.counts.x || label >= constraint_params.counts.x) return false;
-    BodyModel v = body_models[vertex], l = body_models[label];
-    return cs_writer(v) && cs_writer(l) && v.meta.w == l.meta.w
-        && cs_body(vertex, v.meta.w) && cs_body(label, l.meta.w) && label <= vertex;
+    if (vertex >= constraint_params.counts.x || label > vertex) return false;
+    return cs_initial_root(vertex) != ConstraintInvalid && cs_initial_root(label) != ConstraintInvalid;
 }
 
 [shader("compute")][numthreads(64, 1, 1)]
@@ -318,11 +302,12 @@ void constraint_propagate_edges(uint3 tid : SV_DispatchThreadID)
     if (cs_load(p + 1u).y == 0u) return;
     uint4 e = cs_load(p);
     if (e.y == ConstraintInvalid || e.z == ConstraintInvalid) return;
-    uint la = labels_old[e.y].load(), lb = labels_old[e.z].load();
-    if (!cs_label(e.y, la) || !cs_label(e.z, lb)) return;
+    uint a = cs_local_body(e.y), b = cs_local_body(e.z);
+    uint la = labels_old[a].load(), lb = labels_old[b].load();
+    if (!cs_label(a, la) || !cs_label(b, lb)) return;
     uint m = min(la, lb);
-    labels_next[e.y].min(m);
-    labels_next[e.z].min(m);
+    labels_next[a].min(m);
+    labels_next[b].min(m);
 }
 
 [shader("compute")][numthreads(64, 1, 1)]
@@ -331,8 +316,7 @@ void constraint_check_round(uint3 tid : SV_DispatchThreadID)
     uint v;
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
     uint old = labels_old[v].load(), next = labels_next[v].load(), status = 0u;
-    BodyModel m = body_models[v];
-    if (cs_writer(m) && cs_body(v, m.meta.w))
+    if (cs_initial_root(v) != ConstraintInvalid)
     {
         if (!cs_label(v, old) || !cs_label(v, next) || next > old) status |= ConstraintBadLabel;
     }
@@ -388,7 +372,7 @@ void constraint_validate_labels(uint3 tid : SV_DispatchThreadID)
     uint v;
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
     uint status = 0u, l = labels_old[v].load();
-    if (cs_writer(body_models[v]) && cs_body(v, body_models[v].meta.w))
+    if (cs_initial_root(v) != ConstraintInvalid)
     {
         if (!cs_label(v, l)) status |= ConstraintBadLabel;
         else if (labels_old[l].load() != l) status |= ConstraintBadLabel;
@@ -409,17 +393,19 @@ void constraint_validate_edges(uint3 tid : SV_DispatchThreadID)
         uint root = ConstraintInvalid;
         if (e.y != ConstraintInvalid)
         {
-            root = labels_old[e.y].load();
-            if (!cs_label(e.y, root)) status |= ConstraintBadLabel;
+            uint a = cs_local_body(e.y);
+            root = labels_old[a].load();
+            if (!cs_label(a, root)) status |= ConstraintBadLabel;
         }
         if (e.z != ConstraintInvalid)
         {
-            uint other = labels_old[e.z].load();
-            if (!cs_label(e.z, other) || (root != ConstraintInvalid && root != other)) status |= ConstraintBadLabel;
+            uint b = cs_local_body(e.z);
+            uint other = labels_old[b].load();
+            if (!cs_label(b, other) || (root != ConstraintInvalid && root != other)) status |= ConstraintBadLabel;
             root = other;
         }
-        if (root == ConstraintInvalid || e.x >= constraint_params.counts.w) status |= ConstraintBadLabel;
-        else if (body_models[root].meta.w != e.x || labels_old[root].load() != root) status |= ConstraintBadLabel;
+        if (root >= constraint_params.counts.x || e.x != constraint_params.selection.x) status |= ConstraintBadLabel;
+        else if (labels_old[root].load() != root) status |= ConstraintBadLabel;
     }
     uint offset = kind == ConstraintJoint ? 0u : constraint_params.counts.y;
     cs_store(constraint_params.layout.w + offset + r, uint4(
@@ -520,7 +506,7 @@ void constraint_seed_sort(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupI
         {
             uint4 e = cs_load(p);
             uint body = e.y != ConstraintInvalid ? e.y : e.z;
-            key = uint4(e.x, labels_old[body].load(), e.w, kind);
+            key = uint4(e.x, labels_old[cs_local_body(body)].load(), e.w, kind);
         }
     }
     key = jph_sort_tile(lane, key);
@@ -577,7 +563,7 @@ void constraint_mark_roots(uint3 tid : SV_DispatchThreadID)
     if (cs_load(p + 1u).y == 0u) return;
     uint4 e = cs_load(p);
     uint body = e.y != ConstraintInvalid ? e.y : e.z;
-    uint root = labels_old[body].load();
+    uint root = labels_old[cs_local_body(body)].load();
     labels_next[root].or(1u << kind);
 }
 [shader("compute")][numthreads(64, 1, 1)]
@@ -627,13 +613,13 @@ void constraint_write_islands(uint3 tid : SV_DispatchThreadID)
     if (row.x != 0u && cs_load(constraint_params.layout.y).w == 1u)
     {
         uint4 prefix = cs_load(constraint_params.islands.z + root);
-        uint id = prefix.x, world = body_models[root].meta.w;
+        uint id = prefix.x, world = constraint_params.selection.x;
         uint jb = cs_bound(constraint_params.references.z, constraint_params.counts.y, world, root, false);
         uint je = cs_bound(constraint_params.references.z, constraint_params.counts.y, world, root, true);
         uint pb = cs_bound(constraint_params.references.w, constraint_params.counts.z, world, root, false);
         uint pe = cs_bound(constraint_params.references.w, constraint_params.counts.z, world, root, true);
         uint jc = je - jb, pc = pe - pb;
-        cs_store(constraint_params.islands.x + 2u * id, uint4(world, root, jb, jc));
+        cs_store(constraint_params.islands.x + 2u * id, uint4(world, cs_packed_body(root), jb, jc));
         cs_store(constraint_params.islands.x + 2u * id + 1u, uint4(pb, pc, 0u, 0u));
         if (row.y != 0u) cs_store(constraint_params.sources.z + prefix.y, uint4(id, 0u, 0u, 0u));
         if (row.z != 0u) cs_store(constraint_params.sources.w + prefix.z, uint4(id, 0u, 0u, 0u));
