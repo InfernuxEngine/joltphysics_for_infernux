@@ -4,6 +4,7 @@
 
 #include <Jolt/Jolt.h>
 
+#include <Jolt/Core/ScopeExit.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsUpdateContext.h>
@@ -936,6 +937,12 @@ static void sFinalizeContactAllocator(PhysicsUpdateContext::Step &ioStep, const 
 JPH_TSAN_NO_SANITIZE
 void PhysicsSystem::JobFindCollisions(PhysicsUpdateContext::Step *ioStep, int inJobIndex)
 {
+	// An inline job system can run these successors immediately.
+	JPH_SCOPE_EXIT([ioStep] {
+		ioStep->mUpdateBroadphaseFinalize.RemoveDependency();
+		ioStep->mFinalizeIslands.RemoveDependency();
+	});
+
 #ifdef JPH_ENABLE_ASSERTS
 	// We read positions and read velocities (for elastic collisions)
 	BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::Read);
@@ -1044,9 +1051,6 @@ void PhysicsSystem::JobFindCollisions(PhysicsUpdateContext::Step *ioStep, int in
 						// Mark this job as inactive
 						ioStep->mActiveFindCollisionJobs.fetch_and(~PhysicsUpdateContext::JobMask(1 << inJobIndex), memory_order_release);
 
-						// Trigger the next jobs
-						ioStep->mUpdateBroadphaseFinalize.RemoveDependency();
-						ioStep->mFinalizeIslands.RemoveDependency();
 						return;
 					}
 
@@ -2760,24 +2764,21 @@ void PhysicsSystem::JobSoftBodyPrepare(PhysicsUpdateContext *ioContext, PhysicsU
 {
 	JPH_PROFILE_FUNCTION();
 
+	BodyIDVector active_bodies;
+	mBodyManager.GetActiveBodies(EBodyType::SoftBody, active_bodies);
+	if (active_bodies.empty())
+	{
+		// The single-threaded scheduler can run the next rigid substep here.
+		if (ioStep->mStartNextStep.IsValid())
+			ioStep->mStartNextStep.RemoveDependency();
+		return;
+	}
+
 	{
 	#ifdef JPH_ENABLE_ASSERTS
 		// Reading soft body positions
 		BodyAccess::Grant grant(BodyAccess::EAccess::None, BodyAccess::EAccess::Read);
 	#endif
-
-		// Get the active soft bodies
-		BodyIDVector active_bodies;
-		mBodyManager.GetActiveBodies(EBodyType::SoftBody, active_bodies);
-
-		// Quit if there are no active soft bodies
-		if (active_bodies.empty())
-		{
-			// Kick the next step
-			if (ioStep->mStartNextStep.IsValid())
-				ioStep->mStartNextStep.RemoveDependency();
-			return;
-		}
 
 		// Sort to get a deterministic update order
 		QuickSort(active_bodies.begin(), active_bodies.end());
