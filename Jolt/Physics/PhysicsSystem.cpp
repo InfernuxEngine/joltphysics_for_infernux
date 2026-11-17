@@ -224,15 +224,16 @@ bool PhysicsSystem::SetCoupledEndpoints(PhysicsUpdateContext &ioContext, const B
 	return true;
 }
 
-bool PhysicsSystem::BeginCoupledVelocityUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem)
+bool PhysicsSystem::BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem)
 {
-	JPH_ASSERT(ioContext.mSteps.empty() && !ioContext.mCoupledUpdate);
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mSteps.empty() && !ioContext.IsCoupledUpdate());
 	if (inDeltaTime <= 0.0f || inCollisionSteps <= 0 || !SetCoupledEndpoints(ioContext, inBodies, inBodyCount, false))
 		return false;
-	ioContext.mCoupledUpdate = true;
+	ioContext.mCoupledStage = Stage::Velocity;
 	if (!PrepareUpdate(inDeltaTime, inCollisionSteps, ioContext, &inJobSystem))
 	{
-		ioContext.mCoupledUpdate = false;
+		ioContext.mCoupledStage = Stage::Inactive;
 		return false;
 	}
 
@@ -245,7 +246,8 @@ bool PhysicsSystem::BeginCoupledVelocityUpdate(float inDeltaTime, int inCollisio
 
 std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
 {
-	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledUpdate && !ioContext.mAwaitingCoupledEndpoints);
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Velocity);
 	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
 	{
 #ifdef JPH_ENABLE_ASSERTS
@@ -286,24 +288,88 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(P
 		}
 	}
 
-	// Releasing the last dependency runs the unchanged integration/CCD/position graph inline.
+	const bool coupled_positions = mPhysicsSettings.mNumPositionSteps > 0 && !ioContext.mCoupledBodies.empty();
+	if (mPhysicsSettings.mNumPositionSteps > 0 && !coupled_positions)
+		JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
+
+	// Integrate and resolve CCD once. A coupled position phase retains the bounds/sleep jobs.
 	step.mPreIntegrateVelocity.RemoveDependency();
+	if (coupled_positions)
+	{
+		JPH_ASSERT(step.mResolveCCDContacts.IsDone() && !step.mSolvePositionConstraints.front().IsDone());
+		ioContext.mCoupledStage = Stage::Position;
+		ioContext.mCoupledPositionRound = 0;
+		SolveCoupledPositionRound(ioContext);
+		return std::nullopt;
+	}
+	return FinishCoupledSubstep(ioContext);
+}
+
+void PhysicsSystem::SolveCoupledPositionRound(PhysicsUpdateContext &ioContext)
+{
+	if (!ioContext.mCoupledHasLocalVelocityRows)
+		return;
+
+	JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::None, BodyAccess::EAccess::ReadWrite);)
+	for (uint32 island : ioContext.mCoupledIslandOrder)
+		if (ioContext.mCoupledPositionRound < mIslandBuilder.GetNumPositionSteps(island))
+		{
+			uint32 *constraints_begin, *constraints_end, *contacts_begin, *contacts_end;
+			mIslandBuilder.GetConstraintsInIsland(island, constraints_begin, constraints_end);
+			mIslandBuilder.GetContactsInIsland(island, contacts_begin, contacts_end);
+			ConstraintManager::sSolvePositionConstraints(ioContext.mActiveConstraints, constraints_begin, constraints_end, ioContext.mStepDeltaTime, mPhysicsSettings.mBaumgarte);
+			mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+		}
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledPositionUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyCorrection *inCorrections, uint32 inCorrectionCount, uint inRounds)
+{
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Position);
+	JPH_ASSERT(inRounds == 1 || !ioContext.mCoupledHasLocalVelocityRows);
+	{
+		JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::None, BodyAccess::EAccess::ReadWrite);)
+		for (uint32 i = 0; i < inCorrectionCount; ++i)
+		{
+			const auto &correction = inCorrections[i];
+			JPH_ASSERT(std::binary_search(ioContext.mCoupledBodies.begin(), ioContext.mCoupledBodies.end(), correction.mBody));
+			Body &body = mBodyManager.GetBody(correction.mBody);
+			const RVec3 center = body.GetCenterOfMassPosition() + correction.mTranslation;
+			body.SetPositionAndRotationInternal(center - correction.mRotation * body.GetShape()->GetCenterOfMass(), correction.mRotation, false);
+		}
+	}
+
+	ioContext.mCoupledPositionRound += inRounds;
+	if (ioContext.mCoupledPositionRound < mPhysicsSettings.mNumPositionSteps)
+	{
+		SolveCoupledPositionRound(ioContext);
+		return std::nullopt;
+	}
+	JPH_ASSERT(ioContext.mCoupledPositionRound == mPhysicsSettings.mNumPositionSteps);
+	JobHandle::sRemoveDependencies(ioContext.mSteps[ioContext.mCoupledSubstep].mSolvePositionConstraints);
+	return FinishCoupledSubstep(ioContext);
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::FinishCoupledSubstep(PhysicsUpdateContext &ioContext)
+{
+	using Stage = PhysicsUpdateContext::ECoupledStage;
 	if (++ioContext.mCoupledSubstep < ioContext.mSteps.size())
 	{
-		ioContext.mAwaitingCoupledEndpoints = true;
+		ioContext.mCoupledStage = Stage::NextSubstep;
 		return std::nullopt;
 	}
 	auto result = FinishUpdate(ioContext);
-	ioContext.mCoupledUpdate = false;
+	ioContext.mCoupledStage = Stage::Inactive;
 	return result;
 }
 
 bool PhysicsSystem::BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount)
 {
-	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mAwaitingCoupledEndpoints);
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::NextSubstep);
 	if (!SetCoupledEndpoints(ioContext, inBodies, inBodyCount, true))
 		return false;
-	ioContext.mAwaitingCoupledEndpoints = false;
+	ioContext.mCoupledStage = Stage::Velocity;
+	ioContext.mCoupledPositionRound = 0;
 	ioContext.mSteps[ioContext.mCoupledSubstep - 1].mStartNextStep.RemoveDependency();
 	return true;
 }
@@ -324,7 +390,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 	// If there are no active bodies (and no step listener to wake them up) or there's no time delta
 	uint32 num_active_rigid_bodies = mBodyManager.GetNumActiveBodies(EBodyType::RigidBody);
 	uint32 num_active_soft_bodies = mBodyManager.GetNumActiveBodies(EBodyType::SoftBody);
-	if ((!context.mCoupledUpdate && num_active_rigid_bodies == 0 && num_active_soft_bodies == 0 && mStepListeners.empty()) || inDeltaTime <= 0.0f)
+	if ((!context.IsCoupledUpdate() && num_active_rigid_bodies == 0 && num_active_soft_bodies == 0 && mStepListeners.empty()) || inDeltaTime <= 0.0f)
 	{
 		mBodyManager.LockAllBodies();
 
@@ -630,7 +696,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 							// Kick the step listeners job first
 							JobHandle::sRemoveDependencies(next_step->mStepListeners);
 						}
-					}, 3 + (context.mCoupledUpdate? 1 : 0)); // native completion plus, if coupled, the next endpoints
+					}, 3 + (context.IsCoupledUpdate()? 1 : 0)); // native completion plus, if coupled, the next endpoints
 			}
 
 			// This job will solve the velocity constraints
@@ -656,7 +722,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 					context.mPhysicsSystem->JobPreIntegrateVelocity(&context, &step);
 
 					JobHandle::sRemoveDependencies(step.mIntegrateVelocity);
-				}, 2 + max_concurrency + (context.mCoupledUpdate? 1 : 0)); // plus the external result for a coupled update
+				}, 2 + max_concurrency + (context.IsCoupledUpdate()? 1 : 0)); // plus the external result for a coupled update
 
 			// Unblock previous jobs
 			step.mUpdateBroadphaseFinalize.RemoveDependency();
@@ -707,7 +773,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 						// Kick the next step
 						if (step.mSoftBodyPrepare.IsValid())
 							step.mSoftBodyPrepare.RemoveDependency();
-					}, 3); // depends on: resolve ccd contacts, body set island index, finish building jobs.
+					}, 3 + (context.IsCoupledUpdate() && mPhysicsSettings.mNumPositionSteps > 0? 1 : 0));
 
 			// Unblock previous jobs.
 			step.mResolveCCDContacts.RemoveDependency();
@@ -1535,7 +1601,7 @@ void PhysicsSystem::ProcessBodyPair(ContactAllocator &ioContactAllocator, const 
 
 void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 {
-	if (ioContext->mCoupledUpdate)
+	if (ioContext->IsCoupledUpdate())
 	{
 		auto &velocities = ioContext->mCoupledFreeVelocities;
 		velocities.clear();
@@ -2908,7 +2974,8 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 			{
 				// Iterate
 				uint num_position_steps = mIslandBuilder.GetNumPositionSteps(island_idx);
-				for (uint position_step = 0; position_step < num_position_steps; ++position_step)
+				const uint first_step = ioContext->IsCoupledIsland(island_idx)? ioContext->mCoupledPositionRound : 0;
+				for (uint position_step = first_step; position_step < num_position_steps; ++position_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
 					applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);

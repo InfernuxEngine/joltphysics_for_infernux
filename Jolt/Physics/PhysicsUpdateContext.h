@@ -176,10 +176,12 @@ public:
 	Array<uint8>			mCoupledIslandMask;
 	Array<uint32>			mCoupledIslandOrder;
 	Array<uint>				mCoupledSweeps;
+	enum class ECoupledStage : uint8 { Inactive, Velocity, Position, NextSubstep };
+	ECoupledStage			mCoupledStage = ECoupledStage::Inactive;
 	uint32					mCoupledSubstep = 0;
-	bool					mCoupledUpdate = false;
-	bool					mAwaitingCoupledEndpoints = false;
+	uint					mCoupledPositionRound = 0;
 	bool					mCoupledHasLocalVelocityRows = false;
+	bool					IsCoupledUpdate() const { return mCoupledStage != ECoupledStage::Inactive; }
 	bool					IsCoupledIsland(uint32 inIsland) const { return !mCoupledIslandMask.empty() && mCoupledIslandMask[inIsland] != 0; }
 	ContactListener *		mContactReportListener = nullptr;					///< Opt-in read-only reports for this Update
 	bool						mReportContactImpulses = false;

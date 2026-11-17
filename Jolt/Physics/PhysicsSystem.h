@@ -178,15 +178,25 @@ public:
 	/// Prepare a fixed update through the first substep's native warm start. Only islands reached by admitted Dynamic endpoints
 	/// leave their velocity sweeps to the caller. A fresh context, its allocator and the inline job system
 	/// must stay on the calling owner thread until completion. Between calls use no-lock reads only.
-	bool						BeginCoupledVelocityUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
+	bool						BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
 
 	/// Apply a completed peer response and run another native sweep in the touched islands.
-	/// When no native sweeps remain, accept the last response and integrate exactly one substep.
-	/// It returns nullopt until the last substep has integrated, otherwise the update result.
+	/// After the last sweep, integrate once and yield at position projection if the endpoints need it.
+	/// Both advance methods return the update result only at the end of the last substep.
 	/// An admitted update must be advanced to completion.
 	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses = nullptr, uint32 inImpulseCount = 0);
 
-	/// Accept the new endpoints after the previous substep integrated.
+	struct CoupledBodyCorrection
+	{
+		BodyID					mBody;
+		Vec3					mTranslation;	///< Displacement relative to the current center of mass.
+		Quat					mRotation;		///< Corrected body orientation.
+	};
+
+	/// Apply position corrections between native position rounds, before updating bounds and sleeping.
+	std::optional<EPhysicsUpdateError> AdvanceCoupledPositionUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyCorrection *inCorrections = nullptr, uint32 inCorrectionCount = 0, uint inRounds = 1);
+
+	/// Accept the new endpoints after completing the previous substep.
 	bool						BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount);
 
 	/// Saving state for replay
@@ -298,6 +308,8 @@ private:
 	bool						PrepareUpdate(float inDeltaTime, int inCollisionSteps, PhysicsUpdateContext &ioContext, JobSystem *inJobSystem);
 	EPhysicsUpdateError			FinishUpdate(PhysicsUpdateContext &ioContext);
 	bool						SetCoupledEndpoints(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount, bool inBodyLocksHeld);
+	void						SolveCoupledPositionRound(PhysicsUpdateContext &ioContext);
+	std::optional<EPhysicsUpdateError> FinishCoupledSubstep(PhysicsUpdateContext &ioContext);
 
 	// Various job entry points
 	void						JobStepListeners(PhysicsUpdateContext::Step *ioStep);
