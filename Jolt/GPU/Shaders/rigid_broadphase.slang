@@ -223,17 +223,8 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
     indirect_arguments[record].value = uint4(groups, 1u, 1u, 0u);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void build_sort_records(uint3 tid : SV_DispatchThreadID)
+uint4 bp_sort_record(uint leaf)
 {
-    uint leaf;
-    if (!bp_item(tid.x, broadphase.counts.x, leaf)) return;
-    if (!bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
-    {
-        bp_store(broadphase.merge.x + leaf, uint4(0xffffffffu, 0xffffffffu, leaf, 0u));
-        return;
-    }
     ShapeModel shape = shape_models[leaf];
     uint status = 0u;
     if (shape.surface.x >= 32u) status |= BP_BAD_MODEL;
@@ -257,25 +248,27 @@ void build_sort_records(uint3 tid : SV_DispatchThreadID)
     // Invalid records still get an initialized, unique key and an explicit
     // failure. They never silently become a successful zero-candidate result.
     uint min_x = (status & BP_BAD_BOUNDS) == 0u ? bp_ordered(box.minimum.x) : 0u;
-    bp_store(broadphase.merge.x + leaf, uint4(world, min_x, leaf, status));
+    return uint4(world, min_x, leaf, status);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void build_suppression(uint3 tid : SV_DispatchThreadID)
+void build_sort_records(uint3 tid : SV_DispatchThreadID)
 {
-    uint joint;
-    if (!bp_item(tid.x, broadphase.counts.y, joint)) return;
-    if (!bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
-    {
-        bp_store(broadphase.merge.x + joint, uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint));
-        bp_store(broadphase.rankRows.z + joint, uint4(0u));
-        return;
-    }
+    uint leaf;
+    if (!bp_item(tid.x, broadphase.counts.x, leaf)) return;
+    uint4 record = uint4(0xffffffffu, 0xffffffffu, leaf, 0u);
+    if (bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
+        record = bp_sort_record(leaf);
+    bp_store(broadphase.merge.x + leaf, record);
+}
+
+uint4 bp_suppression_record(uint joint, out uint status)
+{
     uint p = 1u + JointDirectoryWords * joint;
     uint4 endpoints = joint_stream[p].value;
     uint world = joint_stream[p + 1u].value.z;
-    uint status = 0u;
+    status = 0u;
     bool suppress = (endpoints.w & (JointEnabled | JointCollisionEnabled)) == JointEnabled;
     // World endpoints cannot match any two real bodies, exactly as before.
     suppress = suppress && endpoints.x != InvalidQueryBodySlot;
@@ -290,9 +283,21 @@ void build_suppression(uint3 tid : SV_DispatchThreadID)
             || (endpoints.x != InvalidQueryBodySlot && body_models[endpoints.x].meta.w != world))
             status |= BP_BAD_MODEL;
     }
-    uint4 key = uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint);
     if (suppress && status == 0u)
-        key = uint4(world, min(endpoints.x, endpoints.y), max(endpoints.x, endpoints.y), joint);
+        return uint4(world, min(endpoints.x, endpoints.y), max(endpoints.x, endpoints.y), joint);
+    return uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_suppression(uint3 tid : SV_DispatchThreadID)
+{
+    uint joint;
+    if (!bp_item(tid.x, broadphase.counts.y, joint)) return;
+    uint status = 0u;
+    uint4 key = uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint);
+    if (bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
+        key = bp_suppression_record(joint, status);
     bp_store(broadphase.merge.x + joint, key);
     bp_store(broadphase.rankRows.z + joint, uint4(0u, 0u, status, 0u));
 }
@@ -418,13 +423,25 @@ bool bp_collider_suppressed(uint4 a, uint4 b)
 }
 
 // Count and fill call this exact function against the same frozen buffers.
-// AABBs already include the existing half speculative-band expansion.
-bool bp_eligible(uint rank_a, uint rank_b)
+groupshared uint bp_small_leaf_status[BroadphaseSmallSetLimit];
+groupshared uint4 bp_small_joint_keys[BroadphaseSmallSetLimit];
+groupshared uint bp_small_pair_masks[BroadphaseSmallSetLimit];
+
+bool bp_small_suppressed(uint world, uint a, uint b)
 {
-    uint4 key_a = bp_load(broadphase.workspace.z + rank_a);
-    uint4 key_b = bp_load(broadphase.workspace.z + rank_b);
-    if (!bp_world_selected(key_a.x) || key_a.x != key_b.x) return false;
-    ShapeModel a = shape_models[key_a.z], b = shape_models[key_b.z];
+    uint2 pair = uint2(min(a, b), max(a, b));
+    for (uint i = 0u; i < broadphase.selectedCounts.z; ++i)
+    {
+        uint4 key = bp_small_joint_keys[i];
+        if (key.x == world && all(key.yz == pair)) return true;
+    }
+    return false;
+}
+
+// AABBs already include the existing half speculative-band expansion.
+bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
+{
+    ShapeModel a = shape_models[first], b = shape_models[second];
     if (a.meta.y == b.meta.y) return false;
     BodyModel ma = body_models[a.meta.y], mb = body_models[b.meta.y];
     if ((ma.meta.z & MotionNotResident) != 0u || (mb.meta.z & MotionNotResident) != 0u) return false;
@@ -433,10 +450,85 @@ bool bp_eligible(uint rank_a, uint rank_b)
         && (mb.meta.z & ~MotionNotResident) != MotionDynamic) return false;
     if ((a.surface.y & (1u << b.surface.x)) == 0u
         || (b.surface.y & (1u << a.surface.x)) == 0u) return false;
-    if (bp_suppressed(key_a.x, a.meta.y, b.meta.y)) return false;
+    if (small)
+    {
+        if (bp_small_suppressed(world, a.meta.y, b.meta.y)) return false;
+    }
+    else if (bp_suppressed(world, a.meta.y, b.meta.y)) return false;
     if (bp_collider_suppressed(a.source, b.source)) return false;
-    Aabb ba = bounds[key_a.z], bb = bounds[key_b.z];
+    Aabb ba = bounds[first], bb = bounds[second];
     return !any(ba.minimum.xyz > bb.maximum.xyz) && !any(bb.minimum.xyz > ba.maximum.xyz);
+}
+
+bool bp_eligible(uint rank_a, uint rank_b)
+{
+    uint4 a = bp_load(broadphase.workspace.z + rank_a);
+    uint4 b = bp_load(broadphase.workspace.z + rank_b);
+    if (!bp_world_selected(a.x) || a.x != b.x) return false;
+    return bp_eligible_leaves(a.z, b.z, a.x, false);
+}
+
+// A finite leaf set fits one group and one pair mask per row. Lane-order
+// prefix placement yields the same (leafA, leafB) order as the global sort.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_small_pairs(uint3 local : SV_GroupThreadID)
+{
+    uint lane = local.x;
+    uint first = broadphase.selection.z;
+    uint leaves = broadphase.selectedCounts.y;
+    uint joints = broadphase.selectedCounts.z;
+    uint world = broadphase.selection.x;
+    if (lane < leaves)
+        bp_small_leaf_status[lane] = bp_sort_record(first + lane).w;
+    if (lane < joints)
+    {
+        uint status;
+        uint4 key = bp_suppression_record(broadphase.selection.w + lane, status);
+        key.w = status;
+        bp_small_joint_keys[lane] = key;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (lane < leaves)
+    {
+        uint mask = 0u;
+        if (bp_small_leaf_status[lane] == 0u)
+        {
+            for (uint other = lane + 1u; other < leaves; ++other)
+            {
+                if (bp_small_leaf_status[other] != 0u) continue;
+                if (bp_eligible_leaves(first + lane, first + other, world, true))
+                    mask |= 1u << other;
+            }
+        }
+        bp_small_pair_masks[lane] = mask;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (lane < leaves)
+    {
+        uint offset = broadphase.candidates.x;
+        for (uint earlier = 0u; earlier < lane; ++earlier)
+            offset += countbits(bp_small_pair_masks[earlier]);
+        uint mask = bp_small_pair_masks[lane];
+        for (uint other = lane + 1u; other < leaves; ++other)
+            if ((mask & (1u << other)) != 0u)
+                resident_patches[offset++].leaves = uint4(first + lane, first + other, 0u, world);
+    }
+    if (lane == 0u)
+    {
+        uint count = 0u, status = 0u;
+        for (uint i = 0u; i < leaves; ++i)
+        {
+            count += countbits(bp_small_pair_masks[i]);
+            status |= bp_small_leaf_status[i];
+        }
+        for (uint i = 0u; i < joints; ++i)
+            status |= bp_small_joint_keys[i].w;
+        bp_store(bp_h1(), uint4(count, 0u, status, count));
+        resident_patches[0u].leaves = uint4(broadphase.candidates.x, status == 0u ? count : 0u, 0u, 0u);
+    }
 }
 
 void bp_round(uint lane, bool fill)
@@ -670,6 +762,12 @@ void build_world_ranges(uint3 tid : SV_DispatchThreadID)
     uint world;
     if (!bp_item(tid.x, broadphase.counts.z, world)) return;
     WorldRange runtime = author_worlds[world];
+    if (broadphase.round.w != 0u)
+    {
+        runtime.bodies.zw = uint2(0u, bp_world_selected(world) ? bp_load(bp_h1()).x : 0u);
+        runtime_worlds[world] = runtime;
+        return;
+    }
     if (!bp_world_selected(world))
     {
         runtime.bodies.zw = uint2(0u);
