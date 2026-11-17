@@ -47,6 +47,33 @@ bool cs_body(uint body, uint world)
         && cs_in_range(body, constraint_params.selection.y, constraint_params.selectedCounts.x)
         && cs_in_range(body, w.bodies.x, w.bodies.y);
 }
+uint cs_initial_root(uint body)
+{
+    BodyModel model = body_models[body];
+    return cs_writer(model) && cs_body(body, model.meta.w) ? body : ConstraintInvalid;
+}
+
+// With no candidate pairs or selected joints, each resident dynamic is its
+// own component. Write its sleep row directly, including the shared header.
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_initialize_isolated_topology(uint3 tid : SV_DispatchThreadID)
+{
+    uint body;
+    if (!cs_item(tid.x, constraint_params.counts.x, body)) return;
+    cs_store(constraint_params.limits.w + body, uint4(cs_initial_root(body), 0u, 0u, 0u));
+    labels_next[body].store(0u);
+    if (body + 1u == constraint_params.counts.x)
+        labels_next[constraint_params.counts.x].store(0u);
+    if (body == 0u)
+    {
+        uint first = constraint_params.layout.x, end = constraint_params.limits.x;
+        cs_store(first, uint4(0u));
+        cs_store(first + 1u, uint4(0u));
+        cs_store(first + 2u, uint4(end));
+        cs_store(first + 3u, uint4(end, end, constraint_params.limits.w, constraint_params.counts.x));
+    }
+}
+
 uint cs_ref_base(uint kind)
 {
     return kind == ConstraintJoint ? constraint_params.references.x : constraint_params.references.y;
@@ -237,11 +264,8 @@ void constraint_finalize_topology(uint3 tid:SV_DispatchThreadID)
 {
     if(tid.x!=0u) return;
     uint4 control=cs_load(constraint_params.layout.y);
-    uint status=control.z;
+    uint status=control.z | ConstraintNotReady;
     if(control.w!=1u) status|=ConstraintNotConverged;
-    // The host sets select.w only for a completed empty candidate set and zero
-    // selected joint rows. In that case there is no numerical assembly after CC.
-    if (constraint_params.select.w == 0u) status |= ConstraintNotReady;
     cs_store(constraint_params.layout.x,uint4(0u,0u,0u,status));
     cs_store(constraint_params.layout.x+1u,uint4(0u));
 }
@@ -251,8 +275,7 @@ void constraint_init_labels(uint3 tid : SV_DispatchThreadID)
 {
     uint v;
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
-    BodyModel m = body_models[v];
-    labels_old[v].store(cs_writer(m) && cs_body(v, m.meta.w) ? v : ConstraintInvalid);
+    labels_old[v].store(cs_initial_root(v));
     labels_next[v].store(ConstraintInvalid);
 }
 bool cs_label(uint vertex, uint label)
