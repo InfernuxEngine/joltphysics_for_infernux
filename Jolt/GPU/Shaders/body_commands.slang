@@ -100,7 +100,10 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             jph_project_motion(model, state);
             if(any(previous.positionCOM.xyz!=state.positionCOM.xyz) ||
                !(all(previous.rotation==state.rotation) || all(previous.rotation==-state.rotation)))
+            {
+                ++sleep.timing.y;
                 command_wake(model,state,sleep_extent,sleep,true);
+            }
         }
         else if (kind == CommandResetMotion)
         {
@@ -110,6 +113,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             forces.torque = float4(0.0f);
             target.state = uint4(0u);
             command_reset_sleep(state,sleep_extent,sleep);
+            ++sleep.timing.y;
             // This is the existing explicit full motion-state/episode reset,
             // not Sleep or a retained-preserve boundary.
             sleep.state.x=jph_nonstatic(model)?1u:0u;
@@ -184,6 +188,7 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
             }
             target.state = uint4(0u);
             jph_project_motion(model, state);
+            ++sleep.timing.y;
             if (action != MotionBoundarySuspendPreserve)
                 command_reset_sleep(state,sleep_extent,sleep);
             else

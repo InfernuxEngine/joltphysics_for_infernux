@@ -19,6 +19,7 @@ RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<ContactPatch> contact_patches;
 StructuredBuffer<uint4> convex_geometry;
 RWStructuredBuffer<BodySleepRecord> body_sleep;
+RWStructuredBuffer<QueryRecordWord> contact_history;
 ConstantBuffer<BodyBatchHeader> body_batch_header;
 StructuredBuffer<StepParams> body_batch_selections;
 StructuredBuffer<BodyBatchTile> body_batch_tiles;
@@ -978,7 +979,165 @@ void setup_contacts(uint3 tid : SV_DispatchThreadID)
     }
     contact.impulse = float4(0.0f, 0.0f, 0.0f, bias);
     contact.localAnchorA.w = 0.0f;
+    if (slot % MaxContactPointsPerPair == 0u)
+        contact.localAnchorB.w = jph_combine_material(shape_a.material.x, shape_a.surface.z,
+                                                        shape_b.material.x, shape_b.surface.z);
     contacts[slot] = contact;
+}
+
+uint jph_history_word(uint patch)
+{
+    return 1u + patch * ContactHistoryWords;
+}
+
+uint jph_previous_contact(uint2 pair, uint count)
+{
+    uint first = 0u, end = count;
+    while (first < end)
+    {
+        uint middle = first + (end - first) / 2u;
+        uint2 key = contact_history[jph_history_word(middle)].value.xy;
+        if (key.x < pair.x || (key.x == pair.x && key.y < pair.y)) first = middle + 1u;
+        else end = middle;
+    }
+    return first;
+}
+
+void jph_warm_contact(uint ordinal, uint4 header)
+{
+    uint4 patch = contact_patches[contact_patches[0].leaves.x + ordinal].leaves;
+    uint slot = ordinal * MaxContactPointsPerPair;
+    Contact contact = contacts[slot];
+    uint a = contact.meta.x, b = contact.meta.y;
+    uint previous = jph_previous_contact(patch.xy, header.x);
+    if (previous == header.x) return;
+    uint base = jph_history_word(previous);
+    uint4 key = contact_history[base].value;
+    if (any(key.xy != patch.xy) || key.z != body_sleep[a].runtime.timing.y || key.w != body_sleep[b].runtime.timing.y)
+        return;
+    float4 old_normal = asfloat(contact_history[base + 1u].value);
+    uint old_count = uint(old_normal.w);
+    float3 normal = contact.normalDepth.xyz;
+    if (old_count == 0u || dot(normal, old_normal.xyz) < 0.95f) return;
+
+    float dt_ratio = step_params.gravityDt.w / asfloat(header.y);
+    BodyModel ma = jph_effective_model(body_models[a], kinematic_targets[a]);
+    BodyModel mb = jph_effective_model(body_models[b], kinematic_targets[b]);
+    BodyState sa = body_states[a], sb = body_states[b];
+    float3 center = float3(0.0f), midpoints[4];
+    float4 lambdas = float4(0.0f);
+    uint matched = 0u;
+    for (uint i = 0u; i < patch.w; ++i)
+    {
+        Contact current = contacts[slot + i];
+        // Jolt's mContactPointPreserveLambdaMaxDistSq on both local anchors.
+        constexpr float max_distance_sq = 0.0001f;
+        float distance = 2.0f * max_distance_sq;
+        uint selected = old_count;
+        for (uint j = 0u; j < old_count; ++j)
+        {
+            if ((matched & (1u << j)) != 0u) continue;
+            float3 delta_a = current.localAnchorA.xyz - asfloat(contact_history[base + 3u + 2u * j].value.xyz);
+            float3 delta_b = current.localAnchorB.xyz - asfloat(contact_history[base + 4u + 2u * j].value.xyz);
+            float da = dot(delta_a, delta_a), db = dot(delta_b, delta_b);
+            if (da <= max_distance_sq && db <= max_distance_sq && da + db < distance)
+            {
+                selected = j;
+                distance = da + db;
+            }
+        }
+        float3 pa, pb, ra, rb;
+        jph_contact_points(current, sa, sb, pa, pb, ra, rb);
+        midpoints[i] = 0.5f * (pa + pb);
+        center += midpoints[i];
+        if (selected < old_count)
+        {
+            matched |= 1u << selected;
+            float lambda = dt_ratio * asfloat(contact_history[base + 3u + 2u * selected].value.w);
+            jph_apply_impulse(ma, sa, ra, mb, sb, rb, normal, lambda);
+            lambdas[i] = lambda;
+            contacts[slot + i].impulse.x = lambda;
+        }
+    }
+    float sum = dot(lambdas, float4(1.0f));
+    if (sum == 0.0f) return;
+
+    center /= float(patch.w);
+    float radius = 0.0f;
+    for (uint i = 0u; i < patch.w; ++i)
+    {
+        float3 offset = midpoints[i] - center;
+        radius += length(offset - normal * dot(offset, normal)) * lambdas[i];
+    }
+    float friction = contact.localAnchorB.w;
+    float4 prior_friction = asfloat(contact_history[base + 2u].value) * dt_ratio;
+    float3 t1, t2;
+    jph_tangents(normal, t1, t2);
+    float2 tangent = float2(dot(prior_friction.xyz, t1), dot(prior_friction.xyz, t2));
+    float bound = friction * sum;
+    float tangent_sq = dot(tangent, tangent);
+    if (tangent_sq > bound * bound) tangent *= bound * rsqrt(tangent_sq);
+    jph_apply_impulse(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
+                      tangent.x * t1 + tangent.y * t2, 1.0f);
+    float twist = clamp(prior_friction.w, -friction * radius, friction * radius);
+    contacts[slot].impulse.yz = tangent;
+    contacts[slot].localAnchorA.w = twist;
+    if (jph_dynamic(ma))
+    {
+        sa.angularVelocity.xyz -= jph_inverse_inertia(ma, sa, normal * twist);
+        body_states[a] = sa;
+    }
+    if (jph_dynamic(mb))
+    {
+        sb.angularVelocity.xyz += jph_inverse_inertia(mb, sb, normal * twist);
+        body_states[b] = sb;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void warm_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint begin, first, end;
+    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
+    uint4 header = contact_history[0].value;
+    for (uint i = first; i < end; ++i)
+        jph_warm_contact(jph_island_patch_source(begin, i), header);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void store_contact_history(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint ordinal = stage_work.range.x + tid.x;
+    if (ordinal == 0u)
+        contact_history[0].value = uint4(step_params.solve.w, asuint(step_params.gravityDt.w), 0u, 0u);
+    uint4 patch = contact_patches[contact_patches[0].leaves.x + ordinal].leaves;
+    uint slot = ordinal * MaxContactPointsPerPair;
+    Contact contact = contacts[slot];
+    uint a = contact.meta.x, b = contact.meta.y;
+    bool active = (patch.z & PatchActive) != 0u && jph_sleep_pair_awake(a, b);
+    uint base = jph_history_word(ordinal);
+    uint count = active ? patch.w : 0u;
+    contact_history[base].value = uint4(patch.xy, active ? uint2(body_sleep[a].runtime.timing.y,
+                                                                body_sleep[b].runtime.timing.y) : uint2(0u));
+    float3 normal = contact.normalDepth.xyz;
+    contact_history[base + 1u].value = asuint(float4(normal, float(count)));
+    float4 friction = float4(0.0f);
+    if (active)
+    {
+        float3 t1, t2;
+        jph_tangents(normal, t1, t2);
+        friction = float4(contact.impulse.y * t1 + contact.impulse.z * t2, contact.localAnchorA.w);
+    }
+    contact_history[base + 2u].value = asuint(friction);
+    for (uint i = 0u; i < MaxContactPointsPerPair; ++i)
+    {
+        Contact point = contacts[slot + i];
+        contact_history[base + 3u + 2u * i].value = asuint(float4(point.localAnchorA.xyz, point.impulse.x));
+        contact_history[base + 4u + 2u * i].value = asuint(point.localAnchorB);
+    }
 }
 
 // One complete original patch: linear friction, angular friction, four-point normal block.
@@ -1025,10 +1184,7 @@ void jph_solve_patch_velocity(uint patch_index)
         ++point_count;
     }
     center /= float(point_count);
-    ShapeModel shape_a = shape_models[patch.leaves.x];
-    ShapeModel shape_b = shape_models[patch.leaves.y];
-    float friction = jph_combine_material(shape_a.material.x, shape_a.surface.z,
-                                           shape_b.material.x, shape_b.surface.z);
+    float friction = contact.localAnchorB.w;
     float2 linear_impulse = contact.impulse.yz;
     jph_solve_friction(ma, sa, center - sa.positionCOM.xyz, mb, sb, center - sb.positionCOM.xyz,
                        normal, friction * normal_impulse, linear_impulse);

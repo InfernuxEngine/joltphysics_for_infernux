@@ -28,6 +28,7 @@ enum class Resource : std::uint32_t
     ConstraintSchedule = 1u << 13,
     ConvexGeometry = 1u << 14,
     ArticulationControl = 1u << 15,
+    ContactHistory = 1u << 16,
 };
 
 constexpr std::uint32_t Mask(Resource inResource) { return static_cast<std::uint32_t>(inResource); }
@@ -48,6 +49,8 @@ enum class Stage : std::uint32_t
     WarmJoints,
     SolveJointVelocity,
     SolveJointPosition,
+    WarmContacts,
+    StoreContactHistory,
 };
 
 enum class Domain : std::uint32_t
@@ -102,7 +105,7 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
+            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets)
             | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
@@ -136,22 +139,30 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
+    {Stage::WarmContacts, "warm_contacts", Domain::IslandPatches, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
+            | Mask(Resource::BodyModels) | Mask(Resource::BodyStates) | Mask(Resource::Contacts)
+            | Mask(Resource::KinematicTargets) | Mask(Resource::ContactPatches)
+            | Mask(Resource::SleepStates) | Mask(Resource::ContactHistory),
+        Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
+    {Stage::StoreContactHistory, "store_contact_history", Domain::Patches, 64, 1, 1,
+        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Contacts) | Mask(Resource::ContactPatches)
+            | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::ContactHistory)},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of
 // ApplyForces, BuildBounds, the sparse collector, CollidePairs candidate
-// narrowphase, SetupContacts, SetupJoints, WarmJoints
+// narrowphase, SetupContacts, SetupJoints, WarmJoints, WarmContacts
 // (only with nonzero velocity iterations), then SolveJointVelocity followed by
 // SolveVelocity for each counts.w iteration, Integrate, SolveJointPosition then
-// SolvePosition for each solve.x iteration, FinishJoints. StageWork bounds each
+// SolvePosition for each solve.x iteration, FinishJoints, StoreContactHistory. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner retires final active-set forces before sleep Commit, then appends
 // FinishTick once to arm the target arrival stop without snapping pose. Control-only jobs use neither
 // PrepareKinematics nor FinishTick. Sleeping composes engine-owned bounded
 // control producers around this numerical recipe; contact publication and pair
-// policy retain their existing producers. Contact warmstart and CCD require
-// separate implementations. Bodies address zero or more cooked primitive/Hull
+// policy retain their existing producers. Bodies address zero or more cooked primitive/Hull
 // leaves in their COM frame, including explicit
 // COM offsets. Each collected canonical leaf pair owns four Contact records;
 // sensors record real overlap but do not participate in response. The collector

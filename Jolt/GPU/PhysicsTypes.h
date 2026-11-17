@@ -62,6 +62,8 @@ JPH_GPU_CONSTANT(MaterialCombineMaximum, 3);
 JPH_GPU_CONSTANT(InitialBodyCapacity, 32);
 // Fixed point records per independent ordered leaf pair.
 JPH_GPU_CONSTANT(MaxContactPointsPerPair, 4);
+// One sorted pair identity, a normal/count, friction and two words per point.
+JPH_GPU_CONSTANT(ContactHistoryWords, 3 + 2 * MaxContactPointsPerPair);
 // Sentinel for a render hierarchy node without a physical ancestor.
 JPH_GPU_CONSTANT(PoseNoParent, 0xffffffffu);
 // FIFO body commands. These values match Infernux ForceMode.
@@ -395,11 +397,11 @@ struct JPH_GPU_ALIGN Contact
     // Body COM frame xyz. In the first record of a pair, w stores the
     // accumulated manifold angular-friction impulse; other records keep w=0.
     JPH_GPU_FLOAT4 localAnchorA;
-    JPH_GPU_FLOAT4 localAnchorB; // Body COM frame xyz; w padding.
+    JPH_GPU_FLOAT4 localAnchorB; // Body COM frame xyz; combined friction in the first record's w.
     // x is this point's normal impulse; w is its fixed normal velocity bias.
     // yz in the first pair record are the manifold's two linear-friction
-    // impulses; other records keep yz=0. Collision/setup reset all impulse
-    // scratch every substep; the bootstrap does not implement warmstart.
+    // impulses; other records keep yz=0. Setup resets this substep's scratch
+    // before the island optionally applies matching contact history.
     JPH_GPU_FLOAT4 impulse;
 };
 

@@ -25,7 +25,7 @@ struct S_ALIGN BodySleepRuntime {
     S_F4 sphere0;
     S_F4 sphere1;
     S_F4 sphere2;
-    S_F4 clock; // x simulated quiet seconds; yzw0.
+    S_U4 timing; // Quiet seconds (FP32 bits), contact anchor discontinuity, 0, 0.
     S_U4 state; // active01, initialized01, canSleep01, prescribedStaticActive01.
 };
 // One additional SSBO, without widening BodyState/BodyModel or borrowing padding.
@@ -52,7 +52,7 @@ static_assert(sizeof(BodySleepAuthor)==48);
 static_assert(sizeof(BodySleepRuntime)==80);
 static_assert(sizeof(BodySleepRecord)==128);
 static_assert(offsetof(BodySleepRecord,runtime)==48);
-static_assert(offsetof(BodySleepRuntime,clock)==48);
+static_assert(offsetof(BodySleepRuntime,timing)==48);
 static_assert(offsetof(BodySleepRuntime,state)==64);
 static_assert(sizeof(BodySleepParameters)==16);
 static_assert(sizeof(SleepWorkParameters)==64);

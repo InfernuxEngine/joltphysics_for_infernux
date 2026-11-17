@@ -16,7 +16,7 @@ void sleep_test_points(BodyState body,float3 extent,out float3 p0,out float3 p1,
 void sleep_reset(inout BodySleepRuntime state,float3 p0,float3 p1,float3 p2)
 {
     state.sphere0=float4(p0,0);state.sphere1=float4(p1,0);state.sphere2=float4(p2,0);
-    state.clock=float4(0);state.state.y=1u;state.state.zw=uint2(0u);
+    state.timing.x=0u;state.state.y=1u;state.state.zw=uint2(0u);
 }
 void sleep_encapsulate(inout float4 sphere,float3 point)
 {
@@ -47,9 +47,10 @@ uint sleep_update_vote(BodySleepAuthor author,inout BodySleepRuntime state,
     sleep_encapsulate(state.sphere2,p2);
     if(state.sphere2.w>maxMovement) {sleep_reset(state,p0,p1,p2);return 0u;}
     if(!all(isfinite(state.sphere0)) || !all(isfinite(state.sphere1))
-       || !all(isfinite(state.sphere2)) || !isfinite(state.clock.x)) return 2u;
-    state.clock.x+=dt;
-    if(!isfinite(state.clock.x)) return 2u;
-    state.state.z=state.clock.x>=timeBefore?1u:0u;
+       || !all(isfinite(state.sphere2))) return 2u;
+    float quietTime=asfloat(state.timing.x)+dt;
+    if(!isfinite(quietTime)) return 2u;
+    state.timing.x=asuint(quietTime);
+    state.state.z=quietTime>=timeBefore?1u:0u;
     return state.state.z;
 }

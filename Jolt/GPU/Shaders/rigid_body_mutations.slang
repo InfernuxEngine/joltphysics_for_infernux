@@ -36,7 +36,7 @@ void initialize_capacity(uint3 tid : SV_DispatchThreadID)
     sleep.author.rootHalfExtent = sleep.author.rootBoundsCenter = float4(0);
     sleep.author.policy = uint4(0);
     sleep.runtime.sphere0 = sleep.runtime.sphere1 = sleep.runtime.sphere2 = float4(0);
-    sleep.runtime.clock = float4(0);
+    sleep.runtime.timing = uint4(0);
     sleep.runtime.state = uint4(0);
     body_sleep[index] = sleep;
 }
@@ -55,6 +55,7 @@ void initialize_bodies(uint3 tid : SV_DispatchThreadID)
     float3 p0,p1,p2;
     sleep_test_points(initial.state, body_sleep[initial.bodyIndex.x].author.rootHalfExtent.xyz, p0,p1,p2);
     sleep_reset(sleep,p0,p1,p2);
+    ++sleep.timing.y;
     sleep.state.x=1u;
     body_sleep[initial.bodyIndex.x].runtime=sleep;
 }
@@ -80,6 +81,7 @@ void update_centers_of_mass(uint3 tid : SV_DispatchThreadID)
         float3 p0,p1,p2;
         sleep_test_points(state, body_sleep[change.bodyIndex.x].author.rootHalfExtent.xyz,p0,p1,p2);
         sleep_reset(sleep,p0,p1,p2);
+        ++sleep.timing.y;
         body_sleep[change.bodyIndex.x].runtime=sleep;
     }
 }
