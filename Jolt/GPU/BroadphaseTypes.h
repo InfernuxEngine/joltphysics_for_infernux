@@ -19,13 +19,13 @@ namespace JPH { namespace GPU {
 inline constexpr std::uint32_t BroadphaseBlockSize = 64u;
 inline constexpr std::uint32_t BroadphaseItemLimit = 2048u;
 inline constexpr std::uint32_t BroadphaseBlockLimit = BroadphaseItemLimit / BroadphaseBlockSize;
-inline constexpr std::uint32_t BroadphaseNeighborLimit = 128u;
+inline constexpr std::uint32_t BroadphaseNeighborLimit = 2048u;
 inline constexpr std::uint32_t BroadphaseSmallSetLimit = 16u;
 #else
 static const uint BroadphaseBlockSize = 64u;
 static const uint BroadphaseItemLimit = 2048u;
 static const uint BroadphaseBlockLimit = BroadphaseItemLimit / BroadphaseBlockSize;
-static const uint BroadphaseNeighborLimit = 128u;
+static const uint BroadphaseNeighborLimit = 2048u;
 static const uint BroadphaseSmallSetLimit = 16u;
 #endif
 
@@ -36,8 +36,8 @@ struct BP_ALIGN BroadphaseParams
     BP_U4 counts;       // accepted leaf N, joint J, world W, body B.
     BP_U4 workspace;    // arena word capacity, 2-word header base, final SAP bank, final suppression bank.
     BP_U4 rankRows;     // N row0 base, N row1 base, J joint-status base, zero.
-    BP_U4 activeQueues; // N source queue base, N target queue base, host-admitted source count bound, zero.
-    BP_U4 round;        // Neighbor quantum, window passes, count/fill mode, single-group pairs.
+    BP_U4 activeQueues; // N source queue base, N target queue base, zw zero.
+    BP_U4 round;        // Neighbor quantum, zero, count/fill mode, single-group pairs.
     // candidates.xy address the separate resident_patches allocation;
     // all other arena addresses refer to the scratch contact_patches port.
     BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header1.x.
@@ -59,9 +59,7 @@ struct BP_ALIGN BroadphaseParams
 // Scratch header1 = (totalLo, totalHi, statusBits, maxWorldC after world summary).
 // Scratch header0 is reserved; numerical status bits [0,6] retain their meanings.
 // Bit 7 is a distinct capacity-needed result: no suffix work consumes C>K.
-// Active metadata is separate: (activeCount, completedNeighborRounds, statusBits, 0).
-// A nonempty input window counts every completed pass, including empty passes
-// after individual ranks reach end. A zero input window does not advance it.
+// Active metadata is separate: (activeCount, maxRemainingNeighbors, statusBits, 0).
 // Input metadata stays immutable until this window completes and banks swap.
 // StageWork for prepare_indirect_arguments = (consumerFirst, recordCount, domain,
 // blockMode), recordCount <= 15, blockMode 0=item / 1=scan-block domain.

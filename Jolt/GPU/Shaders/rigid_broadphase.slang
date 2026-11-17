@@ -394,7 +394,7 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
     if (status == 0u)
     {
         uint max_x = bp_ordered(bounds[key.z].maximum.x);
-        uint low = rank + 1u, high = broadphase.counts.x;
+        uint low = rank + 1u, high = broadphase.selectedCounts.y;
         for (uint step = 0u; step < 32u && low < high; ++step)
         {
             uint middle = low + (high - low) / 2u;
@@ -406,8 +406,7 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
     }
     bp_store(broadphase.rankRows.x + rank, uint4(end, rank + 1u, 0u, 0u));
     bp_store(broadphase.rankRows.y + rank, uint4(0u, 0u, status, 0u));
-    // The initial active prefix is all N, including empty spans, so every rank
-    // contributes its status before stable compaction can remove it.
+    // The initial active prefix includes empty spans within the selected World.
     bp_store(broadphase.activeQueues.x + rank, uint4(rank, 0u, 0u, 0u));
 }
 
@@ -552,7 +551,7 @@ void bp_round(uint lane, bool fill)
     uint rank = bp_load(broadphase.activeQueues.x + ordinal).x;
     // Host proves active queue uniqueness and rank<N. Handle corrupt rank
     // locally without following it into a storage access.
-    if (rank >= broadphase.counts.x)
+    if (rank >= broadphase.selectedCounts.y)
     {
         bp_store(broadphase.scan.x + ordinal, uint4(0u, 0u, BP_BAD_CURSOR, 0u));
         return;
@@ -562,7 +561,7 @@ void bp_round(uint lane, bool fill)
     uint status = offset_status.z;
     uint quantum = broadphase.round.x;
     if (quantum == 0u || quantum > BroadphaseNeighborLimit) status |= BP_BAD_QUANTUM;
-    if (row.y < rank + 1u || row.y > row.x || row.x > broadphase.counts.x) status |= BP_BAD_CURSOR;
+    if (row.y < rank + 1u || row.y > row.x || row.x > broadphase.selectedCounts.y) status |= BP_BAD_CURSOR;
     uint end = row.y;
     if (status == 0u) end += min(quantum, row.x - row.y);
     uint4 key_a = bp_load(broadphase.workspace.z + rank);
@@ -594,7 +593,7 @@ void bp_round(uint lane, bool fill)
     // Failure makes this rank inactive, but its status is part of this exact
     // round's scanned prefix and is accumulated before the host continues.
     uint active = status == 0u && row.y < row.x ? 1u : 0u;
-    bp_store(broadphase.scan.x + ordinal, uint4(active, 0u, status, 0u));
+    bp_store(broadphase.scan.x + ordinal, uint4(active, 0u, status, active != 0u ? row.x - row.y : 0u));
 }
 
 [shader("compute")]
@@ -717,19 +716,11 @@ void publish_active_summary(uint3 tid : SV_DispatchThreadID)
     if (input.x != 0u) total = bp_load(broadphase.summary.x);
     uint status = input.z | header.z | total.z;
     if (total.y != 0u) status |= BP_INDEX_OVERFLOW;
-    if (input.x > broadphase.counts.x || total.x > input.x || total.x > broadphase.counts.x)
+    if (total.x > input.x)
         status |= BP_BAD_CURSOR;
-    uint completed_rounds = input.y;
-    if (input.x != 0u)
-    {
-        uint passes = broadphase.round.y;
-        if (passes == 0u || passes > 4u) status |= BP_BAD_QUANTUM;
-        else if (passes > 0xffffffffu - completed_rounds) status |= BP_SUM_OVERFLOW;
-        else completed_rounds += passes;
-    }
     header.z = status;
     bp_store(bp_h1(), header); // Preserve C64 and maxWorldC, including during fill.
-    bp_store(broadphase.activeState.y, uint4(total.x, completed_rounds, status, 0u));
+    bp_store(broadphase.activeState.y, uint4(total.x, total.w, status, 0u));
 }
 
 [shader("compute")]
@@ -817,8 +808,8 @@ void publish_world_summary(uint3 tid : SV_DispatchThreadID)
     bp_store(bp_h1(), header);
 }
 
-// After capacity acceptance, preserve completed rank rows/offsets and reset only
-// cursors/emitted. Fill has exactly the same N-rank initial active prefix.
+// Preserve the count and offset for each rank and reset its cursor for fill.
+// Both sweeps start from the same selected-world rank prefix.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void reset_fill_ranks(uint3 tid : SV_DispatchThreadID)
