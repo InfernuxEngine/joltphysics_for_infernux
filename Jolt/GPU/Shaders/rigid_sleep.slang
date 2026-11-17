@@ -262,6 +262,20 @@ void sleep_wake_bounds(uint3 tid:SV_DispatchThreadID)
     if(hit) sleep_activate(body,true);
 }
 
+bool sleep_bounds_pair_excluded(uint source,uint target)
+{
+    uint first=0u,end=sleep_params.layout.w;
+    while(first<end) {
+        uint middle=first+(end-first)/2u;
+        uint offset=sleep_params.layout.z+2u*middle;
+        uint a=sleep_requests[offset],b=sleep_requests[offset+1u];
+        if(a==source && b==target) return true;
+        if(a<source || (a==source && b<target)) first=middle+1u;
+        else end=middle;
+    }
+    return false;
+}
+
 [shader("compute")][numthreads(64,1,1)]
 void sleep_wake_new_bounds(uint3 tid:SV_DispatchThreadID)
 {
@@ -272,7 +286,9 @@ void sleep_wake_new_bounds(uint3 tid:SV_DispatchThreadID)
         if(source==body) continue;
         if(!sleep_body(source)) {sleep_fail(SleepBadRoot);return;}
         float3 a,b;if(!sleep_checked_bounds(source,a,b)) return;
-        if(!any(low>b) && !any(a>high)) {sleep_activate(body,true);return;}
+        if(!any(low>b) && !any(a>high) && !sleep_bounds_pair_excluded(source,body)) {
+            sleep_activate(body,true);return;
+        }
     }
 }
 [shader("compute")][numthreads(64,1,1)]
