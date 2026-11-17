@@ -288,6 +288,15 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(P
 		}
 	}
 
+	ioContext.mCoupledStage = Stage::Integration;
+	return std::nullopt;
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext)
+{
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Integration);
+	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
 	const bool coupled_positions = mPhysicsSettings.mNumPositionSteps > 0 && !ioContext.mCoupledBodies.empty();
 	if (mPhysicsSettings.mNumPositionSteps > 0 && !coupled_positions)
 		JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);

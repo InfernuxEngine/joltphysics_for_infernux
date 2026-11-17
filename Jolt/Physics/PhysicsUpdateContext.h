@@ -178,7 +178,7 @@ public:
 	Array<uint>				mCoupledSweeps;
 	enum class ECoupledSleepVote : uint8 { Local, Awake, Ready };
 	Array<ECoupledSleepVote>	mCoupledSleepVotes;
-	enum class ECoupledStage : uint8 { Inactive, Velocity, Position, NextSubstep, Sleep };
+	enum class ECoupledStage : uint8 { Inactive, Velocity, Integration, Position, NextSubstep, Sleep };
 	ECoupledStage			mCoupledStage = ECoupledStage::Inactive;
 	uint32					mCoupledSubstep = 0;
 	uint					mCoupledPositionRound = 0;

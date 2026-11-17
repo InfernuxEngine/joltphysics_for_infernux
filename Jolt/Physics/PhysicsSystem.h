@@ -181,10 +181,13 @@ public:
 	bool						BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
 
 	/// Apply a completed peer response and run another native sweep in the touched islands.
-	/// After the last sweep, integrate once and yield at position projection if the endpoints need it.
-	/// Both advance methods return the update result only at the end of the last substep.
+	/// After the last sweep, retain the current poses at the Integration boundary.
 	/// An admitted update must be advanced to completion.
 	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses = nullptr, uint32 inImpulseCount = 0);
+
+	/// Release the prepared integration once, then yield at position projection or the next substep.
+	/// Peer work may retain the Integration boundary across host frames before calling this method.
+	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext);
 
 	struct CoupledBodyCorrection
 	{
