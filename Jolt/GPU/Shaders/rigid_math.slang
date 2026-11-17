@@ -219,7 +219,6 @@ void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt
 {
     // MotionProperties::ApplyGyroscopicForceInternal also runs with partial
     // world DOF locks; they do not remove gyroscopic coupling in the allowed axes.
-    // Preserve the existing gyroscopic arithmetic, including the unlocked path.
     float4 inertia_to_world = jph_quat_mul(state.rotation, model.inertiaRotation);
     float3 local_velocity = jph_inverse_rotate(inertia_to_world, state.angularVelocity.xyz);
     float3 local_momentum = local_velocity / model.invInertiaDiagonal.xyz;
@@ -228,7 +227,9 @@ void jph_apply_gyroscopic_force(BodyModel model, inout BodyState state, float dt
     new_momentum = new_length_sq > 0.0f
         ? new_momentum * sqrt(dot(local_momentum, local_momentum) / new_length_sq)
         : float3(0.0f);
-    state.angularVelocity.xyz = jph_rotate(inertia_to_world, model.invInertiaDiagonal.xyz * new_momentum);
+    // Apply the world-axis locks before contacts consume the new angular velocity.
+    state.angularVelocity.xyz = jph_project_angular(
+        model, state, jph_rotate(inertia_to_world, model.invInertiaDiagonal.xyz * new_momentum));
 }
 
 float3 jph_acceleration(BodyModel model, BodyForces forces, float3 gravity)
