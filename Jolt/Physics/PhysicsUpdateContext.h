@@ -176,7 +176,9 @@ public:
 	Array<uint8>			mCoupledIslandMask;
 	Array<uint32>			mCoupledIslandOrder;
 	Array<uint>				mCoupledSweeps;
-	enum class ECoupledStage : uint8 { Inactive, Velocity, Position, NextSubstep };
+	enum class ECoupledSleepVote : uint8 { Local, Awake, Ready };
+	Array<ECoupledSleepVote>	mCoupledSleepVotes;
+	enum class ECoupledStage : uint8 { Inactive, Velocity, Position, NextSubstep, Sleep };
 	ECoupledStage			mCoupledStage = ECoupledStage::Inactive;
 	uint32					mCoupledSubstep = 0;
 	uint					mCoupledPositionRound = 0;

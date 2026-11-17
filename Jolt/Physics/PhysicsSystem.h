@@ -199,6 +199,12 @@ public:
 	/// Accept the new endpoints after completing the previous substep.
 	bool						BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount);
 
+	/// On the final substep, retain the sleep votes of native islands linked to another solver.
+	void						DeferCoupledSleep(PhysicsUpdateContext &ioContext, const BodyID *inEndpoints, uint32 inEndpointCount);
+	struct CoupledSleepIsland { uint32 mIndex; bool mReady; };
+	CoupledSleepIsland		GetCoupledSleepIsland(const PhysicsUpdateContext &inContext, BodyID inEndpoint) const;
+	EPhysicsUpdateError		FinishCoupledSleep(PhysicsUpdateContext &ioContext, const uint32 *inIslands = nullptr, uint32 inIslandCount = 0);
+
 	/// Saving state for replay
 	void						SaveState(StateRecorder &inStream, EStateRecorderState inState = EStateRecorderState::All, const StateRecorderFilter *inFilter = nullptr) const;
 
@@ -350,7 +356,7 @@ private:
 	class BodiesToSleep;
 
 	/// Called at the end of JobSolveVelocityConstraints to check if bodies need to go to sleep and to update their bounding box in the broadphase
-	void						CheckSleepAndUpdateBounds(uint32 inIslandIndex, const PhysicsUpdateContext *ioContext, const PhysicsUpdateContext::Step *ioStep, BodiesToSleep &ioBodiesToSleep);
+	void						CheckSleepAndUpdateBounds(uint32 inIslandIndex, PhysicsUpdateContext *ioContext, const PhysicsUpdateContext::Step *ioStep, BodiesToSleep &ioBodiesToSleep);
 
 	/// Helper function that solves the velocity of a CCD contact
 	template <EMotionType Type2>

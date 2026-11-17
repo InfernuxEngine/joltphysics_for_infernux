@@ -357,6 +357,11 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::FinishCoupledSubstep(PhysicsUp
 		ioContext.mCoupledStage = Stage::NextSubstep;
 		return std::nullopt;
 	}
+	if (!ioContext.mCoupledSleepVotes.empty())
+	{
+		ioContext.mCoupledStage = Stage::Sleep;
+		return std::nullopt;
+	}
 	auto result = FinishUpdate(ioContext);
 	ioContext.mCoupledStage = Stage::Inactive;
 	return result;
@@ -372,6 +377,50 @@ bool PhysicsSystem::BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, con
 	ioContext.mCoupledPositionRound = 0;
 	ioContext.mSteps[ioContext.mCoupledSubstep - 1].mStartNextStep.RemoveDependency();
 	return true;
+}
+
+void PhysicsSystem::DeferCoupledSleep(PhysicsUpdateContext &ioContext, const BodyID *inEndpoints, uint32 inEndpointCount)
+{
+	using Vote = PhysicsUpdateContext::ECoupledSleepVote;
+	const auto &step = ioContext.mSteps[ioContext.mCoupledSubstep];
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && step.mIsLast && step.mBodySetIslandIndex.IsDone());
+	ioContext.mCoupledSleepVotes.resize(mIslandBuilder.GetNumIslands(), Vote::Local);
+	for (uint32 i = 0; i < inEndpointCount; ++i)
+	{
+		const uint32 island = mBodyManager.GetBody(inEndpoints[i]).GetMotionProperties()->GetIslandIndexInternal();
+		JPH_ASSERT(ioContext.IsCoupledIsland(island));
+		ioContext.mCoupledSleepVotes[island] = Vote::Awake;
+	}
+}
+
+PhysicsSystem::CoupledSleepIsland PhysicsSystem::GetCoupledSleepIsland(const PhysicsUpdateContext &inContext, BodyID inEndpoint) const
+{
+	using Vote = PhysicsUpdateContext::ECoupledSleepVote;
+	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Sleep);
+	const uint32 island = mBodyManager.GetBody(inEndpoint).GetMotionProperties()->GetIslandIndexInternal();
+	const Vote vote = inContext.mCoupledSleepVotes[island];
+	JPH_ASSERT(vote != Vote::Local);
+	return { island, vote == Vote::Ready };
+}
+
+EPhysicsUpdateError PhysicsSystem::FinishCoupledSleep(PhysicsUpdateContext &ioContext, const uint32 *inIslands, uint32 inIslandCount)
+{
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Sleep);
+	{
+		JPH_IF_ENABLE_ASSERTS(BodyManager::GrantActiveBodiesAccess grant_active(false, true);)
+		for (uint32 i = 0; i < inIslandCount; ++i)
+		{
+			const uint32 island = inIslands[i];
+			JPH_ASSERT(ioContext.mCoupledSleepVotes[island] == PhysicsUpdateContext::ECoupledSleepVote::Ready);
+			BodyID *begin, *end;
+			mIslandBuilder.GetBodiesInIsland(island, begin, end);
+			mBodyManager.DeactivateBodies(begin, int(end - begin));
+		}
+	}
+	const auto result = FinishUpdate(ioContext);
+	ioContext.mCoupledStage = Stage::Inactive;
+	return result;
 }
 
 bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, PhysicsUpdateContext &context, JobSystem *inJobSystem)
@@ -2820,7 +2869,7 @@ private:
 	BodyID *				mBodiesToSleepCur;
 };
 
-void PhysicsSystem::CheckSleepAndUpdateBounds(uint32 inIslandIndex, const PhysicsUpdateContext *ioContext, const PhysicsUpdateContext::Step *ioStep, BodiesToSleep &ioBodiesToSleep)
+void PhysicsSystem::CheckSleepAndUpdateBounds(uint32 inIslandIndex, PhysicsUpdateContext *ioContext, const PhysicsUpdateContext::Step *ioStep, BodiesToSleep &ioBodiesToSleep)
 {
 	// Get the bodies that belong to this island
 	BodyID *bodies_begin, *bodies_end;
@@ -2856,7 +2905,14 @@ void PhysicsSystem::CheckSleepAndUpdateBounds(uint32 inIslandIndex, const Physic
 
 		// If all bodies indicate they can sleep we can deactivate them
 		if (all_can_sleep == int(ECanSleep::CanSleep))
-			ioBodiesToSleep.PutToSleep(bodies_begin, bodies_end);
+		{
+			using Vote = PhysicsUpdateContext::ECoupledSleepVote;
+			auto &votes = ioContext->mCoupledSleepVotes;
+			if (!votes.empty() && votes[inIslandIndex] != Vote::Local)
+				votes[inIslandIndex] = Vote::Ready;
+			else
+				ioBodiesToSleep.PutToSleep(bodies_begin, bodies_end);
+		}
 	}
 	else
 	{

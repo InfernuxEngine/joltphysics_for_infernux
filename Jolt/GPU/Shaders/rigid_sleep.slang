@@ -144,6 +144,26 @@ void sleep_update_history(uint3 tid:SV_DispatchThreadID)
     }
 }
 [shader("compute")][numthreads(64,1,1)]
+void sleep_read_external_votes(uint3 tid:SV_DispatchThreadID)
+{
+    uint index;
+    if(!sleep_work_item(tid.x,index)) return;
+    uint body=sleep_requests[index];
+    uint root=sleep_root(body);
+    bool ready=root!=SleepInvalid && (body_sleep_roots[root].load()&2u)==0u;
+    sleep_results[index]=uint4(root,ready?1u:0u,body,0u);
+}
+
+[shader("compute")][numthreads(64,1,1)]
+void sleep_veto_external(uint3 tid:SV_DispatchThreadID)
+{
+    uint index;
+    if(!sleep_work_item(tid.x,index)) return;
+    uint root=sleep_root(sleep_requests[index]);
+    if(root!=SleepInvalid) body_sleep_roots[root].or(2u);
+}
+
+[shader("compute")][numthreads(64,1,1)]
 void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
 {
     uint body;if(!sleep_work_item(tid.x,body) || !sleep_body(body) || sleep_params.operation.z==0u) return;
