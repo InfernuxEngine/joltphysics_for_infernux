@@ -15,27 +15,26 @@ bool cvx_query_deferred(QueryInput request)
     return request.meta.x==QueryRay || request.meta.x==QueryOverlap || request.meta.x==QueryClosestPoint ||
            request.meta.x==QueryPenetration || request.meta.x==QueryShapeCast;
 }
-CvxOperand cvx_query_request(QueryInput request,float travel=0.0f)
+CvxOperand cvx_query_request(QueryInput request)
 {
     CvxOperand o; o.meta=uint4(request.meta.z,0,0,0); o.center=float4(request.positionMaximum.xyz,0);
     o.rotation=request.rotation; o.geometry=request.geometry; o.geometryReference=request.geometryReference;
     if(request.meta.x==QueryClosestPoint) {
         o.meta.x=ShapeSphere; o.rotation=float4(0,0,0,1); o.geometry=float4(0); o.geometryReference=uint4(0);
     }
-    if(request.meta.x==QueryShapeCast) o.center.xyz+=jph_capsule_unit(request.direction.xyz)*travel;
     return o;
 }
-CvxOperand cvx_query_target(QueryInput request,uint leaf)
+CvxOperand cvx_query_target(QueryInput request,uint leaf,float3 origin=float3(0.0f))
 {
     CvxOperand o;
     if(request.meta.x==QueryPenetration) {
         QueryPrimitive p=query_load_primitive(request.source.y); o.meta=p.meta; o.center=p.position;
         o.rotation=p.rotation; o.geometry=p.geometry; o.geometryReference=p.geometryReference;
     } else {
-        ShapeModel shape=shape_models[leaf]; o.meta=uint4(shape.meta.x,shape.meta.w,0,0);
-        float3 center; float4 rotation;
-        query_leaf_pose(shape,body_states[shape.meta.y-query_params.selection.y],center,rotation);
-        o.center=float4(center,0); o.rotation=rotation; o.geometry=shape.geometry; o.geometryReference=shape.geometryReference;
+        ShapeModel shape=shape_models[leaf];
+        BodyState state=body_states[shape.meta.y-query_params.selection.y];
+        state.positionCOM.xyz-=origin;
+        o=cvx_leaf_operand(shape,state);
     }
     return o;
 }
@@ -48,27 +47,6 @@ bool cvx_query_backfacing(QueryInput request,CvxOperand target)
         return dot(cvx_triangle_normal(target),jph_capsule_unit(request.direction.xyz))>0;
     return (request.meta.x==QueryOverlap || request.meta.x==QueryPenetration)
            && cvx_triangle_backfacing(target,request.positionMaximum.xyz);
-}
-bool cvx_query_extent(CvxOperand o,out float extent)
-{
-    extent=0;
-    if(o.meta.x==ShapeConvexHull) {
-        uint count,first;
-        if(!cvx_hull_header(query_geometry,o,count,first,true)) return false;
-        float3 lo=asfloat(query_geometry[o.geometryReference.x+3u]).xyz,hi=asfloat(query_geometry[o.geometryReference.x+4u]).xyz;
-        extent=max(jph_capsule_max_abs(lo),jph_capsule_max_abs(hi));
-    } else if(o.meta.x==ShapeCylinder) extent=max(o.geometry.x,o.geometry.y);
-    else if(o.meta.x==ShapeCapsule) extent=o.geometry.y+o.geometry.w;
-    else extent=max(jph_capsule_max_abs(o.geometry.xyz),o.geometry.w);
-    return true;
-}
-bool cvx_query_scale(CvxOperand a,CvxOperand p,out float scale)
-{
-    scale=0;
-    float extentA,extentP;
-    if(!cvx_query_extent(a,extentA) || !cvx_query_extent(p,extentP)) return false;
-    scale=max(jph_capsule_max_abs(p.center.xyz-a.center.xyz),max(extentA,extentP));
-    return true;
 }
 void cvx_query_finish(uint b,uint status)
 {
@@ -300,17 +278,13 @@ void cvx_query_ray_unit(uint b)
 
 void cvx_query_metric_begin(uint b,QueryInput request,CvxOperand target)
 {
-    QueryCastState state=query_load_cast_state(query_control[b+48u].x);
-    CvxOperand a=cvx_query_request(request,state.progress.x);
-    float scale;if(!cvx_query_scale(a,target,scale)) { cvx_query_failure(b,63u); return; }
-    // ClosestPoint and native default ShapeCast use full geometry. Collision
-    // and penetration retain native core+margin -> full EPA. Existing six
-    // analytic query pairs keep their already shipped law in query_leaf/CA.
-    float3 origin=state.iteration.z==0u?a.center.xyz:a.center.xyz+0.5f*(target.center.xyz-a.center.xyz);
-    cvx_begin(query_control,b,a,target,origin,scale,1e-4f,request.meta.x==QueryClosestPoint || request.meta.x==QueryShapeCast);
+    CvxOperand a=cvx_query_request(request);
+    float scale;
+    if(!cvx_pair_scale(query_geometry,a,target,scale)) { cvx_query_failure(b,63u); return; }
+    cvx_begin(query_control,b,a,target,a.center.xyz,scale,CvxCastTolerance,request.meta.x==QueryClosestPoint);
     query_control[b+48u].y=2u;
 }
-void cvx_query_metric_complete(uint b,QueryInput request,bool supportComplete=false)
+void cvx_query_metric_complete(uint b,QueryInput request)
 {
     uint index=query_control[b+48u].x; QueryCastState state=query_load_cast_state(index);
     float4 metric=cvx_f(query_control,b,7); float3 a=cvx_f(query_control,b,8).xyz,p=cvx_f(query_control,b,9).xyz;
@@ -319,50 +293,18 @@ void cvx_query_metric_complete(uint b,QueryInput request,bool supportComplete=fa
     bool triangle=cvx_is_triangle(target);
     float3 normal=metric.xyz;
     if(request.meta.x==QueryShapeCast) {
-        float3 direction=jph_capsule_unit(request.direction.xyz); float closing=dot(metric.xyz,direction);
-        if(separation>0 && !supportComplete) {
-            // A closest-simplex distance is an upper bound. CA advances only
-            // by the certified separating support plane, never by that upper
-            // bound. These two support scans retain their real vertex cursor.
-            query_control[b].x=CvxPending; cvx_support_begin(query_control,b,metric.xyz,128u);
-            query_control[b+48u].y=6u; return;
-        }
-        float gap=separation;
-        if(separation>0) {
-            gap=dot(metric.xyz,cvx_f(query_control,b,21u).xyz-cvx_f(query_control,b,20u).xyz)*cvx_f(query_control,b,3u).w;
-            if(query_control[b].z==0u) gap-=cvx_margin(cvx_operand(query_control,b,0u))+cvx_margin(cvx_operand(query_control,b,1u));
-        }
-        if(!isfinite(gap) || !isfinite(closing) || state.iteration.y==0xffffffffu) { cvx_query_failure(b,64u); return; }
-        float remaining=min(request.positionMaximum.w,state.progress.w)-state.progress.x;
-        if(gap>0 && (closing<=0 || gap>closing*remaining)) { cvx_query_next_leaf(b); return; }
-        bool contact=separation<=0 || (state.iteration.z!=0u && gap<=0 && separation<=1e-4f) ||
-                     (state.progress.x>0 && separation<=1e-4f && closing>=0);
-        ++state.iteration.y;
-        if(!contact) {
-            if(gap<=0 || closing<=0) {
-                if(state.iteration.z!=0u) { cvx_query_failure(b,64u); return; }
-                state.iteration.z=1u; query_store_cast_state(index,state);
-                cvx_query_metric_begin(b,request,cvx_query_target(request,state.cursor.x)); return;
-            }
-            float advance=gap/closing,next=min(state.progress.x+advance,min(request.positionMaximum.w,state.progress.w));
-            if(!isfinite(next)) { cvx_query_failure(b,64u); return; }
-            if(next<=state.progress.x) {
-                if(state.iteration.z!=0u) { cvx_query_failure(b,64u); return; }
-                state.iteration.z=1u; query_store_cast_state(index,state);
-                cvx_query_metric_begin(b,request,cvx_query_target(request,state.cursor.x)); return;
-            }
-            state.progress.xyz=float3(next,separation,advance); state.normal=metric; query_store_cast_state(index,state);
-            cvx_query_metric_begin(b,request,cvx_query_target(request,state.cursor.x)); return;
-        }
-        // Native triangle casts reject back-facing directions once at the
-        // start, then retain initial overlap (including a zero closing normal).
-        // Keep the existing explicit Rigidbody sweep movement policy unchanged.
-        if((!triangle || (request.meta.w&QuerySweepPolicy)!=0u) && !query_cast_accept(request,metric.xyz,direction)) {
+        float3 direction=jph_capsule_unit(request.direction.xyz);
+        // Triangle casts used the original direction for the back-face test.
+        if((!triangle || (request.meta.w&QuerySweepPolicy)!=0u) && !query_cast_accept(request,normal,direction)) {
             cvx_query_next_leaf(b); return;
         }
         if(triangle) normal=cvx_triangle_fix_normal(query_geometry,target,p,normal,float3(0));
-        hit.positionDistance=float4(p,state.progress.x);
-        hit.normalFraction=float4(-normal,request.positionMaximum.w>0?state.progress.x/request.positionMaximum.w:0);
+        float travel=cvx_cast_distance(query_control,b);
+        float3 origin=cvx_cast_origin(query_control,b);
+        a=request.positionMaximum.xyz+(origin+a);
+        p=request.positionMaximum.xyz+(origin+p);
+        hit.positionDistance=float4(p,travel);
+        hit.normalFraction=float4(-normal,request.positionMaximum.w>0?travel/request.positionMaximum.w:0);
     } else {
         if((request.meta.x==QueryOverlap && separation>0) || (request.meta.x==QueryPenetration && separation>=0)) { cvx_query_next_leaf(b); return; }
         hit.positionDistance=float4(request.meta.x==QueryClosestPoint && separation<=0?request.positionMaximum.xyz:p,
@@ -374,7 +316,7 @@ void cvx_query_metric_complete(uint b,QueryInput request,bool supportComplete=fa
     }
     hit.meta=uint4(InvalidQueryBodySlot,1,InvalidQueryBodySlot,0);
     if(request.meta.x!=QueryPenetration) hit.meta.xz=uint2(shape_models[state.cursor.x].meta.y,state.cursor.x);
-    hit.pointADepth=float4(a,max(-separation,0.0f)); query_store_cast_state(index,state); cvx_query_collect_begin(b,hit);
+    hit.pointADepth=float4(a,max(-separation,0.0f)); cvx_query_collect_begin(b,hit);
 }
 void cvx_query_visit(uint b,QueryInput request)
 {
@@ -405,7 +347,8 @@ void cvx_query_visit(uint b,QueryInput request)
     if(admitted && (request.meta.w&QuerySweepPairPolicy)!=0u)
         admitted=!query_collider_suppressed(uint4(request.filter.zw,request.lifetime.xy),shape.source);
     if(!admitted) { cvx_query_next_leaf(b); return; }
-    CvxOperand target=cvx_query_target(request,leaf);
+    bool cast=request.meta.x==QueryShapeCast;
+    CvxOperand target=cvx_query_target(request,leaf,cast?request.positionMaximum.xyz:float3(0.0f));
     if(!all(isfinite(target.center)) || !query_valid_quaternion(target.rotation)) { cvx_query_failure(b,65u); return; }
     if(cvx_query_backfacing(request,target)) { cvx_query_next_leaf(b); return; }
     if(request.meta.x==QueryRay) {
@@ -417,7 +360,7 @@ void cvx_query_visit(uint b,QueryInput request)
         return;
     }
     bool analytic=request.meta.z<=ShapeCapsule && shape.meta.x<=ShapeCapsule;
-    if(request.meta.x==QueryShapeCast && analytic) {
+    if(cast && analytic) {
         // One original CA step per worker unit, not an entire quantum nested
         // inside this quantum. State remains in its independent prefix.
         QueryHit hit; uint status;
@@ -428,6 +371,12 @@ void cvx_query_visit(uint b,QueryInput request)
     } else if(analytic) {
         uint status; QueryHit hit=query_leaf(request,shape,body_states[slot-query_params.selection.y],leaf,status);
         if(status!=QuerySuccess) { cvx_query_failure(b,68u); return; } cvx_query_collect_begin(b,hit);
+    } else if(cast) {
+        CvxOperand moving=cvx_query_request(request);
+        moving.center.xyz=float3(0.0f);
+        cvx_cast_begin(query_geometry,query_control,b,moving,target,
+                       jph_capsule_unit(request.direction.xyz),min(request.positionMaximum.w,state.progress.w));
+        query_control[b+48u].y=6u;
     } else cvx_query_metric_begin(b,request,target);
 }
 [shader("compute")]
@@ -463,9 +412,10 @@ void query_advance_jobs(uint3 tid:SV_DispatchThreadID)
             else if(query_control[b].x==CvxSuccess) cvx_query_metric_complete(b,request);
         } else if(phase>=3u && phase<=5u) cvx_query_ray_unit(b);
         else if(phase==6u) {
-            cvx_support_unit(query_geometry,query_control,b);
-            if(query_control[b].x==CvxFailure) cvx_query_failure(b,query_control[b].w);
-            else if(query_control[b].y==128u) cvx_query_metric_complete(b,request,true);
+            uint result=cvx_cast_unit(query_geometry,query_control,b);
+            if(result==CvxCastError) cvx_query_failure(b,query_control[b].w);
+            else if(result==CvxCastMiss) cvx_query_next_leaf(b);
+            else if(result==CvxCastHit) cvx_query_metric_complete(b,request);
         }
         else cvx_query_collect_unit(b);
     }

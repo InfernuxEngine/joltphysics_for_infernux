@@ -181,6 +181,21 @@ void jph_project_motion(BodyModel model, inout BodyState state)
     state.angularVelocity.xyz = jph_project_angular(model, state, state.angularVelocity.xyz);
 }
 
+// The linear sweep and the integrator share the same post-solver speeds
+// and orientation. Position is left at the start of the translation.
+void jph_prepare_drift(BodyModel model, inout BodyState state, float dt)
+{
+    jph_project_motion(model, state);
+    if (jph_dynamic(model))
+    {
+        state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
+        state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
+        state.rotation = jph_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
+    }
+    else
+        state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
+}
+
 float3 jph_inverse_linear_mass(BodyModel model, float3 value)
 {
     return jph_inverse_mass(model) * jph_project_linear(model, value);

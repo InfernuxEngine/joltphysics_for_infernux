@@ -26,6 +26,54 @@ struct CvxOperand
 };
 struct CvxWitness { float3 a; float3 b; float3 w; };
 
+CvxOperand cvx_leaf_operand(ShapeModel shape, BodyState state)
+{
+    CvxOperand operand;
+    operand.meta = uint4(shape.meta.x, shape.meta.w, 0u, 0u);
+    operand.center = float4(state.positionCOM.xyz + jph_rotate(state.rotation, shape.localPositionCOM.xyz), 0);
+    operand.rotation = jph_quat_mul(state.rotation, shape.localRotation);
+    operand.geometry = shape.geometry;
+    operand.geometryReference = shape.geometryReference;
+    return operand;
+}
+
+Aabb cvx_leaf_bounds(StructuredBuffer<uint4> geometry, CvxOperand operand, float padding)
+{
+    float4 dimensions = operand.geometry;
+    float3 center = operand.center.xyz;
+    float4 rotation = operand.rotation;
+    float3 extent;
+    if (operand.meta.x == CvxSphere)
+        extent = float3(dimensions.w);
+    else if (operand.meta.x == CvxCapsule)
+        extent = abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * dimensions.y + dimensions.w;
+    else if (operand.meta.x == CvxCylinder)
+    {
+        float3 axis = jph_rotate(rotation, float3(0, 1, 0));
+        extent = abs(axis) * dimensions.y + dimensions.x * sqrt(max(float3(0), float3(1) - axis * axis));
+    }
+    else
+    {
+        float3 half = dimensions.xyz;
+        if (operand.meta.x == CvxHull)
+        {
+            uint base = operand.geometryReference.x;
+            float3 low = asfloat(geometry[base + 3u]).xyz;
+            float3 high = asfloat(geometry[base + 4u]).xyz;
+            center += jph_rotate(rotation, low * .5f + high * .5f);
+            half = high * .5f - low * .5f;
+        }
+        extent = abs(jph_rotate(rotation, float3(1, 0, 0))) * half.x
+               + abs(jph_rotate(rotation, float3(0, 1, 0))) * half.y
+               + abs(jph_rotate(rotation, float3(0, 0, 1))) * half.z;
+    }
+    extent += padding;
+    Aabb result;
+    result.minimum = float4(center - extent, 0.0f);
+    result.maximum = float4(center + extent, 0.0f);
+    return result;
+}
+
 bool cvx_is_triangle(CvxOperand o) { return (o.meta.y & ShapeOneSidedTriangle) != 0u; }
 float3 cvx_triangle_normal(CvxOperand o) { return jph_rotate(o.rotation, o.geometry.yzw); }
 bool cvx_triangle_backfacing(CvxOperand triangle, float3 otherCenter)
@@ -129,6 +177,35 @@ bool cvx_hull_header(StructuredBuffer<uint4> g,CvxOperand o,out uint count,out u
     bool rayRange=l.z==0u || (count==3u && h.w==2u && l.z>=5u && l.z<=r.y && r.y-l.z==3u);
     return h.x==CvxHull && h.y==r.y && count>0u && first>=5u && first<=r.y && count<=r.y-first && l.w==0u && rayRange;
 }
+
+bool cvx_operand_extent(StructuredBuffer<uint4> geometry, CvxOperand operand, out float extent)
+{
+    float4 shape = operand.geometry;
+    extent = 0;
+    if (operand.meta.x == CvxHull) {
+        uint count, first;
+        if (!cvx_hull_header(geometry, operand, count, first, true)) return false;
+        uint base = operand.geometryReference.x;
+        float3 low = asfloat(geometry[base + 3u]).xyz, high = asfloat(geometry[base + 4u]).xyz;
+        extent = max(jph_capsule_max_abs(low), jph_capsule_max_abs(high));
+    } else if (operand.meta.x == CvxCylinder)
+        extent = max(shape.x, shape.y);
+    else if (operand.meta.x == CvxCapsule)
+        extent = shape.y + shape.w;
+    else
+        extent = max(jph_capsule_max_abs(shape.xyz), shape.w);
+    return true;
+}
+
+bool cvx_pair_scale(StructuredBuffer<uint4> geometry, CvxOperand a, CvxOperand b, out float scale)
+{
+    scale = 0;
+    float extentA, extentB;
+    if (!cvx_operand_extent(geometry, a, extentA) || !cvx_operand_extent(geometry, b, extentB)) return false;
+    scale = max(jph_capsule_max_abs(b.center.xyz - a.center.xyz), max(extentA, extentB));
+    return true;
+}
+
 void cvx_support_begin(RWStructuredBuffer<uint4> s,uint b,float3 direction,uint next)
 {
     cvx_put(s,b,4,float4(direction,0)); s[b+23u]=uint4(0,0,0,next);
@@ -612,6 +689,131 @@ void cvx_advance(StructuredBuffer<uint4> geometry,RWStructuredBuffer<uint4> s,ui
         else if(phase==CvxReduce) cvx_reduce(s,b);
         else cvx_epa_unit(geometry,s,b);
     }
+}
+
+static const uint CvxCastPending = 0u;
+static const uint CvxCastHit = 1u;
+static const uint CvxCastMiss = 2u;
+static const uint CvxCastError = 3u;
+static const uint CvxCastPlane = 128u;
+static const float CvxCastTolerance = 1e-4f;
+static const uint CvxCastOrigin = 54u;
+static const uint CvxCastCursor = 55u;
+static const uint CvxCastMotion = 56u;
+
+// Separation is a witnessed distance; gap is the lower bound from a real
+// separating support plane. Only the latter may advance a moving pair.
+uint cvx_cast_progress(float separation, float gap, float closing, float limit,
+                        inout float travel, inout uint restarted)
+{
+    float remaining = limit - travel;
+    if (!isfinite(gap) || !isfinite(closing) || remaining < 0.0f) return CvxCastError;
+    if (gap > 0.0f && (closing <= 0.0f || gap > closing * remaining)) return CvxCastMiss;
+    if (separation <= 0.0f ||
+        (restarted != 0u && gap <= 0.0f && separation <= CvxCastTolerance) ||
+        (travel > 0.0f && separation <= CvxCastTolerance && closing >= 0.0f))
+        return CvxCastHit;
+    if (gap > 0.0f && closing > 0.0f) {
+        float advance = gap / closing;
+        float next = min(travel + advance, limit);
+        if (!isfinite(advance) || !isfinite(next)) return CvxCastError;
+        if (next > travel) {
+            travel = next;
+            return CvxCastPending;
+        }
+    }
+    // One coordinate restart resolves a rounding disagreement without treating
+    // a numerically stalled cast as a miss or advancing past its certificate.
+    if (restarted != 0u) return CvxCastError;
+    restarted = 1u;
+    return CvxCastPending;
+}
+
+void cvx_cast_metric(StructuredBuffer<uint4> geometry, RWStructuredBuffer<uint4> scratch,
+                     uint base, CvxOperand moving, CvxOperand target, float3 direction, float travel, uint restarted)
+{
+    moving.center = float4(direction * travel, 0.0f);
+    float scale;
+    if (!cvx_pair_scale(geometry, moving, target, scale)) {
+        cvx_fail(scratch, base, 7u);
+        return;
+    }
+    float3 origin = moving.center.xyz;
+    if (restarted != 0u)
+        origin += 0.5f * (target.center.xyz - origin);
+    cvx_begin(scratch, base, moving, target, origin, scale, CvxCastTolerance, true);
+}
+
+void cvx_cast_begin(StructuredBuffer<uint4> geometry, RWStructuredBuffer<uint4> scratch,
+                    uint base, CvxOperand moving, CvxOperand target, float3 direction, float limit)
+{
+    // Accumulate travel relative to A's initial center. Repeatedly adding
+    // a small advance to a large world coordinate destroys the certificate
+    // that the support point moved by that advance.
+    cvx_put(scratch, base, CvxCastOrigin, moving.center);
+    target.center.xyz -= moving.center.xyz;
+    scratch[base + CvxCastCursor] = uint4(0u);
+    cvx_put(scratch, base, CvxCastMotion, float4(direction, limit));
+    cvx_cast_metric(geometry, scratch, base, moving, target, direction, 0.0f, 0u);
+}
+
+// The inputs start in a common frame. Direction and horizon describe A
+// relative to B. Each invocation advances one metric or support unit.
+uint cvx_cast_unit(StructuredBuffer<uint4> geometry, RWStructuredBuffer<uint4> scratch, uint base)
+{
+    uint4 work = scratch[base];
+    if (work.x == CvxFailure) return CvxCastError;
+    bool support = work.y == CvxSupport && scratch[base + 23u].w == CvxCastPlane;
+    if (support)
+        cvx_support_unit(geometry, scratch, base);
+    else
+        cvx_advance(geometry, scratch, base, 1u);
+    work = scratch[base];
+    if (work.x == CvxFailure) return CvxCastError;
+    if (support ? work.y != CvxCastPlane : work.x != CvxSuccess) return CvxCastPending;
+
+    float4 metric = cvx_f(scratch, base, 7u);
+    if (metric.w > 0.0f && !support) {
+        scratch[base].x = CvxPending;
+        cvx_support_begin(scratch, base, metric.xyz, CvxCastPlane);
+        return CvxCastPending;
+    }
+    float gap = metric.w;
+    if (support) {
+        gap = dot(metric.xyz, cvx_f(scratch, base, 21u).xyz - cvx_f(scratch, base, 20u).xyz)
+              * cvx_f(scratch, base, 3u).w;
+        if (work.z == 0u)
+            gap -= cvx_margin(cvx_operand(scratch, base, 0u)) + cvx_margin(cvx_operand(scratch, base, 1u));
+    }
+    float4 motion = cvx_f(scratch, base, CvxCastMotion);
+    uint4 cursor = scratch[base + CvxCastCursor];
+    float travel = asfloat(cursor.x);
+    if (cursor.y == 0xffffffffu) {
+        cvx_fail(scratch, base, 64u);
+        return CvxCastError;
+    }
+    ++cursor.y;
+    uint result = cvx_cast_progress(metric.w, gap, dot(metric.xyz, motion.xyz), motion.w, travel, cursor.z);
+    if (result == CvxCastPending) {
+        cursor.x = asuint(travel);
+        scratch[base + CvxCastCursor] = cursor;
+        cvx_cast_metric(geometry, scratch, base, cvx_operand(scratch, base, 0u), cvx_operand(scratch, base, 1u),
+                        motion.xyz, travel, cursor.z);
+        return CvxCastPending;
+    }
+    if (result == CvxCastError) cvx_fail(scratch, base, 64u);
+    return result;
+}
+
+float cvx_cast_distance(RWStructuredBuffer<uint4> scratch, uint base)
+{
+    return asfloat(scratch[base + CvxCastCursor].x);
+}
+
+// Add this offset to the metric witnesses to return to the caller's frame.
+float3 cvx_cast_origin(RWStructuredBuffer<uint4> scratch, uint base)
+{
+    return cvx_f(scratch, base, CvxCastOrigin).xyz;
 }
 
 #endif

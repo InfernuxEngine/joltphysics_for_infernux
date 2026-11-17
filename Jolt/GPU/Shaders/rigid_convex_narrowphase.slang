@@ -15,37 +15,6 @@ uint cvx_step_slots()
     uint words,stride; convex_scratch.GetDimensions(words,stride);
     return words>=4u?min(32u,(words-4u)/CvxSlotWords):0u;
 }
-CvxOperand cvx_step_operand(ShapeModel shape,BodyState state)
-{
-    CvxOperand o; o.meta=uint4(shape.meta.x,shape.meta.w,0,0);
-    o.center=float4(state.positionCOM.xyz+jph_rotate(state.rotation,shape.localPositionCOM.xyz),0);
-    o.rotation=jph_quat_mul(state.rotation,shape.localRotation); o.geometry=shape.geometry;
-    o.geometryReference=shape.geometryReference; return o;
-}
-bool cvx_operand_extent(StructuredBuffer<uint4> g,CvxOperand o,out float extent)
-{
-    extent=0;
-    if(o.meta.x==CvxHull) {
-        uint count,first;
-        if(!cvx_hull_header(g,o,count,first,true)) return false;
-        float3 low=asfloat(g[o.geometryReference.x+3u]).xyz,high=asfloat(g[o.geometryReference.x+4u]).xyz;
-        float3 v=max(abs(low),abs(high)); extent=max(v.x,max(v.y,v.z));
-    } else if(o.meta.x==CvxCylinder) extent=max(o.geometry.x,o.geometry.y);
-    else if(o.meta.x==CvxCapsule) extent=o.geometry.y+o.geometry.w;
-    else if(o.meta.x==CvxBox) extent=max(o.geometry.x,max(o.geometry.y,o.geometry.z));
-    else extent=o.geometry.w;
-    return true;
-}
-bool cvx_pair_scale(StructuredBuffer<uint4> g,CvxOperand a,CvxOperand p,out float scale)
-{
-    scale=0;
-    float extentA,extentP;
-    if(!cvx_operand_extent(g,a,extentA) || !cvx_operand_extent(g,p,extentP)) return false;
-    float3 d=abs(p.center.xyz-a.center.xyz);
-    scale=max(max(d.x,max(d.y,d.z)),max(extentA,extentP));
-    return true;
-}
-
 [shader("compute")]
 [numthreads(64,1,1)]
 void narrowphase_init_jobs(uint3 tid:SV_DispatchThreadID)
@@ -71,7 +40,7 @@ void cvx_step_start(uint b,uint slots)
     if(patch.leaves.x>=step_params.counts.z || patch.leaves.y>=step_params.counts.z) { cvx_fail(convex_scratch,b,40); convex_scratch[b+48u].w=2; return; }
     ShapeModel a=shape_models[patch.leaves.x],p=shape_models[patch.leaves.y];
     if(a.meta.x<=ShapeCapsule && p.meta.x<=ShapeCapsule) { cvx_step_next(b,slots); return; }
-    CvxOperand oa=cvx_step_operand(a,body_states[a.meta.y]),op=cvx_step_operand(p,body_states[p.meta.y]);
+    CvxOperand oa=cvx_leaf_operand(a,body_states[a.meta.y]),op=cvx_leaf_operand(p,body_states[p.meta.y]);
     if(cvx_triangle_backfacing(oa,op.center.xyz) || cvx_triangle_backfacing(op,oa.center.xyz)) {
         cvx_step_next(b,slots); return;
     }
@@ -90,7 +59,7 @@ void cvx_step_metric_complete(uint b,uint slots)
     if(cvx_f(convex_scratch,b,7).w>band) { cvx_step_next(b,slots); return; }
     if(sensor) { cvx_manifold_primary(convex_scratch,b); convex_scratch[b+49u]=uint4(0); convex_scratch[b+48u].y=3u; return; }
     BodyState sa=body_states[a.meta.y],sp=body_states[p.meta.y];
-    CvxOperand oa=cvx_step_operand(a,sa),op=cvx_step_operand(p,sp);
+    CvxOperand oa=cvx_leaf_operand(a,sa),op=cvx_leaf_operand(p,sp);
     float3 normal=cvx_f(convex_scratch,b,7).xyz;
     if(cvx_is_triangle(oa))
         normal=-cvx_triangle_fix_normal(convex_geometry,oa,cvx_f(convex_scratch,b,8).xyz,-normal,

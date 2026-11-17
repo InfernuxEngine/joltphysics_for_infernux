@@ -766,42 +766,9 @@ void build_bounds(uint3 tid : SV_DispatchThreadID)
         return;
     ShapeModel shape = shape_models[index];
     if (!jph_selected_body_slot(shape.meta.y)) return;
-    BodyState state = body_states[shape.meta.y];
-    float4 geometry = shape.geometry;
-    float3 center = jph_leaf_position(shape, state);
-    float4 rotation = jph_leaf_rotation(shape, state);
-    float3 extent;
-    if (shape.meta.x == ShapeSphere)
-        extent = float3(geometry.w);
-    else if (shape.meta.x == ShapeCapsule)
-        extent = abs(jph_rotate(rotation, float3(0.0f, 1.0f, 0.0f))) * geometry.y + geometry.w;
-    else if (shape.meta.x == ShapeCylinder)
-    {
-        float3 axis = jph_rotate(rotation, float3(0, 1, 0));
-        extent = abs(axis) * geometry.y + geometry.x * sqrt(max(float3(0), float3(1) - axis * axis));
-    }
-    else
-    {
-        float3 half = geometry.xyz;
-        if (shape.meta.x == ShapeConvexHull)
-        {
-            uint base = shape.geometryReference.x;
-            float3 low = asfloat(convex_geometry[base + 3u]).xyz;
-            float3 high = asfloat(convex_geometry[base + 4u]).xyz;
-            center += jph_rotate(rotation, low * .5f + high * .5f);
-            half = high * .5f - low * .5f;
-        }
-        extent = abs(jph_rotate(rotation, float3(1, 0, 0))) * half.x
-               + abs(jph_rotate(rotation, float3(0, 1, 0))) * half.y
-               + abs(jph_rotate(rotation, float3(0, 0, 1))) * half.z;
-    }
-    // Expand each leaf by half the contact band, so the pair band is exactly
-    // the configured speculative distance, not twice that distance.
-    extent += 0.5f * step_params.contact.x;
-    Aabb result;
-    result.minimum = float4(center - extent, 0.0f);
-    result.maximum = float4(center + extent, 0.0f);
-    bounds[index] = result;
+    CvxOperand operand = cvx_leaf_operand(shape, body_states[shape.meta.y]);
+    // The two half bands add up to the configured speculative distance.
+    bounds[index] = cvx_leaf_bounds(convex_geometry, operand, 0.5f * step_params.contact.x);
 }
 
 [shader("compute")]
@@ -1269,17 +1236,7 @@ void jph_body_integrate(uint index, StepParams parameters)
         && body_sleep[index].runtime.state.x == 0u) return;
     BodyState state = body_states[index];
     float dt = parameters.gravityDt.w;
-    jph_project_motion(model, state);
-    // Jolt clamps Dynamic bodies after impulses. Prescribed Kinematic target
-    // velocity must not be truncated by Dynamic speed limits.
-    if (jph_dynamic(model))
-    {
-        state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
-        state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
-        state.rotation = jph_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
-    }
-    else
-        state.rotation = jph_kinematic_rotation_step(state.rotation, state.angularVelocity.xyz * dt);
+    jph_prepare_drift(model, state, dt);
     state.positionCOM.xyz += dt * state.linearVelocity.xyz;
     // Angular DOF locks remain fixed in world space as the body rotates.
     jph_project_motion(model, state);

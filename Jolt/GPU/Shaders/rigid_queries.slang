@@ -750,7 +750,7 @@ bool query_cast_valid_hit(QueryHit hit)
 
 // An exact primitive reduction, not another executor: a Sphere versus a
 // rounded primitive is a ray against the same core with the radius sum.
-bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 center, float4 rotation,
+bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 centerRelative, float4 rotation,
     float3 direction, float maximum, out QueryHit hit, out uint status)
 {
     hit = query_miss();
@@ -760,7 +760,7 @@ bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 center
     float4 q = reverse ? request.rotation : rotation;
     float4 geometry = reverse ? request.geometry : target.geometry;
     float radius = reverse ? target.geometry.w : request.geometry.w;
-    float3 relative = reverse ? center - request.positionMaximum.xyz : request.positionMaximum.xyz - center;
+    float3 relative = reverse ? centerRelative : -centerRelative;
     float3 local = jph_inverse_rotate(q, relative);
     float3 velocity = jph_inverse_rotate(q, reverse ? -direction : direction);
     float inflated = geometry.w + radius;
@@ -805,7 +805,7 @@ bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 center
         return false;
     float3 point;
     if (reverse || target.meta.x == ShapeSphere)
-        point = center - target.geometry.w * n;
+        point = centerRelative - target.geometry.w * n;
     else
     {
         float3 at = local + velocity * distance;
@@ -824,8 +824,9 @@ bool query_cast_sphere_root(QueryInput request, ShapeModel target, float3 center
                 if (outward[axis] != 0.0f)
                     core[axis] = outward[axis] > 0.0f ? half[axis] : -half[axis];
         }
-        point = center + jph_rotate(rotation, core + geometry.w * jph_capsule_unit(outward));
+        point = centerRelative + jph_rotate(rotation, core + geometry.w * jph_capsule_unit(outward));
     }
+    point += request.positionMaximum.xyz;
     hit.meta = uint4(target.meta.y, 1u, 0u, 0u);
     hit.positionDistance = float4(point, distance);
     hit.normalFraction = float4(-n, request.positionMaximum.w > 0.0f ? distance / request.positionMaximum.w : 0.0f);
@@ -845,17 +846,17 @@ bool query_cast_pair_step(QueryInput request, ShapeModel target, BodyState body,
 {
     hit = query_miss();
     status = QuerySuccess;
-    float3 center;
+    float3 relative;
     float4 rotation;
-    query_leaf_pose(target, body, center, rotation);
-    if (!all(isfinite(center)) || !query_valid_quaternion(rotation) ||
+    body.positionCOM.xyz -= request.positionMaximum.xyz;
+    query_leaf_pose(target, body, relative, rotation);
+    if (!all(isfinite(relative)) || !query_valid_quaternion(rotation) ||
         target.meta.x > ShapeCapsule)
     {
         status = target.meta.x > ShapeCapsule ? QueryUnsupported : QueryNumericalFailure;
         return true;
     }
     rotation = normalize(rotation);
-    float3 relative = center - request.positionMaximum.xyz;
     float travel = cursor.progress.x;
     float3 remainingCenter = relative - direction * travel;
     float scale = max(jph_capsule_max_abs(remainingCenter),
@@ -895,72 +896,28 @@ bool query_cast_pair_step(QueryInput request, ShapeModel target, BodyState body,
     if (initial && separation > 0.0f &&
         (request.meta.z == ShapeSphere || target.meta.x == ShapeSphere))
     {
-        bool found = query_cast_sphere_root(request, target, center, rotation, direction, limit, hit, status);
+        query_cast_sphere_root(request, target, relative, rotation, direction, limit, hit, status);
         return true;
     }
-    bool contact = separation <= 0.0f;
-    if (!contact)
+    if (separation > 0.0f)
     {
         float3 frontA = query_cast_support(request.meta.z, request.rotation, ga, metric.normal);
         float3 backB = b + query_cast_support(target.meta.x, rotation, gb, -metric.normal);
-        float gap = dot(metric.normal, backB - frontA);
-        float closing = dot(metric.normal, direction);
-        float gapWorld = gap * scale;
-        float remaining = limit - travel;
-        if (!isfinite(gapWorld) || !isfinite(closing) || remaining < 0.0f)
+        float gap = dot(metric.normal, backB - frontA) * scale;
+        uint result = cvx_cast_progress(separation, gap, dot(metric.normal, direction), limit,
+                                        cursor.progress.x, cursor.iteration.z);
+        if (result == CvxCastError)
         {
             status = QueryNumericalFailure;
             return true;
         }
-        if (gap > 0.0f && (closing <= 0.0f || gapWorld > closing * remaining))
-            return true;
-        // Explicit Jolt-quality contact residual, not an extra convex radius.
-        // A positive initial support gap must still advance. After one
-        // coordinate restart, a nonseparating support plane and witnessed
-        // residual within the same quality budget resolve FP32 disagreement
-        // at exact contact, including travel zero. Direction policy follows.
-        bool restartedSupportContact = cursor.iteration.z != 0u && gap <= 0.0f && separation <= 1.0e-4f;
-        contact = restartedSupportContact || (travel > 0.0f && separation <= 1.0e-4f && closing >= 0.0f);
-        if (!contact)
-        {
-            if (gap <= 0.0f || closing <= 0.0f)
-            {
-                if (cursor.iteration.z == 0u)
-                {
-                    cursor.iteration.z = 1u;
-                    cursor.iteration.w = 1u;
-                    return false;
-                }
-                status = QueryNumericalFailure;
-                return true;
-            }
-            float advance = gapWorld / closing;
-            float next = min(travel + advance, limit);
-            if (!isfinite(advance) || !isfinite(next))
-            {
-                status = QueryNumericalFailure;
-                return true;
-            }
-            if (next <= travel)
-            {
-                if (cursor.iteration.z == 0u)
-                {
-                    cursor.iteration.z = 1u;
-                    cursor.iteration.w = 1u;
-                    return false;
-                }
-                status = QueryNumericalFailure;
-                return true;
-            }
-            cursor.progress.xyz = float3(next, separation, advance);
-            cursor.normal = float4(metric.normal, gapWorld);
-            return false;
-        }
+        if (result == CvxCastMiss) return true;
+        if (result == CvxCastPending) return false;
     }
     if (!query_cast_accept(request, metric.normal, direction))
         return true;
-    float3 pointA = request.positionMaximum.xyz + direction * travel + metric.pointA * scale;
-    float3 pointB = center + (metric.pointB - b) * scale;
+    float3 pointA = request.positionMaximum.xyz + (direction * travel + metric.pointA * scale);
+    float3 pointB = request.positionMaximum.xyz + (relative + (metric.pointB - b) * scale);
     hit.meta = uint4(target.meta.y, 1u, cursor.cursor.x, metric.feature);
     hit.positionDistance = float4(pointB, travel);
     hit.normalFraction = float4(-metric.normal, request.positionMaximum.w > 0.0f ? travel / request.positionMaximum.w : 0.0f);
