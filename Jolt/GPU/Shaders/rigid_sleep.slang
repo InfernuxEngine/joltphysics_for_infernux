@@ -267,8 +267,13 @@ void sleep_wake_new_bounds(uint3 tid:SV_DispatchThreadID)
 {
     uint body;if(!sleep_bounds_target(tid.x,body)) return;
     float3 low,high;if(!sleep_checked_bounds(body,low,high)) return;
-    bool hit;if(!sleep_current_bounds_hit(low,high,hit)) return;
-    if(hit) sleep_activate(body,true);
+    for(uint i=0u;i<sleep_params.operation.w;++i) {
+        uint source=sleep_requests[sleep_params.operation.z+i];
+        if(source==body) continue;
+        if(!sleep_body(source)) {sleep_fail(SleepBadRoot);return;}
+        float3 a,b;if(!sleep_checked_bounds(source,a,b)) return;
+        if(!any(low>b) && !any(a>high)) {sleep_activate(body,true);return;}
+    }
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_export_status(uint3 tid:SV_DispatchThreadID)
