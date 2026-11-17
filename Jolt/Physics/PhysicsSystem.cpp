@@ -1932,8 +1932,9 @@ void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, Phy
 
 	// Initialize the mapping table between active body and CCD body
 	JPH_ASSERT(ioStep->mActiveBodyToCCDBody == nullptr);
-	ioStep->mNumActiveBodyToCCDBody = mBodyManager.GetNumActiveBodies(EBodyType::RigidBody);
+	ioStep->mNumActiveBodyToCCDBody = ioStep->mCCDBodiesCapacity > 0? mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
 	ioStep->mActiveBodyToCCDBody = (int *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(int));
+	ioStep->mBodyMotions = (PhysicsUpdateContext::Step::BodyMotion *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
 
 	// Prepare the split island builder for solving the position constraints
 	mLargeIslandSplitter.PrepareForSolvePositions();
@@ -2002,8 +2003,15 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 			// Get delta position
 			Vec3 delta_pos = body.GetLinearVelocity() * delta_time;
 
-			// If the position should be updated (or if it is delayed because of CCD)
-			bool update_position = true;
+			// CCD reads both trajectories at the same substep origin. Discrete translation
+			// must not be applied before a continuous body has tested its relative motion.
+			bool update_position = ioStep->mBodyMotions == nullptr;
+			if (!update_position)
+			{
+				auto *motion = new (&ioStep->mBodyMotions[active_body_idx]) PhysicsUpdateContext::Step::BodyMotion;
+				delta_pos.StoreFloat3(&motion->mDeltaPosition);
+				ioStep->mActiveBodyToCCDBody[active_body_idx] = -1;
+			}
 
 			switch (mp->GetMotionQuality())
 			{
@@ -2019,18 +2027,13 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 					float inner_radius = body.GetShape()->GetInnerRadius();
 					JPH_ASSERT(inner_radius > 0.0f, "The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.");
 
-					// Measure translation in this step and check if it above the threshold to perform a linear cast
+					// Even a stationary continuous body can be hit by a moving discrete body.
+					// The threshold is applied to relative movement for each candidate pair.
 					float linear_cast_threshold_sq = Square(mPhysicsSettings.mLinearCastThreshold * inner_radius);
-					if (delta_pos.LengthSq() > linear_cast_threshold_sq)
-					{
-						// This body needs a cast
-						uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
-						JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
-						ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
-						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
-
-						update_position = false;
-					}
+					uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
+					JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
+					ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
+					new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
 				}
 				break;
 			}
@@ -2055,9 +2058,6 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 						num_bodies_to_update_bounds = 0;
 					}
 				}
-
-				// We did not create a CCD body
-				ioStep->mActiveBodyToCCDBody[active_body_idx] = -1;
 			}
 
 			active_body_idx++;
@@ -2081,6 +2081,15 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 	}
 	else
 	{
+		// Conservative relative-motion bounds, shared by every cast. The per-body
+		// ray and shape tests below reject candidates using their actual trajectory.
+		for (uint32 i = 0; i < ioStep->mNumActiveBodyToCCDBody; ++i)
+		{
+			Vec3 delta(ioStep->mBodyMotions[i].mDeltaPosition);
+			ioStep->mMinBodyMotion = Vec3::sMin(ioStep->mMinBodyMotion, delta);
+			ioStep->mMaxBodyMotion = Vec3::sMax(ioStep->mMaxBodyMotion, delta);
+		}
+
 		// Run the continuous collision detection jobs
 		int num_continuous_collision_jobs = min(int(ioStep->mNumCCDBodies + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
 		ioStep->mResolveCCDContacts.AddDependency(num_continuous_collision_jobs);
@@ -2100,13 +2109,21 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 }
 
 // Helper function to calculate the motion of a body during this CCD step
-inline static Vec3 sCalculateBodyMotion(const Body &inBody, float inDeltaTime)
+inline static PhysicsUpdateContext::Step::BodyMotion *sGetBodyMotion(const Body &inBody, PhysicsUpdateContext::Step *inStep)
 {
-	// If the body is linear casting, the body has not yet moved so we need to calculate its motion
-	if (inBody.IsDynamic() && inBody.GetMotionProperties()->GetMotionQuality() == EMotionQuality::LinearCast)
-		return inDeltaTime * inBody.GetLinearVelocity();
+	if (inBody.IsRigidBody() && !inBody.IsStatic())
+	{
+		uint32 active_index = inBody.GetMotionProperties()->GetIndexInActiveBodiesInternal();
+		if (active_index < inStep->mNumActiveBodyToCCDBody)
+			return &inStep->mBodyMotions[active_index];
+	}
+	return nullptr;
+}
 
-	// Body has already moved, so we don't need to correct for anything
+inline static Vec3 sCalculateBodyMotion(const Body &inBody, PhysicsUpdateContext::Step *inStep)
+{
+	if (const auto *motion = sGetBodyMotion(inBody, inStep))
+		return Vec3(motion->mDeltaPosition);
 	return Vec3::sZero();
 }
 
@@ -2122,13 +2139,12 @@ inline static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBod
 	if (motion_properties == nullptr)
 		return nullptr;
 
-	// If it is not active it cannot have a CCD body
+	// Sleeping bodies and targets just awakened by CCD did not capture a trajectory.
 	uint32 active_index = motion_properties->GetIndexInActiveBodiesInternal();
-	if (active_index == Body::cInactiveIndex)
+	if (active_index >= inStep->mNumActiveBodyToCCDBody)
 		return nullptr;
 
 	// Check if the active body has a corresponding CCD body
-	JPH_ASSERT(active_index < inStep->mNumActiveBodyToCCDBody); // Ensure that the body has a mapping to CCD body
 	int ccd_index = inStep->mActiveBodyToCCDBody[active_index];
 	if (ccd_index < 0)
 		return nullptr;
@@ -2165,6 +2181,9 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			break;
 		CCDBody &ccd_body = ioStep->mCCDBodies[idx];
 		const Body &body = mBodyManager.GetBody(ccd_body.mBodyID1);
+		Vec3 max_relative_motion = Vec3::sMax((ccd_body.mDeltaPosition - ioStep->mMinBodyMotion).Abs(), (ccd_body.mDeltaPosition - ioStep->mMaxBodyMotion).Abs());
+		if (max_relative_motion.LengthSq() < ccd_body.mLinearCastThresholdSq)
+			continue;
 
 		// Filter out layers
 		DefaultBroadPhaseLayerFilter broadphase_layer_filter = GetDefaultBroadPhaseLayerFilter(body.GetObjectLayer());
@@ -2185,13 +2204,13 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 		class CCDNarrowPhaseCollector : public CastShapeCollector
 		{
 		public:
-										CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, float inDeltaTime) :
+										CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, PhysicsUpdateContext::Step *inStep) :
 				mBodyManager(inBodyManager),
 				mContactConstraintManager(inContactConstraintManager),
 				mSoftBodyContactListener(inSoftBodyContactListener),
 				mCCDBody(inCCDBody),
 				mResult(inResult),
-				mDeltaTime(inDeltaTime)
+				mStep(inStep)
 			{
 			}
 
@@ -2209,14 +2228,14 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					// Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
 					// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
 					// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
-					float denominator = normal.Dot(mCCDBody.mDeltaPosition);
+					const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
+					Vec3 movement2 = sCalculateBodyMotion(body2, mStep);
+					float denominator = normal.Dot(mCCDBody.mDeltaPosition - movement2);
 					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
 					{
 						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
 						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
 						{
-							const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-
 							// Check if we've already accepted all hits from this body
 							if (mValidateBodyPair)
 							{
@@ -2282,7 +2301,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 							mResult = inResult;
 
 							// Result was assuming body 2 is not moving, but it is, so we need to correct for it
-							Vec3 movement2 = fraction * sCalculateBodyMotion(body2, mDeltaTime);
+							movement2 *= fraction;
 							if (!movement2.IsNearZero())
 							{
 								mResult.mContactPointOn1 += movement2;
@@ -2309,18 +2328,18 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			SoftBodyContactListener *	mSoftBodyContactListener;
 			CCDBody &					mCCDBody;
 			ShapeCastResult &			mResult;
-			float						mDeltaTime;
+			PhysicsUpdateContext::Step *mStep;
 		};
 
 		// Narrowphase collector
 		ShapeCastResult cast_shape_result;
-		CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, ioContext->mStepDeltaTime);
+		CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, ioStep);
 
 		// This collector wraps the narrowphase collector and collects the closest hit
 		class CCDBroadPhaseCollector : public CastShapeBodyCollector
 		{
 		public:
-										CCDBroadPhaseCollector(const CCDBody &inCCDBody, const Body &inBody1, const RShapeCast &inShapeCast, ShapeCastSettings &inShapeCastSettings, SimShapeFilterWrapper &inShapeFilter, CCDNarrowPhaseCollector &ioCollector, const BodyManager &inBodyManager, PhysicsUpdateContext::Step *inStep, float inDeltaTime) :
+										CCDBroadPhaseCollector(const CCDBody &inCCDBody, const Body &inBody1, const RShapeCast &inShapeCast, ShapeCastSettings &inShapeCastSettings, SimShapeFilterWrapper &inShapeFilter, CCDNarrowPhaseCollector &ioCollector, const BodyManager &inBodyManager, PhysicsUpdateContext::Step *inStep) :
 				mCCDBody(inCCDBody),
 				mBody1(inBody1),
 				mBody1Extent(inShapeCast.mShapeWorldBounds.GetExtent()),
@@ -2329,8 +2348,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 				mShapeFilter(inShapeFilter),
 				mCollector(ioCollector),
 				mBodyManager(inBodyManager),
-				mStep(inStep),
-				mDeltaTime(inDeltaTime)
+				mStep(inStep)
 			{
 			}
 
@@ -2357,7 +2375,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					return;
 
 				// Get relative movement of these two bodies
-				Vec3 direction = mShapeCast.mDirection - sCalculateBodyMotion(body2, mDeltaTime);
+				Vec3 direction = mShapeCast.mDirection - sCalculateBodyMotion(body2, mStep);
 
 				// Test if the remaining movement is less than our movement threshold
 				if (direction.LengthSq() < mCCDBody.mLinearCastThresholdSq)
@@ -2400,7 +2418,6 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			CCDNarrowPhaseCollector &	mCollector;
 			const BodyManager &			mBodyManager;
 			PhysicsUpdateContext::Step *mStep;
-			float						mDeltaTime;
 		};
 
 		// Create shape filter
@@ -2412,8 +2429,9 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 
 		// Check if we collide with any other body. Note that we use the non-locking interface as we know the broadphase cannot be modified at this point.
 		RShapeCast shape_cast(body.GetShape(), Vec3::sOne(), body.GetCenterOfMassTransform(), ccd_body.mDeltaPosition);
-		CCDBroadPhaseCollector bp_collector(ccd_body, body, shape_cast, settings, shape_filter, np_collector, mBodyManager, ioStep, ioContext->mStepDeltaTime);
-		mBroadPhase->CastAABoxNoLock({ shape_cast.mShapeWorldBounds, shape_cast.mDirection }, bp_collector, broadphase_layer_filter, object_layer_filter);
+		CCDBroadPhaseCollector bp_collector(ccd_body, body, shape_cast, settings, shape_filter, np_collector, mBodyManager, ioStep);
+		AABox relative_bounds(shape_cast.mShapeWorldBounds.mMin - ioStep->mMaxBodyMotion, shape_cast.mShapeWorldBounds.mMax - ioStep->mMinBodyMotion);
+		mBroadPhase->CastAABoxNoLock({ relative_bounds, shape_cast.mDirection }, bp_collector, broadphase_layer_filter, object_layer_filter);
 
 	#ifdef JPH_TRACK_SIMULATION_STATS
 		uint64 num_ticks = GetProcessorTickCount() - start_tick;
@@ -2598,18 +2616,15 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 		BodyID *bodies_to_activate = (BodyID *)JPH_STACK_ALLOC(cBodiesBatch * sizeof(BodyID));
 		int num_bodies_to_activate = 0;
 
-		// We can move bodies that are not part of an island. In this case we need to notify the broadphase of the movement.
-		BodyID *bodies_to_update_bounds = (BodyID *)JPH_STACK_ALLOC(cBodiesBatch * sizeof(BodyID));
-		int num_bodies_to_update_bounds = 0;
-
 		for (uint i = 0; i < num_ccd_bodies; ++i)
 		{
 			const CCDBody *ccd_body = sorted_ccd_bodies[i];
 			Body &body1 = mBodyManager.GetBody(ccd_body->mBodyID1);
 			MotionProperties *body_mp = body1.GetMotionProperties();
+			auto *motion1 = sGetBodyMotion(body1, ioStep);
 
 			// If there was a hit
-			if (!ccd_body->mBodyID2.IsInvalid())
+			if (!ccd_body->mBodyID2.IsInvalid() && motion1->mFraction >= ccd_body->mFraction)
 			{
 				Body &body2 = mBodyManager.GetBody(ccd_body->mBodyID2);
 
@@ -2632,8 +2647,12 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 
 				// If the other body moved less than us before hitting something, we're not colliding with it so we again have triggered contact point add/persist callbacks by accident.
 				// We'll just move to the collision position anyway (as that's the last position we know is good), but we won't do any collision response.
-				if (ccd_body2 == nullptr || ccd_body2->mFraction >= ccd_body->mFraction)
+				auto *motion2 = sGetBodyMotion(body2, ioStep);
+				if ((ccd_body2 == nullptr || ccd_body2->mFraction >= ccd_body->mFraction)
+					&& (motion2 == nullptr || motion2->mFraction >= ccd_body->mFraction))
 				{
+					if (motion2 != nullptr && body2.IsDynamic())
+						motion2->mFraction = min(motion2->mFraction, ccd_body->mFraction);
 					const ContactSettings &contact_settings = ccd_body->mContactSettings;
 
 					// Calculate contact point velocity for body 1
@@ -2647,7 +2666,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 					if (body2.IsRigidBody())
 					{
 						// Calculate contact point velocity for body 2
-						Vec3 r2 = Vec3(ccd_body->mContactPointOn2 - body2.GetCenterOfMassPosition());
+						Vec3 r2 = Vec3(ccd_body->mContactPointOn2 - (body2.GetCenterOfMassPosition() + ccd_body->mFraction * sCalculateBodyMotion(body2, ioStep)));
 						Vec3 v2 = body2.GetPointVelocityCOM(r2);
 
 						// Calculate relative contact velocity
@@ -2778,36 +2797,43 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 				}
 			}
 
-			// Update body position
-			body1.AddPositionStep(ccd_body->mDeltaPosition * ccd_body->mFractionPlusSlop);
-
-			// If the body was activated due to an earlier CCD step it will have an index in the active
-			// body list that it higher than the highest one we processed during FindCollisions
-			// which means it hasn't been assigned an island and will not be updated by an island
-			// this means that we need to update its bounds manually
-			if (body_mp->GetIndexInActiveBodiesInternal() >= num_active_bodies_after_find_collisions)
-			{
-				body1.CalculateWorldSpaceBoundsInternal();
-				bodies_to_update_bounds[num_bodies_to_update_bounds++] = body1.GetID();
-				if (num_bodies_to_update_bounds == cBodiesBatch)
-				{
-					// Buffer full, flush now
-					mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
-					num_bodies_to_update_bounds = 0;
-				}
-			}
+			motion1->mFraction = min(motion1->mFraction, ccd_body->mFractionPlusSlop);
 		}
 
 		// Activate the requested bodies
 		if (num_bodies_to_activate > 0)
 			mBodyManager.ActivateBodies(bodies_to_activate, num_bodies_to_activate);
 
-		// Notify change bounds on requested bodies
-		if (num_bodies_to_update_bounds > 0)
-			mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
 	}
 
+	// Apply each trajectory once, after all earliest-hit decisions. Newly awakened
+	// targets were appended to the active list and have no motion in this substep.
+	static constexpr int cBoundsBatch = 64;
+	BodyID *bodies_to_update_bounds = (BodyID *)JPH_STACK_ALLOC(cBoundsBatch * sizeof(BodyID));
+	int num_bodies_to_update_bounds = 0;
+	const BodyID *active_bodies = mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody);
+	for (uint32 i = 0; i < ioStep->mNumActiveBodyToCCDBody; ++i)
+	{
+		Body &body = mBodyManager.GetBody(active_bodies[i]);
+		const auto &motion = ioStep->mBodyMotions[i];
+		body.AddPositionStep(Vec3(motion.mDeltaPosition) * motion.mFraction);
+		if (i >= num_active_bodies_after_find_collisions)
+		{
+			body.CalculateWorldSpaceBoundsInternal();
+			bodies_to_update_bounds[num_bodies_to_update_bounds++] = body.GetID();
+			if (num_bodies_to_update_bounds == cBoundsBatch)
+			{
+				mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
+				num_bodies_to_update_bounds = 0;
+			}
+		}
+	}
+	if (num_bodies_to_update_bounds > 0)
+		mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
+
 	// Ensure we free the CCD bodies array now, will not call the destructor!
+	temp_allocator->Free(ioStep->mBodyMotions, ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
+	ioStep->mBodyMotions = nullptr;
 	temp_allocator->Free(ioStep->mActiveBodyToCCDBody, ioStep->mNumActiveBodyToCCDBody * sizeof(int));
 	ioStep->mActiveBodyToCCDBody = nullptr;
 	ioStep->mNumActiveBodyToCCDBody = 0;

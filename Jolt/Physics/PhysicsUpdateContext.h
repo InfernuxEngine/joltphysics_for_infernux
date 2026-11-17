@@ -101,7 +101,7 @@ public:
 		{
 							CCDBody(BodyID inBodyID1, Vec3Arg inDeltaPosition, float inLinearCastThresholdSq, float inMaxPenetration) : mDeltaPosition(inDeltaPosition), mBodyID1(inBodyID1), mLinearCastThresholdSq(inLinearCastThresholdSq), mMaxPenetration(inMaxPenetration) { }
 
-			Vec3			mDeltaPosition;											///< Desired rotation step
+			Vec3			mDeltaPosition;											///< Desired translation step
 			Vec3			mContactNormal;											///< World space normal of closest hit (only valid if mFractionPlusSlop < 1)
 			RVec3			mContactPointOn2;										///< World space contact point on body 2 of closest hit (only valid if mFractionPlusSlop < 1)
 			BodyID			mBodyID1;												///< Body 1 (the body that is performing collision detection)
@@ -121,6 +121,14 @@ public:
 		atomic<uint32>		mNextCCDBody { 0 };										///< Next unprocessed body index in mCCDBodies
 		int *				mActiveBodyToCCDBody = nullptr;							///< A mapping between an index in BodyManager::mActiveBodies and the index in mCCDBodies
 		uint32				mNumActiveBodyToCCDBody = 0;							///< Number of indices in mActiveBodyToCCDBody
+		struct BodyMotion
+		{
+			Float3			mDeltaPosition;
+			float			mFraction = 1.0f;									///< Fraction retained after the earliest continuous hit
+		};
+		BodyMotion *		mBodyMotions = nullptr;									///< Shared-time trajectories; allocated only while CCD is active
+		Vec3				mMinBodyMotion = Vec3::sZero();
+		Vec3				mMaxBodyMotion = Vec3::sZero();
 
 		// Jobs in order of execution (some run in parallel)
 		JobHandle			mBroadPhasePrepare;										///< Prepares the new tree in the background
