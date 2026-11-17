@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 #include "../ConstraintTypes.h"
 #include "../SleepTypes.h"
+#include "key_sort.slang"
 
 ConstantBuffer<ConstraintParams> constraint_params;
 ConstantBuffer<StageWork> stage_work;
@@ -506,27 +507,24 @@ void constraint_add_scan_offsets(uint3 tid : SV_DispatchThreadID)
         cs_load(constraint_params.scan.y + i)));
 }
 
-bool cs_less(uint4 a, uint4 b)
-{
-    if (a.x != b.x) return a.x < b.x;
-    if (a.y != b.y) return a.y < b.y;
-    if (a.z != b.z) return a.z < b.z;
-    return a.w < b.w;
-}
 [shader("compute")][numthreads(64, 1, 1)]
-void constraint_seed_sort(uint3 tid : SV_DispatchThreadID)
+void constraint_seed_sort(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
     uint r, kind = constraint_params.select.x;
-    if (!cs_item(tid.x, cs_ref_count(kind), r)) return;
-    uint p = cs_ref_base(kind) + 2u * r;
+    bool valid = cs_item(tid.x, cs_ref_count(kind), r);
     uint4 key = uint4(ConstraintInvalid);
-    if (cs_load(constraint_params.layout.y).w == 1u && cs_load(p + 1u).y != 0u)
+    if (valid)
     {
-        uint4 e = cs_load(p);
-        uint body = e.y != ConstraintInvalid ? e.y : e.z;
-        key = uint4(e.x, labels_old[body].load(), e.w, kind);
+        uint p = cs_ref_base(kind) + 2u * r;
+        if (cs_load(constraint_params.layout.y).w == 1u && cs_load(p + 1u).y != 0u)
+        {
+            uint4 e = cs_load(p);
+            uint body = e.y != ConstraintInvalid ? e.y : e.z;
+            key = uint4(e.x, labels_old[body].load(), e.w, kind);
+        }
     }
-    cs_store(constraint_params.select.y + r, key);
+    key = jph_sort_tile(lane, key);
+    if (valid) cs_store(constraint_params.select.y + r, key);
 }
 
 // Stable merge-by-rank. One unique output store/item; no lane walks a run.
@@ -553,7 +551,7 @@ void constraint_merge_items(uint3 tid : SV_DispatchThreadID)
         uint4 other = cs_load(constraint_params.merge.x + mid);
         // Left keys use lower_bound; right keys use upper_bound. Thus equal
         // initialized sentinel keys retain original canonical source order.
-        bool precedes = right ? !cs_less(key, other) : cs_less(other, key);
+        bool precedes = right ? !jph_key_less(key, other) : jph_key_less(other, key);
         if (precedes) lo = mid + 1u; else hi = mid;
     }
     uint pair_begin = right ? other_begin : begin;

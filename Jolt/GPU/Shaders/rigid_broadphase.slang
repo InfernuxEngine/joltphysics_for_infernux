@@ -4,6 +4,7 @@
 
 // Host validates all word ranges, nonoverlap, domains and frozen bindings.
 #include "../BroadphaseTypes.h"
+#include "key_sort.slang"
 
 ConstantBuffer<BroadphaseParams> broadphase;
 ConstantBuffer<StageWork> stage_work;
@@ -253,14 +254,19 @@ uint4 bp_sort_record(uint leaf)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void build_sort_records(uint3 tid : SV_DispatchThreadID)
+void build_sort_records(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
     uint leaf;
-    if (!bp_item(tid.x, broadphase.counts.x, leaf)) return;
-    uint4 record = uint4(0xffffffffu, 0xffffffffu, leaf, 0u);
-    if (bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
-        record = bp_sort_record(leaf);
-    bp_store(broadphase.merge.x + leaf, record);
+    bool valid = bp_item(tid.x, broadphase.counts.x, leaf);
+    uint4 record = uint4(0xffffffffu);
+    if (valid)
+    {
+        record = uint4(0xffffffffu, 0xffffffffu, leaf, 0u);
+        if (bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
+            record = bp_sort_record(leaf);
+    }
+    record = jph_sort_tile(lane, record);
+    if (valid) bp_store(broadphase.merge.x + leaf, record);
 }
 
 uint4 bp_suppression_record(uint joint, out uint status)
@@ -290,26 +296,41 @@ uint4 bp_suppression_record(uint joint, out uint status)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void build_suppression(uint3 tid : SV_DispatchThreadID)
+void build_suppression(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
     uint joint;
-    if (!bp_item(tid.x, broadphase.counts.y, joint)) return;
-    uint status = 0u;
-    uint4 key = uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, joint);
-    if (bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
-        key = bp_suppression_record(joint, status);
-    bp_store(broadphase.merge.x + joint, key);
-    bp_store(broadphase.rankRows.z + joint, uint4(0u, 0u, status, 0u));
+    bool valid = bp_item(tid.x, broadphase.counts.y, joint);
+    uint4 key = uint4(0xffffffffu);
+    if (valid)
+    {
+        uint status = 0u;
+        key.w = joint;
+        if (bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
+            key = bp_suppression_record(joint, status);
+        bp_store(broadphase.rankRows.z + joint, uint4(0u, 0u, status, 0u));
+    }
+    key = jph_sort_tile(lane, key);
+    if (valid) bp_store(broadphase.merge.x + joint, key);
 }
 
 bool bp_less(uint4 a, uint4 b)
 {
-    if (broadphase.mergeKey.x == 2u && a.w != b.w) return a.w < b.w;
-    if (a.x != b.x) return a.x < b.x;
-    if (a.y != b.y) return a.y < b.y;
-    if (broadphase.mergeKey.x == 2u) return false;
-    if (a.z != b.z) return a.z < b.z;
-    return broadphase.mergeKey.x == 1u && a.w < b.w;
+    return broadphase.mergeKey.x == 2u ? jph_key_less(a.wxyz, b.wxyz) : jph_key_less(a, b);
+}
+
+// Filled pairs are sorted by (world, first leaf, second leaf). The input and
+// output of a block are the same disjoint range of the accepted candidate bank.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sort_candidate_tiles(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
+{
+    uint item;
+    uint length = bp_suffix_valid() ? bp_load(bp_h1()).x : 0u;
+    bool valid = bp_item(tid.x, length, item);
+    uint4 key = uint4(0xffffffffu);
+    if (valid) key = resident_patches[broadphase.merge.x + item].leaves.wxyz;
+    key = jph_sort_tile(lane, key);
+    if (valid) resident_patches[broadphase.merge.x + item].leaves = key.yzwx;
 }
 
 // One stable merge destination per source item. Left items use lower_bound,
@@ -441,6 +462,8 @@ bool bp_small_suppressed(uint world, uint a, uint b)
 // AABBs already include the existing half speculative-band expansion.
 bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
 {
+    Aabb ba = bounds[first], bb = bounds[second];
+    if (any(ba.minimum.xyz > bb.maximum.xyz) || any(bb.minimum.xyz > ba.maximum.xyz)) return false;
     ShapeModel a = shape_models[first], b = shape_models[second];
     if (a.meta.y == b.meta.y) return false;
     BodyModel ma = body_models[a.meta.y], mb = body_models[b.meta.y];
@@ -455,17 +478,7 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
         if (bp_small_suppressed(world, a.meta.y, b.meta.y)) return false;
     }
     else if (bp_suppressed(world, a.meta.y, b.meta.y)) return false;
-    if (bp_collider_suppressed(a.source, b.source)) return false;
-    Aabb ba = bounds[first], bb = bounds[second];
-    return !any(ba.minimum.xyz > bb.maximum.xyz) && !any(bb.minimum.xyz > ba.maximum.xyz);
-}
-
-bool bp_eligible(uint rank_a, uint rank_b)
-{
-    uint4 a = bp_load(broadphase.workspace.z + rank_a);
-    uint4 b = bp_load(broadphase.workspace.z + rank_b);
-    if (!bp_world_selected(a.x) || a.x != b.x) return false;
-    return bp_eligible_leaves(a.z, b.z, a.x, false);
+    return !bp_collider_suppressed(a.source, b.source);
 }
 
 // A finite leaf set fits one group and one pair mask per row. Lane-order
@@ -557,7 +570,7 @@ void bp_round(uint lane, bool fill)
     {
         uint4 key_b = bp_load(broadphase.workspace.z + other);
         if (key_b.w != 0u || key_b.x != key_a.x) { status |= BP_BAD_MODEL; continue; }
-        if (!bp_eligible(rank, other)) continue;
+        if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, false)) continue;
         if (fill)
         {
             bool overflow;
