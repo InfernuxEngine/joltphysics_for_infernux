@@ -161,7 +161,7 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::IntegrateSwept, "integrate_swept", Domain::Bodies, 64, 1, 1,
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)
-            | Mask(Resource::SweepBodies), Mask(Resource::BodyStates)},
+            | Mask(Resource::SweepBodies), Mask(Resource::BodyStates) | Mask(Resource::SleepStates)},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of

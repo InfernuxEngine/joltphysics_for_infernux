@@ -1,6 +1,7 @@
 // Same numerical writer/substep as ordinary narrowphase. Host must hold the
 // CollidePairs producer barrier until narrowphase_job_progress reports Success.
 #include "rigid_convex_manifold.slang"
+#include "component_union.slang"
 ConstantBuffer<StepParams> step_params;
 ConstantBuffer<StageWork> stage_work;
 StructuredBuffer<ShapeModel> shape_models;
@@ -124,11 +125,8 @@ void narrowphase_advance_jobs(uint3 tid:SV_DispatchThreadID)
         if(phase!=0u && convex_scratch[b].x==CvxFailure) convex_scratch[b+48u].w=2u;
     }
 }
-[shader("compute")]
-[numthreads(64,1,1)]
-void narrowphase_job_progress(uint3 tid:SV_DispatchThreadID)
+void cvx_step_progress()
 {
-    if(tid.x!=0u) return;
     uint slots=cvx_step_slots(),complete=0; uint4 summary=uint4(QuerySuccess,0,0,0);
     for(uint i=0u;i<slots;++i) {
         uint b=4u+i*CvxSlotWords; uint4 owner=convex_scratch[b+48u];
@@ -138,6 +136,13 @@ void narrowphase_job_progress(uint3 tid:SV_DispatchThreadID)
     }
     if(slots==0u) summary=uint4(QueryNumericalFailure,0,0,42);
     summary.y=complete; convex_scratch[0]=summary;
+}
+
+[shader("compute")]
+[numthreads(64,1,1)]
+void narrowphase_job_progress(uint3 tid:SV_DispatchThreadID)
+{
+    if (tid.x == 0u) cvx_step_progress();
 }
 
 void cvx_sweep_start(uint base, uint slots)
@@ -153,7 +158,13 @@ void cvx_sweep_start(uint base, uint slots)
     ShapeModel a = shape_models[leaves.x], b = shape_models[leaves.y];
     SweepBody ma = sweep_bodies[a.meta.y - step_params.selection.y];
     SweepBody mb = sweep_bodies[b.meta.y - step_params.selection.y];
-    bool swap = ma.displacement.w <= 0.0f;
+    bool twoDynamic = ma.displacement.w != 0.0f && mb.displacement.w != 0.0f;
+    float radiusA = body_models[a.meta.y].invInertiaDiagonal.w;
+    float radiusB = body_models[b.meta.y].invInertiaDiagonal.w;
+    // Dynamic pairs are driven by the opted-in endpoint. With two such
+    // endpoints the smaller radius gives the conservative travel threshold.
+    bool swap = twoDynamic ? (radiusB < 0.0f && (radiusA >= 0.0f || radiusB > radiusA))
+                           : ma.displacement.w <= 0.0f;
     ShapeModel driver = swap ? b : a, target = swap ? a : b;
     SweepBody from = swap ? mb : ma, to = swap ? ma : mb;
     BodyState sa = jph_sweep_state(from), sb = jph_sweep_state(to);
@@ -162,7 +173,8 @@ void cvx_sweep_start(uint base, uint slots)
     CvxOperand oa = cvx_leaf_operand(driver, sa), ob = cvx_leaf_operand(target, sb);
     float3 relative = from.displacement.xyz - to.displacement.xyz;
     float distance = length(relative);
-    if (distance == 0.0f || cvx_triangle_backfacing(ob, oa.center.xyz))
+    float radius = abs(swap ? radiusB : radiusA);
+    if (distance <= radius * step_params.restitution.y || cvx_triangle_backfacing(ob, oa.center.xyz))
     {
         cvx_step_next(base, slots);
         return;
@@ -172,7 +184,7 @@ void cvx_sweep_start(uint base, uint slots)
     convex_scratch[base + 48u].y = 1u;
 }
 
-void cvx_sweep_hit(uint base)
+bool cvx_sweep_hit(uint base)
 {
     uint4 identity = convex_scratch[base + 49u];
     SweepBody a = sweep_bodies[identity.z - step_params.selection.y];
@@ -188,14 +200,15 @@ void cvx_sweep_hit(uint base)
     if (cvx_is_triangle(target))
         normal = cvx_triangle_fix_normal(convex_geometry, target, pb, normal, sweep.xyz);
     float normalTravel = dot(normal, sweep.xyz) * sweep.w;
-    if (normalTravel <= 0.0f) return;
+    if (normalTravel <= 0.0f) return false;
     float3 ra = pa + origin + (b.displacement.xyz - a.displacement.xyz) * fraction;
     float3 rb = pb + origin - (b.positionCOM.xyz - a.positionCOM.xyz);
     float3 relativeVelocity = a.linearVelocity.xyz + cross(a.angularVelocity.xyz, ra)
                             - b.linearVelocity.xyz - cross(b.angularVelocity.xyz, rb);
-    if (dot(normal, relativeVelocity) <= 0.0f) return;
+    if (dot(normal, relativeVelocity) <= 0.0f) return false;
     // Apply Jolt's penetration allowance along the relative normal travel.
-    float slop = min(step_params.contact.y, a.displacement.w * step_params.restitution.z);
+    float radius = abs(body_models[identity.z].invInertiaDiagonal.w);
+    float slop = min(step_params.contact.y, radius * step_params.restitution.z);
     float cutoff = min(1.0f, fraction + slop / normalTravel);
     Contact hit;
     hit.meta = uint4(identity.zw, 1u, 0u);
@@ -204,7 +217,13 @@ void cvx_sweep_hit(uint base)
     hit.localAnchorB = float4(rb, 0.0f);
     hit.impulse = float4(0.0f, 0.0f, 0.0f, cutoff);
     contacts[convex_scratch[base + 48u].x] = hit;
-    sweep_choice[2u * (identity.z - step_params.selection.y)].min(asuint(cutoff));
+    uint count = step_params.selectedCounts.x;
+    uint2 edge = identity.zw - step_params.selection.y;
+    sweep_choice[count + edge.x].min(asuint(cutoff));
+    if (b.displacement.w == 0.0f) return false;
+    sweep_choice[3u * count].store(1u);
+    convex_scratch[base + 50u] = uint4(edge, 0u, 0u);
+    return true;
 }
 
 [shader("compute")]
@@ -221,14 +240,23 @@ void sweep_advance_jobs(uint3 tid : SV_DispatchThreadID)
             cvx_sweep_start(base, slots);
             continue;
         }
+        if (convex_scratch[base + 48u].y == 2u)
+        {
+            uint2 edge = jph_join_components(sweep_choice, convex_scratch[base + 50u].xy, 1u);
+            if (edge.x == edge.y) cvx_step_next(base, slots);
+            else convex_scratch[base + 50u].xy = edge;
+            continue;
+        }
         uint status = cvx_cast_unit(convex_geometry, convex_scratch, base);
         if (status == CvxCastPending) continue;
         if (status == CvxCastError)
             convex_scratch[base + 48u].w = 2u;
         else
         {
-            if (status == CvxCastHit) cvx_sweep_hit(base);
-            cvx_step_next(base, slots);
+            if (status == CvxCastHit && cvx_sweep_hit(base))
+                convex_scratch[base + 48u].y = 2u;
+            else
+                cvx_step_next(base, slots);
         }
     }
 }
@@ -238,8 +266,70 @@ void sweep_advance_jobs(uint3 tid : SV_DispatchThreadID)
 void sweep_initialize_jobs(uint3 tid : SV_DispatchThreadID)
 {
     cvx_initialize_jobs(tid.x);
-    if (tid.x < 2u * step_params.selectedCounts.x)
-        sweep_choice[tid.x].store(0xffffffffu);
+    uint count = step_params.selectedCounts.x;
+    // Contiguous parent, cutoff and ordinal arrays, then the dynamic-hit flag.
+    if (tid.x < count)
+    {
+        sweep_choice[tid.x].store(tid.x);
+        sweep_choice[count + tid.x].store(0xffffffffu);
+        sweep_choice[2u * count + tid.x].store(0xffffffffu);
+    }
+    if (tid.x == 0u) sweep_choice[3u * count].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_job_progress(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    cvx_step_progress();
+    if (convex_scratch[0].x == QuerySuccess)
+        convex_scratch[0].w = sweep_choice[3u * step_params.selectedCounts.x].load();
+}
+
+// Every pass shortens a chain by at least a factor of 32. Host derives the
+// pass count from the body range, and emits complete passes in queue order.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_flatten_parents(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint local = stage_work.range.x + tid.x;
+    uint root = sweep_choice[local].load();
+    if (root == local) return;
+    for (uint hop = 0u; hop < 32u; ++hop)
+    {
+        uint parent = sweep_choice[root].load();
+        if (parent == root) break;
+        root = parent;
+    }
+    sweep_choice[local].store(root);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_reduce_times(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint local = stage_work.range.x + tid.x;
+    uint root = sweep_choice[local].load();
+    uint count = step_params.selectedCounts.x;
+    if (root != local)
+        sweep_choice[count + root].min(sweep_choice[count + local].load());
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_store_cutoffs(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint local = stage_work.range.x + tid.x;
+    uint root = sweep_choice[local].load();
+    uint cutoff = sweep_choice[step_params.selectedCounts.x + root].load();
+    // Clip this connected set to its first trustworthy linear sweep. A later
+    // hit predicted on a trajectory changed by the first impulse is stale.
+    if (cutoff != 0xffffffffu)
+        sweep_bodies[local].linearResponse.w = asfloat(cutoff);
 }
 
 [shader("compute")]
@@ -250,9 +340,10 @@ void sweep_select_pair(uint3 tid : SV_DispatchThreadID)
     uint ordinal = stage_work.range.x + tid.x;
     Contact hit = contacts[ordinal];
     if (hit.meta.z == 0u) return;
-    uint row = 2u * (hit.meta.x - step_params.selection.y);
-    if (sweep_choice[row].load() == asuint(hit.impulse.w))
-        sweep_choice[row + 1u].min(ordinal);
+    uint root = sweep_choice[hit.meta.x - step_params.selection.y].load();
+    uint count = step_params.selectedCounts.x;
+    if (sweep_choice[count + root].load() == asuint(hit.impulse.w))
+        sweep_choice[2u * count + root].min(ordinal);
 }
 
 [shader("compute")]
@@ -265,8 +356,13 @@ void sweep_apply_impact(uint3 tid : SV_DispatchThreadID)
     ContactPatch patch = contact_patches[index];
     patch.leaves.zw = uint2(0u);
     Contact hit = contacts[ordinal];
+    if (hit.meta.z == 0u)
+    {
+        contact_patches[index] = patch;
+        return;
+    }
     uint i = hit.meta.x - step_params.selection.y;
-    if (hit.meta.z == 0u || sweep_choice[2u * i + 1u].load() != ordinal)
+    if (sweep_choice[2u * step_params.selectedCounts.x + sweep_choice[i].load()].load() != ordinal)
     {
         contact_patches[index] = patch;
         return;
@@ -277,7 +373,8 @@ void sweep_apply_impact(uint3 tid : SV_DispatchThreadID)
     BodyModel ma = body_models[hit.meta.x], mb = body_models[hit.meta.y];
     // The target may be a temporarily driven authored Static. Its captured
     // point velocity still participates, with zero inverse mass.
-    mb.meta.z = MotionKinematic;
+    bool dynamicTarget = jph_dynamic(mb);
+    if (!dynamicTarget) mb.meta.z = MotionKinematic;
     float3 n = hit.normalDepth.xyz, ra = hit.localAnchorA.xyz, rb = hit.localAnchorB.xyz;
     float3 incoming = jph_point_velocity(ma, sa, ra) - jph_point_velocity(mb, sb, rb);
     float speed = dot(incoming, n);
@@ -301,7 +398,14 @@ void sweep_apply_impact(uint3 tid : SV_DispatchThreadID)
     float3 linear = jph_clamp_speed(sa.linearVelocity.xyz, ma.damping.z);
     float3 angular = jph_clamp_speed(sa.angularVelocity.xyz, ma.damping.w);
     sweep_bodies[i].linearResponse = float4(linear - a.linearVelocity.xyz, hit.impulse.w);
-    sweep_bodies[i].angularResponse = float4(angular - a.angularVelocity.xyz, 0.0f);
+    sweep_bodies[i].angularResponse = float4(angular - a.angularVelocity.xyz, 1.0f);
+    if (dynamicTarget)
+    {
+        float3 linearB = jph_clamp_speed(sb.linearVelocity.xyz, mb.damping.z);
+        float3 angularB = jph_clamp_speed(sb.angularVelocity.xyz, mb.damping.w);
+        sweep_bodies[j].linearResponse = float4(linearB - b.linearVelocity.xyz, hit.impulse.w);
+        sweep_bodies[j].angularResponse = float4(angularB - b.angularVelocity.xyz, 1.0f);
+    }
     // Publish the witness and incoming velocity at the impact, before the
     // common integrator changes COM pose. The report reads this one-point row.
     hit.normalDepth.w = 0.0f;

@@ -437,9 +437,16 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
     BodyModel ma = body_models[a.meta.y], mb = body_models[b.meta.y];
     if ((ma.meta.z & MotionNotResident) != 0u || (mb.meta.z & MotionNotResident) != 0u) return false;
     bool sensor = ((a.meta.w | b.meta.w) & ShapeSensor) != 0u;
-    if (broadphase.round.y != 0u && (sensor ||
-        !((ba.minimum.w > 0.0f && bb.minimum.w == 0.0f) || (bb.minimum.w > 0.0f && ba.minimum.w == 0.0f))))
-        return false;
+    if (broadphase.round.y != 0u)
+    {
+        if (sensor) return false;
+        bool twoDynamic = ba.minimum.w != 0.0f && bb.minimum.w != 0.0f;
+        if (twoDynamic)
+        {
+            if (ma.invInertiaDiagonal.w >= 0.0f && mb.invInertiaDiagonal.w >= 0.0f) return false;
+        }
+        else if (ba.minimum.w <= 0.0f && bb.minimum.w <= 0.0f) return false;
+    }
     if (!sensor && (ma.meta.z & ~MotionNotResident) != MotionDynamic
         && (mb.meta.z & ~MotionNotResident) != MotionDynamic) return false;
     if ((a.surface.y & (1u << b.surface.x)) == 0u

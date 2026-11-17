@@ -700,6 +700,7 @@ static const float CvxCastTolerance = 1e-4f;
 static const uint CvxCastOrigin = 54u;
 static const uint CvxCastCursor = 55u;
 static const uint CvxCastMotion = 56u;
+static const uint CvxCastPlaneNormal = 57u;
 
 // Separation is a witnessed distance; gap is the lower bound from a real
 // separating support plane. Only the latter may advance a moving pair.
@@ -787,7 +788,8 @@ uint cvx_cast_unit(StructuredBuffer<uint4> geometry, RWStructuredBuffer<uint4> s
     }
     float4 motion = cvx_f(scratch, base, CvxCastMotion);
     uint4 cursor = scratch[base + CvxCastCursor];
-    float travel = asfloat(cursor.x);
+    float previousTravel = asfloat(cursor.x);
+    float travel = previousTravel;
     if (cursor.y == 0xffffffffu) {
         cvx_fail(scratch, base, 64u);
         return CvxCastError;
@@ -795,12 +797,19 @@ uint cvx_cast_unit(StructuredBuffer<uint4> geometry, RWStructuredBuffer<uint4> s
     ++cursor.y;
     uint result = cvx_cast_progress(metric.w, gap, dot(metric.xyz, motion.xyz), motion.w, travel, cursor.z);
     if (result == CvxCastPending) {
+        if (travel > previousTravel)
+            cvx_put(scratch, base, CvxCastPlaneNormal, float4(metric.xyz, 0.0f));
         cursor.x = asuint(travel);
         scratch[base + CvxCastCursor] = cursor;
         cvx_cast_metric(geometry, scratch, base, cvx_operand(scratch, base, 0u), cvx_operand(scratch, base, 1u),
                         motion.xyz, travel, cursor.z);
         return CvxCastPending;
     }
+    // The last advancing plane remains a support plane at the new distance.
+    // Near tangency the closest-point witnesses can still be valid while
+    // their tiny separation vector is too ill-conditioned for an impulse.
+    if (result == CvxCastHit && travel > 0.0f)
+        cvx_put(scratch, base, 7u, float4(cvx_f(scratch, base, CvxCastPlaneNormal).xyz, metric.w));
     if (result == CvxCastError) cvx_fail(scratch, base, 64u);
     return result;
 }

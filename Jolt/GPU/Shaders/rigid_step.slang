@@ -1273,7 +1273,7 @@ void capture_sweep_motion(uint3 tid : SV_DispatchThreadID)
     float role = 0.0f;
     if (jph_dynamic(model))
     {
-        float radius = model.invInertiaDiagonal.w;
+        float radius = abs(model.invInertiaDiagonal.w);
         float threshold = radius * step_params.restitution.y;
         role = radius > 0.0f && dot(displacement, displacement) > threshold * threshold ? radius : -1.0f;
     }
@@ -1312,14 +1312,24 @@ void integrate_swept(uint3 tid : SV_DispatchThreadID)
     uint index = stage_work.range.x + tid.x;
     if (jph_articulation_admitted(index, false)) return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
-    if (!jph_can_drift(index, model)) return;
     SweepBody sweep = sweep_bodies[index - step_params.selection.y];
+    bool impact = sweep.angularResponse.w != 0.0f;
+    if (!impact && !jph_can_drift(index, model)) return;
     BodyState state = jph_sweep_state(sweep);
     state.positionCOM.xyz += sweep.linearResponse.w * sweep.displacement.xyz;
     state.linearVelocity.xyz += sweep.linearResponse.xyz;
     state.angularVelocity.xyz += sweep.angularResponse.xyz;
     jph_project_motion(model, state);
     body_states[index] = state;
+    if (impact && body_sleep[index].runtime.state.x == 0u)
+    {
+        BodySleepRuntime sleep = body_sleep[index].runtime;
+        float3 p0, p1, p2;
+        sleep_test_points(state, body_sleep[index].author.rootHalfExtent.xyz, p0, p1, p2);
+        sleep_reset(sleep, p0, p1, p2);
+        sleep.state.x = 1u;
+        body_sleep[index].runtime = sleep;
+    }
 }
 
 // One original row, retaining raw models and per-row BodyState load/store.

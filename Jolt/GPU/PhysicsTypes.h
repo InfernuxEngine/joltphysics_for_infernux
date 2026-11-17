@@ -113,7 +113,8 @@ struct JPH_GPU_ALIGN BodyModel
     // Raw inverse mass, exact world translation freeze bits (0..7), exact
     // world-space rotation freeze bits (0..7), gravity factor.
     JPH_GPU_FLOAT4 mass;
-    // Principal inverse inertia xyz; w is the inner radius for linear CCD, or zero.
+    // Principal inverse inertia xyz. w is zero for Discrete, +inner radius
+    // for Continuous, or -inner radius for ContinuousDynamic.
     JPH_GPU_FLOAT4 invInertiaDiagonal;
     // Principal inertia frame relative to the body frame, quaternion xyzw.
     JPH_GPU_FLOAT4 inertiaRotation;
@@ -388,7 +389,7 @@ struct JPH_GPU_ALIGN SweepBody
     JPH_GPU_FLOAT4 angularVelocity;
     JPH_GPU_FLOAT4 displacement;    // full substep translation xyz and signed sweep role w (initiator inner radius).
     JPH_GPU_FLOAT4 linearResponse;  // velocity change xyz and travel fraction w.
-    JPH_GPU_FLOAT4 angularResponse; // angular velocity change xyz, w zero.
+    JPH_GPU_FLOAT4 angularResponse; // angular velocity change xyz, w marks a solved impact.
 };
 
 struct JPH_GPU_ALIGN ContactPatch

@@ -4,6 +4,7 @@
 #include "../ConstraintTypes.h"
 #include "../SleepTypes.h"
 #include "key_sort.slang"
+#include "component_union.slang"
 
 ConstantBuffer<ConstraintParams> constraint_params;
 ConstantBuffer<StageWork> stage_work;
@@ -275,10 +276,6 @@ void constraint_reset_connectivity(uint3 tid : SV_DispatchThreadID)
     if (tid.x == 0u) root_votes[constraint_params.counts.x].store(0u);
 }
 
-// A successful CAS attaches a root to a strictly smaller slot. Any existing
-// path from that smaller slot also decreases, so the union cannot create a cycle.
-// Each iteration decreases the sum of the two cursors. A paused edge resumes
-// at the same pair of ancestors and never waits for another invocation.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_join_edges(uint3 tid : SV_DispatchThreadID)
 {
@@ -287,17 +284,7 @@ void constraint_join_edges(uint3 tid : SV_DispatchThreadID)
     uint p = cs_ref_scratch(kind, r);
     uint2 edge = cs_load(p).xy;
     if (edge.x == edge.y) return;
-    for (uint n = 0u; n < ConstraintConnectivityQuantum && edge.x != edge.y; ++n)
-    {
-        uint hi = max(edge.x, edge.y), lo = min(edge.x, edge.y);
-        uint parent = component_parents[hi].load();
-        if (parent == hi)
-        {
-            uint prior = component_parents[hi].compareExchange(hi, lo);
-            parent = prior == hi ? lo : prior;
-        }
-        edge = uint2(parent, lo);
-    }
+    edge = jph_join_components(component_parents, edge, ConstraintConnectivityQuantum);
     cs_store(p, uint4(edge, 0u, 0u));
     if (edge.x != edge.y) root_votes[constraint_params.counts.x].or(ConstraintLinksPending);
 }
