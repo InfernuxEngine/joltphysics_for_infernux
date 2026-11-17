@@ -136,7 +136,7 @@ public:
 							~LargeIslandSplitter();
 
 	/// Prepare the island splitter by allocating memory
-	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator);
+	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const uint8 *inUnsplitIslands = nullptr);
 
 	/// Assign two bodies to a split. Returns the split index.
 	uint					AssignSplit(const Body *inBody1, const Body *inBody2);

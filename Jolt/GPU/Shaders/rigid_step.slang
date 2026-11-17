@@ -726,17 +726,7 @@ void jph_body_apply_forces(uint index, StepParams parameters)
     if (!jph_dynamic(model) || !jph_resident(model) || body_sleep[index].runtime.state.x == 0u)
         return;
     BodyState state = body_states[index];
-    BodyForces forces = body_forces[index];
-    float dt = parameters.gravityDt.w;
-    jph_project_motion(model, state);
-    // PhysicsSystem applies gyro before external force/torque and drag.
-    jph_apply_gyroscopic_force(model, state, dt);
-    state.linearVelocity.xyz += dt * jph_acceleration(model, forces, parameters.gravityDt.xyz);
-    state.angularVelocity.xyz += dt * jph_inverse_inertia(model, state, forces.torque.xyz);
-    state.linearVelocity.xyz *= max(0.0f, 1.0f - model.damping.x * dt);
-    state.angularVelocity.xyz *= max(0.0f, 1.0f - model.damping.y * dt);
-    state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
-    state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
+    jph_apply_body_inputs(model, state, body_forces[index], parameters.gravityDt);
     body_states[index] = state;
 }
 

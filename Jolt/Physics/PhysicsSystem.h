@@ -13,10 +13,12 @@
 #include <Jolt/Physics/LargeIslandSplitter.h>
 #include <Jolt/Physics/PhysicsUpdateContext.h>
 #include <Jolt/Physics/PhysicsSettings.h>
+#include <optional>
 
 JPH_NAMESPACE_BEGIN
 
 class JobSystem;
+class JobSystemSingleThreaded;
 class StateRecorder;
 class TempAllocator;
 class PhysicsStepListener;
@@ -166,6 +168,27 @@ public:
 	/// and data to solve the contacts between bodies. At the end of the Update call, all allocated memory will have been freed.
 	EPhysicsUpdateError			Update(float inDeltaTime, int inCollisionSteps, TempAllocator *inTempAllocator, JobSystem *inJobSystem);
 
+	struct CoupledBodyImpulse
+	{
+		BodyID					mBody;
+		Vec3					mLinear;
+		Vec3					mAngular;					///< Impulse about this body's current center of mass.
+	};
+
+	/// Prepare a fixed update through the first substep's native warm start. Only islands reached by admitted Dynamic endpoints
+	/// leave their velocity sweeps to the caller. A fresh context, its allocator and the inline job system
+	/// must stay on the calling owner thread until completion. Between calls use no-lock reads only.
+	bool						BeginCoupledVelocityUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
+
+	/// Apply a completed peer response and run another native sweep in the touched islands.
+	/// When no native sweeps remain, accept the last response and integrate exactly one substep.
+	/// It returns nullopt until the last substep has integrated, otherwise the update result.
+	/// An admitted update must be advanced to completion.
+	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses = nullptr, uint32 inImpulseCount = 0);
+
+	/// Accept the new endpoints after the previous substep integrated.
+	bool						BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount);
+
 	/// Saving state for replay
 	void						SaveState(StateRecorder &inStream, EStateRecorderState inState = EStateRecorderState::All, const StateRecorderFilter *inFilter = nullptr) const;
 
@@ -271,6 +294,10 @@ public:
 
 private:
 	using CCDBody = PhysicsUpdateContext::Step::CCDBody;
+
+	bool						PrepareUpdate(float inDeltaTime, int inCollisionSteps, PhysicsUpdateContext &ioContext, JobSystem *inJobSystem);
+	EPhysicsUpdateError			FinishUpdate(PhysicsUpdateContext &ioContext);
+	bool						SetCoupledEndpoints(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount, bool inBodyLocksHeld);
 
 	// Various job entry points
 	void						JobStepListeners(PhysicsUpdateContext::Step *ioStep);

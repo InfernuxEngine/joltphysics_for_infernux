@@ -28,8 +28,8 @@ class PhysicsUpdateContext : public NonCopyable
 {
 public:
 	/// Destructor
-	explicit				PhysicsUpdateContext(TempAllocator &inTempAllocator);
-							~PhysicsUpdateContext();
+	JPH_EXPORT explicit		PhysicsUpdateContext(TempAllocator &inTempAllocator);
+	JPH_EXPORT				~PhysicsUpdateContext();
 
 	static constexpr int	cMaxConcurrency = 32;									///< Maximum supported amount of concurrent jobs
 
@@ -169,6 +169,17 @@ public:
 	IslandBuilder *			mIslandBuilder;											///< Keeps track of connected bodies and builds islands for multithreaded velocity/position update
 
 	Steps					mSteps;
+
+	Array<BodyID>			mCoupledBodies;
+	struct CoupledFreeVelocity { Vec3 mLinear, mAngular; };
+	Array<CoupledFreeVelocity> mCoupledFreeVelocities;
+	Array<uint8>			mCoupledIslandMask;
+	Array<uint32>			mCoupledIslandOrder;
+	Array<uint>				mCoupledSweeps;
+	uint32					mCoupledSubstep = 0;
+	bool					mCoupledUpdate = false;
+	bool					mAwaitingCoupledEndpoints = false;
+	bool					IsCoupledIsland(uint32 inIsland) const { return !mCoupledIslandMask.empty() && mCoupledIslandMask[inIsland] != 0; }
 	ContactListener *		mContactReportListener = nullptr;					///< Opt-in read-only reports for this Update
 	bool						mReportContactImpulses = false;
 

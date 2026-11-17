@@ -236,6 +236,19 @@ float3 jph_acceleration(BodyModel model, BodyForces forces, float3 gravity)
     return jph_dynamic(model) ? jph_project_linear(model, gravity * model.mass.w) + jph_inverse_linear_mass(model, forces.force.xyz) : float3(0.0f);
 }
 
+void jph_apply_body_inputs(BodyModel model, inout BodyState state, BodyForces forces, float4 gravity_dt)
+{
+    float dt = gravity_dt.w;
+    jph_project_motion(model, state);
+    jph_apply_gyroscopic_force(model, state, dt);
+    state.linearVelocity.xyz += dt * jph_acceleration(model, forces, gravity_dt.xyz);
+    state.angularVelocity.xyz += dt * jph_inverse_inertia(model, state, forces.torque.xyz);
+    state.linearVelocity.xyz *= max(0.0f, 1.0f - model.damping.x * dt);
+    state.angularVelocity.xyz *= max(0.0f, 1.0f - model.damping.y * dt);
+    state.linearVelocity.xyz = jph_clamp_speed(state.linearVelocity.xyz, model.damping.z);
+    state.angularVelocity.xyz = jph_clamp_speed(state.angularVelocity.xyz, model.damping.w);
+}
+
 void jph_tangents(float3 normal, out float3 t1, out float3 t2)
 {
     // Vec3::GetNormalizedPerpendicular and ContactConstraint::GetTangents.
