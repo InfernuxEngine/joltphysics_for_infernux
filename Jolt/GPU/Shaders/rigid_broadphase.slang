@@ -32,16 +32,15 @@ static const uint BP_INDEX_OVERFLOW = 32u;
 static const uint BP_BAD_QUANTUM = 64u;
 static const uint BP_CAPACITY_NEEDED = 128u;
 
-bool bp_suffix_valid()
-{
-    uint4 header = contact_patches[broadphase.workspace.y + 1u].leaves;
-    return header.z == 0u && header.y == 0u && header.x <= broadphase.candidates.z;
-}
-
 uint4 bp_load(uint p) { return contact_patches[p].leaves; }
 void bp_store(uint p, uint4 v) { contact_patches[p].leaves = v; }
-uint bp_h0() { return broadphase.workspace.y; }
-uint bp_h1() { return broadphase.workspace.y + 1u; }
+uint bp_header() { return broadphase.workspace.y; }
+
+bool bp_suffix_valid()
+{
+    uint4 header = bp_load(bp_header());
+    return header.z == 0u && header.y == 0u && header.x <= broadphase.candidates.z;
+}
 
 uint2 bp_add64(uint2 a, uint2 b, out bool overflow)
 {
@@ -51,13 +50,6 @@ uint2 bp_add64(uint2 a, uint2 b, out bool overflow)
     uint hi = hi0 + carry;
     overflow = hi0 < a.y || hi < hi0;
     return uint2(lo, hi);
-}
-
-uint2 bp_sub64(uint2 a, uint2 b, out bool underflow)
-{
-    uint borrow = a.x < b.x ? 1u : 0u;
-    underflow = a.y < b.y || (a.y == b.y && borrow != 0u);
-    return uint2(a.x - b.x, a.y - b.y - borrow);
 }
 
 uint4 bp_combine(uint4 a, uint4 b)
@@ -135,10 +127,10 @@ void init_contacts(uint3 tid : SV_DispatchThreadID)
 void publish_resident_count(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     header.z &= ~BP_CAPACITY_NEEDED;
     if (header.y == 0u && header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
-    bp_store(bp_h1(), header);
+    bp_store(bp_header(), header);
     uint4 solve = resident_step[1u].value;
     solve.zw = header.z == 0u ? uint2(header.x * MaxContactPointsPerPair, header.x) : uint2(0u);
     resident_step[1u].value = solve;
@@ -193,7 +185,7 @@ uint bp_scan_length()
 void seed_active(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint status = bp_load(bp_h1()).z;
+    uint status = bp_load(bp_header()).z;
     uint count = broadphase.round.z == 1u && !bp_suffix_valid() ? 0u : broadphase.selectedCounts.y;
     bp_store(broadphase.activeState.x, uint4(count, 0u, status, 0u));
     bp_store(broadphase.activeState.y, uint4(0u));
@@ -206,7 +198,7 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
     uint record = tid.x;
     if (record >= stage_work.range.y) return;
     bool candidates = stage_work.range.z == 1u;
-    uint length = candidates ? (bp_suffix_valid() ? bp_load(bp_h1()).x : 0u) : bp_active_level_length();
+    uint length = candidates ? (bp_suffix_valid() ? bp_load(bp_header()).x : 0u) : bp_active_level_length();
     uint limit = BroadphaseItemLimit;
     bool block_mode = stage_work.range.w == 1u;
     if (block_mode)
@@ -256,17 +248,12 @@ uint4 bp_sort_record(uint leaf)
 [numthreads(64, 1, 1)]
 void build_sort_records(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
-    uint leaf;
-    bool valid = bp_item(tid.x, broadphase.counts.x, leaf);
+    uint item;
+    bool valid = bp_item(tid.x, broadphase.selectedCounts.y, item);
     uint4 record = uint4(0xffffffffu);
-    if (valid)
-    {
-        record = uint4(0xffffffffu, 0xffffffffu, leaf, 0u);
-        if (bp_in_range(leaf, broadphase.selection.z, broadphase.selectedCounts.y))
-            record = bp_sort_record(leaf);
-    }
+    if (valid) record = bp_sort_record(broadphase.selection.z + item);
     record = jph_sort_tile(lane, record);
-    if (valid) bp_store(broadphase.merge.x + leaf, record);
+    if (valid) bp_store(broadphase.merge.x + item, record);
 }
 
 uint4 bp_suppression_record(uint joint, out uint status)
@@ -298,19 +285,17 @@ uint4 bp_suppression_record(uint joint, out uint status)
 [numthreads(64, 1, 1)]
 void build_suppression(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
-    uint joint;
-    bool valid = bp_item(tid.x, broadphase.counts.y, joint);
+    uint item;
+    bool valid = bp_item(tid.x, broadphase.selectedCounts.z, item);
     uint4 key = uint4(0xffffffffu);
     if (valid)
     {
-        uint status = 0u;
-        key.w = joint;
-        if (bp_in_range(joint, broadphase.selection.w, broadphase.selectedCounts.z))
-            key = bp_suppression_record(joint, status);
-        bp_store(broadphase.rankRows.z + joint, uint4(0u, 0u, status, 0u));
+        uint status;
+        key = bp_suppression_record(broadphase.selection.w + item, status);
+        bp_store(broadphase.scan.x + item, uint4(0u, 0u, status, 0u));
     }
     key = jph_sort_tile(lane, key);
-    if (valid) bp_store(broadphase.merge.x + joint, key);
+    if (valid) bp_store(broadphase.merge.x + item, key);
 }
 
 bool bp_less(uint4 a, uint4 b)
@@ -325,7 +310,7 @@ bool bp_less(uint4 a, uint4 b)
 void sort_candidate_tiles(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
     uint item;
-    uint length = bp_suffix_valid() ? bp_load(bp_h1()).x : 0u;
+    uint length = bp_suffix_valid() ? bp_load(bp_header()).x : 0u;
     bool valid = bp_item(tid.x, length, item);
     uint4 key = uint4(0xffffffffu);
     if (valid) key = resident_patches[broadphase.merge.x + item].leaves.wxyz;
@@ -339,7 +324,7 @@ void sort_candidate_tiles(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupI
 [numthreads(64, 1, 1)]
 void merge_items(uint3 tid : SV_DispatchThreadID)
 {
-    uint length = broadphase.mergeKey.x == 2u ? (bp_suffix_valid() ? bp_load(bp_h1()).x : 0u) : broadphase.merge.z;
+    uint length = broadphase.mergeKey.x == 2u ? (bp_suffix_valid() ? bp_load(bp_header()).x : 0u) : broadphase.merge.z;
     uint item;
     if (!bp_item(tid.x, length, item)) return;
     uint width = broadphase.merge.w; // Host validates power-of-two and <= 2^31.
@@ -363,34 +348,16 @@ void merge_items(uint3 tid : SV_DispatchThreadID)
     bp_merge_store(broadphase.merge.y + destination, key);
 }
 
-uint bp_world_bound(uint world, bool upper)
-{
-    uint low = 0u, high = broadphase.counts.x;
-    for (uint step = 0u; step < 32u && low < high; ++step)
-    {
-        uint middle = low + (high - low) / 2u;
-        uint value = bp_load(broadphase.workspace.z + middle).x;
-        if (value < world || (upper && value == world)) low = middle + 1u; else high = middle;
-    }
-    return low;
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void find_sap_ends(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 key = bp_load(broadphase.workspace.z + rank);
     uint status = key.w;
     uint end = rank + 1u;
     if (key.x >= broadphase.counts.z || key.z >= broadphase.counts.x) status |= BP_BAD_MODEL;
-    if (rank >= broadphase.selectedCounts.y)
-    {
-        bp_store(broadphase.rankRows.x + rank, uint4(end, end, 0u, 0u));
-        bp_store(broadphase.rankRows.y + rank, uint4(0u));
-        return;
-    }
     if (status == 0u)
     {
         uint max_x = bp_ordered(bounds[key.z].maximum.x);
@@ -413,7 +380,7 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
 bool bp_suppressed(uint world, uint body_a, uint body_b)
 {
     uint a = min(body_a, body_b), b = max(body_a, body_b);
-    uint low = 0u, high = broadphase.counts.y;
+    uint low = 0u, high = broadphase.selectedCounts.z;
     for (uint step = 0u; step < 32u && low < high; ++step)
     {
         uint middle = low + (high - low) / 2u;
@@ -422,7 +389,7 @@ bool bp_suppressed(uint world, uint body_a, uint body_b)
             (key.y < a || (key.y == a && key.z < b)));
         if (before) low = middle + 1u; else high = middle;
     }
-    if (low == broadphase.counts.y) return false;
+    if (low == broadphase.selectedCounts.z) return false;
     uint4 found = bp_load(broadphase.workspace.w + low);
     // Duplicates retain sourceJointOrdinal in the full sort key. Any matching
     // suppressing joint wins, preserving the original multi-joint OR rule.
@@ -538,7 +505,7 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
         }
         for (uint i = 0u; i < joints; ++i)
             status |= bp_small_joint_keys[i].w;
-        bp_store(bp_h1(), uint4(count, 0u, status, count));
+        bp_store(bp_header(), uint4(count, 0u, status, count));
         resident_patches[0u].leaves = uint4(broadphase.candidates.x, status == 0u ? count : 0u, 0u, 0u);
     }
 }
@@ -698,9 +665,9 @@ void compact_active(uint3 tid : SV_DispatchThreadID)
 void accumulate_status_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     header.z |= bp_load(broadphase.summary.x).z;
-    bp_store(bp_h1(), header);
+    bp_store(bp_header(), header);
 }
 
 [shader("compute")]
@@ -709,7 +676,7 @@ void publish_active_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     uint4 input = bp_load(broadphase.activeState.x);
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     uint4 total = uint4(0u);
     // Zero indirect groups have not produced a root for this window. Never
     // load the stale root, even though its memory was initialized earlier.
@@ -719,7 +686,7 @@ void publish_active_summary(uint3 tid : SV_DispatchThreadID)
     if (total.x > input.x)
         status |= BP_BAD_CURSOR;
     header.z = status;
-    bp_store(bp_h1(), header); // Preserve C64 and maxWorldC, including during fill.
+    bp_store(bp_header(), header);
     bp_store(broadphase.activeState.y, uint4(total.x, total.w, status, 0u));
 }
 
@@ -728,7 +695,7 @@ void publish_active_summary(uint3 tid : SV_DispatchThreadID)
 void materialize_counts(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
     uint status = bp_load(broadphase.rankRows.y + rank).z;
     if (row.y != row.x) status |= BP_BAD_CURSOR;
@@ -740,7 +707,7 @@ void materialize_counts(uint3 tid : SV_DispatchThreadID)
 void store_rank_offsets(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 prefix = bp_load(broadphase.scan.y + rank);
     uint4 row = bp_load(broadphase.rankRows.y + rank);
     bp_store(broadphase.rankRows.y + rank, uint4(prefix.x, prefix.y, row.z | prefix.z, 0u));
@@ -752,11 +719,11 @@ void publish_count_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     uint4 total = bp_load(broadphase.summary.x);
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     // Keep the exact required C even when it cannot fit downstream indices.
     uint status = header.z | total.z;
     if (total.y != 0u || total.x > 0xffffffffu / MaxContactPointsPerPair) status |= BP_INDEX_OVERFLOW;
-    bp_store(bp_h1(), uint4(total.x, total.y, status, 0u));
+    bp_store(bp_header(), uint4(total.x, total.y, status, total.x));
 }
 
 [shader("compute")]
@@ -766,46 +733,8 @@ void build_world_ranges(uint3 tid : SV_DispatchThreadID)
     uint world;
     if (!bp_item(tid.x, broadphase.counts.z, world)) return;
     WorldRange runtime = author_worlds[world];
-    if (broadphase.round.w != 0u)
-    {
-        runtime.bodies.zw = uint2(0u, bp_world_selected(world) ? bp_load(bp_h1()).x : 0u);
-        runtime_worlds[world] = runtime;
-        return;
-    }
-    if (!bp_world_selected(world))
-    {
-        runtime.bodies.zw = uint2(0u);
-        runtime_worlds[world] = runtime;
-        bp_store(broadphase.summary.y + world, uint4(0u));
-        return;
-    }
-    uint first = bp_world_bound(world, false), end = bp_world_bound(world, true);
-    uint4 total = bp_load(bp_h1());
-    uint2 begin_offset = total.xy;
-    uint2 end_offset = total.xy;
-    if (first != broadphase.counts.x) begin_offset = bp_load(broadphase.rankRows.y + first).xy;
-    if (end != broadphase.counts.x) end_offset = bp_load(broadphase.rankRows.y + end).xy;
-    bool underflow;
-    uint2 count = bp_sub64(end_offset, begin_offset, underflow);
-    uint status = total.z;
-    if (underflow || begin_offset.y != 0u || count.y != 0u) status |= BP_INDEX_OVERFLOW;
-    runtime.bodies.z = begin_offset.x;
-    runtime.bodies.w = count.x;
+    runtime.bodies.zw = uint2(0u, bp_world_selected(world) ? bp_load(bp_header()).x : 0u);
     runtime_worlds[world] = runtime;
-    bp_store(broadphase.summary.y + world, uint4(count.x, count.y, status, count.x));
-}
-
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void publish_world_summary(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x != 0u) return;
-    uint4 total = bp_load(broadphase.summary.x);
-    uint4 header = bp_load(bp_h1());
-    header.z |= total.z;
-    if (total.x != header.x || total.y != header.y) header.z |= BP_BAD_MODEL;
-    header.w = total.w;
-    bp_store(bp_h1(), header);
 }
 
 // Preserve the count and offset for each rank and reset its cursor for fill.
@@ -815,7 +744,7 @@ void publish_world_summary(uint3 tid : SV_DispatchThreadID)
 void reset_fill_ranks(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_suffix_valid() || !bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_suffix_valid() || !bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
     row.y = rank + 1u;
     row.w = 0u;
@@ -828,12 +757,12 @@ void reset_fill_ranks(uint3 tid : SV_DispatchThreadID)
 void check_fill(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
-    if (!bp_item(tid.x, broadphase.counts.x, rank)) return;
+    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
     uint status = bp_load(broadphase.rankRows.y + rank).z;
-    if (!bp_suffix_valid()) { bp_store(broadphase.summary.z + rank, uint4(0u)); return; }
+    if (!bp_suffix_valid()) { bp_store(broadphase.scan.x + rank, uint4(0u)); return; }
     if (row.y != row.x || row.w != row.z) status |= BP_FILL_MISMATCH;
-    bp_store(broadphase.summary.z + rank, uint4(row.w, 0u, status, 0u));
+    bp_store(broadphase.scan.x + rank, uint4(row.w, 0u, status, 0u));
 }
 
 [shader("compute")]
@@ -843,10 +772,10 @@ void publish_fill_summary(uint3 tid : SV_DispatchThreadID)
     if (tid.x != 0u) return;
     if (!bp_suffix_valid()) return;
     uint4 emitted = bp_load(broadphase.summary.x);
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     header.z |= emitted.z;
     if (emitted.x != header.x || emitted.y != header.y) header.z |= BP_FILL_MISMATCH;
-    bp_store(bp_h1(), header);
+    bp_store(bp_header(), header);
 }
 
 [shader("compute")]
@@ -854,11 +783,11 @@ void publish_fill_summary(uint3 tid : SV_DispatchThreadID)
 void set_candidate_bank(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint4 header = bp_load(bp_h1());
+    uint4 header = bp_load(bp_header());
     uint status = header.z;
     if ((status & BP_CAPACITY_NEEDED) == 0u && (header.y != 0u || header.x > broadphase.candidates.z)) status |= BP_FILL_MISMATCH;
     header.z = status;
-    bp_store(bp_h1(), header);
+    bp_store(bp_header(), header);
     // Host calls only after every canonical-sort chunk has completed.
     resident_patches[0u].leaves = uint4(broadphase.merge.x, status == 0u ? header.x : 0u, 0u, 0u);
 }

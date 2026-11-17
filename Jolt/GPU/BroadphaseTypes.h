@@ -34,19 +34,19 @@ static const uint BroadphaseSmallSetLimit = 16u;
 struct BP_ALIGN BroadphaseParams
 {
     BP_U4 counts;       // accepted leaf N, joint J, world W, body B.
-    BP_U4 workspace;    // arena word capacity, 2-word header base, final SAP bank, final suppression bank.
-    BP_U4 rankRows;     // N row0 base, N row1 base, J joint-status base, zero.
-    BP_U4 activeQueues; // N source queue base, N target queue base, zw zero.
+    BP_U4 workspace;    // arena word capacity, header address, final SAP bank, final suppression bank.
+    BP_U4 rankRows;     // selected-world row0 and row1 bases, zw zero.
+    BP_U4 activeQueues; // selected-world source and target queue bases, zw zero.
     BP_U4 round;        // Neighbor quantum, zero, count/fill mode, single-group pairs.
     // candidates.xy address the separate resident_patches allocation;
     // all other arena addresses refer to the scratch contact_patches port.
-    BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header1.x.
+    BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header.x.
     BP_U4 merge;        // source base, target base, valid length, run width [1,2^31].
     BP_U4 mergeKey;     // 0=SAP(world,minX,leaf), 1=suppression(world,bodyA,bodyB,joint), 2=pair(world,leafA,leafB); y=candidate argument domain, zw zero.
     BP_U4 scan;         // input base, exclusive-prefix base, block-total base, valid input length.
     BP_U4 scanParent;   // globally scanned parent prefix base for add_scan_offsets; yzw zero.
     BP_U4 activeState;  // Input/output active-meta word bases, scan level [0,6], dynamic-scan flag [0,1].
-    BP_U4 summary;      // final 1-record reduction address, world-summary W-record base, fill-check N-record base, zero.
+    BP_U4 summary;      // final reduction record address, yzw zero.
     // One accepted layout address, never a stable RuntimeWorld identity.
     // selection=(world row, body base, leaf base, joint base).
     // selectedCounts=(body capacity, leaf count, joint count, Collider-pair ignore count).
@@ -56,19 +56,18 @@ struct BP_ALIGN BroadphaseParams
 };
 
 // resident_patches[0] = (candidateBankWordBase, actualC, 0, 0).
-// Scratch header1 = (totalLo, totalHi, statusBits, maxWorldC after world summary).
-// Scratch header0 is reserved; numerical status bits [0,6] retain their meanings.
+// Scratch header = (totalLo, totalHi, statusBits, selected-world pair count).
 // Bit 7 is a distinct capacity-needed result: no suffix work consumes C>K.
 // Active metadata is separate: (activeCount, maxRemainingNeighbors, statusBits, 0).
 // Input metadata stays immutable until this window completes and banks swap.
 // StageWork for prepare_indirect_arguments = (consumerFirst, recordCount, domain,
 // blockMode), recordCount <= 15, blockMode 0=item / 1=scan-block domain.
-// domain 0 reads active metadata; domain 1 reads validated actual C from header1.
+// domain 0 reads active metadata; domain 1 reads validated actual C from the header.
 // The host checks every generated consumerFirst in uint64 before admission.
 // Indirect records live in a separate allocation: (groupsX, 1, 1, 0), with
 // exactly the first 12 bytes consumed as indirect arguments.
-// N row0 = (exclusiveSapEnd, cursor, expectedCount, emittedCount).
-// N row1 = (exclusiveCandidateOffsetLo, exclusiveCandidateOffsetHi, status, 0).
+// Selected-world row0 = (exclusiveSapEnd, cursor, expectedCount, emittedCount).
+// Selected-world row1 = (exclusiveCandidateOffsetLo, exclusiveCandidateOffsetHi, status, 0).
 // All scan/reduce records = (sumLo,sumHi,statusBits,maxValue). The associative
 // operator performs checked uint2 sum, bitwise OR, max. Sum overflow sets bit 1.
 // Queue words = (rank,0,0,0); only accepted active prefix may be read.
