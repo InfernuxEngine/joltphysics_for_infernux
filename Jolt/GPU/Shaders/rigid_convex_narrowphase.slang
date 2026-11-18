@@ -327,6 +327,9 @@ void sweep_job_progress(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// A root may have received an external impulse before its first local row is linked.
+static const uint SweepImpactedRoot = 0xfffffffeu;
+
 // Every pass shortens a chain by at least a factor of 32. Host derives the
 // pass count from the body range, and emits complete passes in queue order.
 [shader("compute")]
@@ -336,14 +339,18 @@ void sweep_flatten_parents(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint local = stage_work.range.x + tid.x;
     uint root = sweep_choice[local].load();
-    if (root == local) return;
-    for (uint hop = 0u; hop < 32u; ++hop)
+    if (root != local)
     {
-        uint parent = sweep_choice[root].load();
-        if (parent == root) break;
-        root = parent;
+        for (uint hop = 0u; hop < 32u; ++hop)
+        {
+            uint parent = sweep_choice[root].load();
+            if (parent == root) break;
+            root = parent;
+        }
+        sweep_choice[local].store(root);
     }
-    sweep_choice[local].store(root);
+    if (stage_work.range.z != 0u && sweep_bodies[local].angularResponse.w != 0.0f)
+        sweep_choice[step_params.selectedCounts.x + root].store(SweepImpactedRoot);
 }
 
 [shader("compute")]
@@ -502,6 +509,7 @@ void sweep_link_event_islands(uint3 tid : SV_DispatchThreadID)
         uint body = jph_dynamic(body_models[meta.x]) ? meta.x : meta.y;
         uint root = sweep_choice[body - step_params.selection.y].load();
         uint next = sweep_choice[count + root].load();
+        if (next == SweepImpactedRoot) next = 0xffffffffu;
         sweep_choice[5u * count + 3u + row].store(next);
         sweep_choice[count + root].store(row);
         sweep_choice[2u * count + root].store(row);
@@ -551,8 +559,12 @@ void sweep_link_event_joints(uint3 tid : SV_DispatchThreadID)
         }
         uint root = sweep_choice[body - step_params.selection.y].load();
         uint head = sweep_choice[count + root].load();
-        // A joint-only component already had its regular substep solve.
         if (head == 0xffffffffu) continue;
+        if (head == SweepImpactedRoot)
+        {
+            head = 0xffffffffu;
+            sweep_choice[3u * count].add(1u);
+        }
         uint row = step_params.solve.w + index;
         sweep_choice[5u * count + 3u + row].store(head);
         sweep_choice[count + root].store(row);

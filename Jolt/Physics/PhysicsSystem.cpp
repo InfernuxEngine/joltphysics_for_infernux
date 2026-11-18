@@ -345,6 +345,17 @@ bool PhysicsSystem::HasCoupledImpact(const PhysicsUpdateContext &inContext, Body
 	return std::binary_search(impacts.begin(), impacts.end(), inBody);
 }
 
+bool PhysicsSystem::HasSweepVelocityRows(const PhysicsUpdateContext &inContext, BodyID inBody) const
+{
+	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
+	const Body &body = mBodyManager.GetBody(inBody);
+	if (!body.IsDynamic() || !body.IsActive() || body.GetMotionProperties()->GetIndexInActiveBodiesInternal() >= step.mActiveBodyReadIdx.load(memory_order_relaxed))
+		return false;
+	const uint32 island = body.GetMotionProperties()->GetIslandIndexInternal();
+	uint32 *begin, *end;
+	return mIslandBuilder.GetConstraintsInIsland(island, begin, end) || mIslandBuilder.GetContactsInIsland(island, begin, end);
+}
+
 void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
 {
 	using Stage = PhysicsUpdateContext::ECoupledStage;
@@ -352,8 +363,57 @@ void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float i
 	AdvanceSweep(ioContext, ioContext.mSteps[ioContext.mCoupledSubstep], inFraction, inRemainingTime, inImpulses, inImpulseCount);
 }
 
+// A hit changes the velocities used by the existing joints and supporting contacts.
+// Reuse their substep accumulators before advancing any body along the next interval.
+void PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, size_t inFirstImpact)
+{
+	auto &impacts = ioStep.mSweepImpacts;
+	if (inFirstImpact == impacts.size() || (ioStep.mNumActiveConstraints.load(memory_order_relaxed) == 0 && mContactManager.GetNumConstraints() == 0))
+		return;
+
+	Array<uint32> islands;
+	const uint32 resident = ioStep.mActiveBodyReadIdx.load(memory_order_relaxed);
+	for (size_t i = inFirstImpact; i < impacts.size(); ++i)
+	{
+		const auto *motion = mBodyManager.GetBody(impacts[i]).GetMotionProperties();
+		// Bodies woken by this hit enter the ordinary island builder on the next substep.
+		if (motion->GetIndexInActiveBodiesInternal() < resident)
+			islands.push_back(motion->GetIslandIndexInternal());
+	}
+	QuickSort(islands.begin(), islands.end());
+	islands.erase(std::unique(islands.begin(), islands.end()), islands.end());
+	for (uint32 island : islands)
+	{
+		uint32 *constraints_begin, *constraints_end, *contacts_begin, *contacts_end;
+		const bool joints = mIslandBuilder.GetConstraintsInIsland(island, constraints_begin, constraints_end);
+		const bool contacts = mIslandBuilder.GetContactsInIsland(island, contacts_begin, contacts_end);
+		if (!joints && !contacts)
+			continue;
+		bool changed = false;
+		for (uint iteration = 0; iteration < mPhysicsSettings.mNumVelocitySteps; ++iteration)
+		{
+			bool applied = ConstraintManager::sSolveVelocityConstraints(ioContext.mActiveConstraints, constraints_begin, constraints_end, ioContext.mStepDeltaTime);
+			applied |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+			if (!applied)
+				break;
+			changed = true;
+		}
+		if (changed)
+		{
+			if (contacts)
+				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+			BodyID *begin, *end;
+			mIslandBuilder.GetBodiesInIsland(island, begin, end);
+			for (auto body = begin; body != end; ++body)
+				if (mBodyManager.GetBody(*body).IsDynamic())
+					impacts.push_back(*body);
+		}
+	}
+}
+
 void PhysicsSystem::AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &step, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
 {
+	const size_t first_impact = step.mSweepImpacts.size();
 	ResolveCCDVelocities(&ioContext, &step, inFraction);
 	MoveCCDPositions(&step, inFraction);
 	ReleaseCCDWorkspace(&ioContext, &step);
@@ -367,14 +427,20 @@ void PhysicsSystem::AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateC
 		auto *motion = body.GetMotionProperties();
 		motion->AddLinearVelocityStep(motion->GetInverseMass() * impulse.mLinear);
 		motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), impulse.mAngular));
-		motion->ClampLinearVelocity();
-		motion->ClampAngularVelocity();
 		step.mSweepImpacts.push_back(body.GetID());
 		if (!body.IsActive())
 			mBodyManager.ActivateBodies(&impulse.mBody, 1);
 	}
 
+	SolveSweepIslandConstraints(ioContext, step, first_impact);
 	auto &impacts = step.mSweepImpacts;
+	// Limit physical velocities after the connected mass has taken its impulse.
+	for (size_t i = first_impact; i < impacts.size(); ++i)
+	{
+		auto *motion = mBodyManager.GetBody(impacts[i]).GetMotionProperties();
+		motion->ClampLinearVelocity();
+		motion->ClampAngularVelocity();
+	}
 	QuickSort(impacts.begin(), impacts.end());
 	impacts.erase(std::unique(impacts.begin(), impacts.end()), impacts.end());
 	step.mSweepRemaining = inRemainingTime;
@@ -807,13 +873,11 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 						step.mStartNextStep.RemoveDependency();
 				}, 1); // All continuous contacts are complete once the motion is committed.
 
-			// This job will set the island index on each body (only used for debug drawing purposes)
-			// It will also delete any bodies that have been destroyed in the last frame
+			// Publish body-to-island membership before continuous impulses use it.
 			step.mBodySetIslandIndex = inJobSystem->CreateJob("BodySetIslandIndex", cColorBodySetIslandIndex, [&context, &step]()
 				{
 					context.mPhysicsSystem->JobBodySetIslandIndex();
-
-					JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
+					step.mPreIntegrateVelocity.RemoveDependency();
 				}, 2); // depends on: finalize islands, finish building jobs
 
 			// Job to start the next collision step
@@ -894,7 +958,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 					context.mPhysicsSystem->JobPreIntegrateVelocity(&context, &step);
 
 					JobHandle::sRemoveDependencies(step.mIntegrateVelocity);
-				}, 2 + max_concurrency + (context.IsCoupledUpdate()? 1 : 0)); // plus the external result for a coupled update
+				}, 3 + max_concurrency + (context.IsCoupledUpdate()? 1 : 0)); // includes island membership and the coupled boundary
 
 			// Unblock previous jobs
 			step.mUpdateBroadphaseFinalize.RemoveDependency();
@@ -946,7 +1010,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 						// Kick the next step
 						if (step.mSoftBodyPrepare.IsValid())
 							step.mSoftBodyPrepare.RemoveDependency();
-					}, 3 + (context.IsCoupledUpdate() && mPhysicsSettings.mNumPositionSteps > 0? 1 : 0));
+					}, 2 + (context.IsCoupledUpdate() && mPhysicsSettings.mNumPositionSteps > 0? 1 : 0));
 
 			// Unblock previous jobs.
 			step.mResolveCCDContacts.RemoveDependency();
