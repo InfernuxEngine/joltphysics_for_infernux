@@ -383,7 +383,7 @@ struct JPH_GPU_ALIGN Aabb
 // Selected-world motion after velocity solving and before translation.
 struct JPH_GPU_ALIGN SweepBody
 {
-    JPH_GPU_FLOAT4 positionCOM;
+    JPH_GPU_FLOAT4 positionCOM;      // Segment origin xyz; w records an impact in an earlier segment.
     JPH_GPU_FLOAT4 rotation;
     JPH_GPU_FLOAT4 linearVelocity;
     JPH_GPU_FLOAT4 angularVelocity;
@@ -391,6 +391,11 @@ struct JPH_GPU_ALIGN SweepBody
     JPH_GPU_FLOAT4 linearResponse;  // velocity change xyz and travel fraction w.
     JPH_GPU_FLOAT4 angularResponse; // angular velocity change xyz, w marks a solved impact.
 };
+
+JPH_GPU_CONSTANT(SweepCoupled, 0);
+JPH_GPU_CONSTANT(SweepInitial, 1);
+JPH_GPU_CONSTANT(SweepContinuation, 2);
+JPH_GPU_CONSTANT(SweepEventContacts, 3);
 
 struct JPH_GPU_ALIGN ContactPatch
 {

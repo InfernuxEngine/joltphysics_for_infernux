@@ -199,11 +199,19 @@ void jph_prepare_drift(BodyModel model, inout BodyState state, float dt)
 BodyState jph_sweep_state(SweepBody sweep)
 {
     BodyState state;
-    state.positionCOM = sweep.positionCOM;
+    state.positionCOM = float4(sweep.positionCOM.xyz, 0.0f);
     state.rotation = sweep.rotation;
     state.linearVelocity = sweep.linearVelocity;
     state.angularVelocity = sweep.angularVelocity;
     return state;
+}
+
+float jph_sweep_role(BodyModel model, float3 displacement, float thresholdFactor)
+{
+    if (!jph_dynamic(model)) return 0.0f;
+    float radius = abs(model.invInertiaDiagonal.w);
+    float threshold = radius * thresholdFactor;
+    return radius > 0.0f && dot(displacement, displacement) > threshold * threshold ? radius : -1.0f;
 }
 
 float3 jph_inverse_linear_mass(BodyModel model, float3 value)

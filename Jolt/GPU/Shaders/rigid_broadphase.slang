@@ -441,11 +441,12 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
     {
         if (sensor) return false;
         bool twoDynamic = ba.minimum.w != 0.0f && bb.minimum.w != 0.0f;
+        bool continuedImpact = ba.maximum.w != 0.0f || bb.maximum.w != 0.0f;
         if (twoDynamic)
         {
-            if (ma.invInertiaDiagonal.w >= 0.0f && mb.invInertiaDiagonal.w >= 0.0f) return false;
+            if (ma.invInertiaDiagonal.w >= 0.0f && mb.invInertiaDiagonal.w >= 0.0f && !continuedImpact) return false;
         }
-        else if (ba.minimum.w <= 0.0f && bb.minimum.w <= 0.0f) return false;
+        else if (ba.minimum.w <= 0.0f && bb.minimum.w <= 0.0f && !continuedImpact) return false;
     }
     if (!sensor && (ma.meta.z & ~MotionNotResident) != MotionDynamic
         && (mb.meta.z & ~MotionNotResident) != MotionDynamic) return false;

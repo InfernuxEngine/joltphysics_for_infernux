@@ -1248,19 +1248,12 @@ void capture_sweep_motion(uint3 tid : SV_DispatchThreadID)
     else
         state.linearVelocity = state.angularVelocity = float4(0.0f);
     float3 displacement = state.linearVelocity.xyz * step_params.gravityDt.w;
-    float role = 0.0f;
-    if (jph_dynamic(model))
-    {
-        float radius = abs(model.invInertiaDiagonal.w);
-        float threshold = radius * step_params.restitution.y;
-        role = radius > 0.0f && dot(displacement, displacement) > threshold * threshold ? radius : -1.0f;
-    }
     SweepBody sweep;
-    sweep.positionCOM = state.positionCOM;
+    sweep.positionCOM = float4(state.positionCOM.xyz, 0.0f);
     sweep.rotation = state.rotation;
     sweep.linearVelocity = state.linearVelocity;
     sweep.angularVelocity = state.angularVelocity;
-    sweep.displacement = float4(displacement, role);
+    sweep.displacement = float4(displacement, jph_sweep_role(model, displacement, step_params.restitution.y));
     sweep.linearResponse = float4(0.0f, 0.0f, 0.0f, 1.0f);
     sweep.angularResponse = float4(0.0f);
     sweep_bodies[index - step_params.selection.y] = sweep;
@@ -1279,6 +1272,7 @@ void build_swept_bounds(uint3 tid : SV_DispatchThreadID)
     swept.minimum.xyz += min(float3(0.0f), motion.displacement.xyz);
     swept.maximum.xyz += max(float3(0.0f), motion.displacement.xyz);
     swept.minimum.w = motion.displacement.w;
+    swept.maximum.w = motion.positionCOM.w;
     bounds[index] = swept;
 }
 
@@ -1291,7 +1285,7 @@ void integrate_swept(uint3 tid : SV_DispatchThreadID)
     if (jph_articulation_admitted(index, false)) return;
     BodyModel model = jph_effective_model(body_models[index], kinematic_targets[index]);
     SweepBody sweep = sweep_bodies[index - step_params.selection.y];
-    bool impact = sweep.angularResponse.w != 0.0f;
+    bool impact = sweep.angularResponse.w != 0.0f || sweep.positionCOM.w != 0.0f;
     if (!impact && !jph_can_drift(index, model)) return;
     BodyState state = jph_sweep_state(sweep);
     state.positionCOM.xyz += sweep.linearResponse.w * sweep.displacement.xyz;
