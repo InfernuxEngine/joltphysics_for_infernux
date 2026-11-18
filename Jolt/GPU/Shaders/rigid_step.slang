@@ -1431,35 +1431,31 @@ void jph_finish_contact_level()
     }
 }
 
+// A lane owns one complete island range. Small work windows need no shared
+// memory, row planning, or barriers; overlapping writers stay in solver order.
+void jph_solve_contact_range<Solver : ContactSolver>(Solver solver, uint island)
+{
+    uint begin, first, end;
+    if (jph_island_patch_range(island, begin, first, end))
+        for (uint row = first; row < end; ++row)
+            solver.solve(jph_island_patch_record(begin + row).x);
+}
+
 void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, uint lane)
 {
-    uint first_row = 0u;
-    uint row_count = 0u;
-    uint levels = 0u;
-    if (stage_work.range.y < ContactParallelMinimum)
+    if (lane == 0u)
     {
         uint begin, first, end;
-        if (jph_island_patch_range(group * ContactSolverLanes + lane, begin, first, end))
-        {
-            first_row = begin + first;
-            row_count = end - first;
-        }
+        const bool valid = jph_island_patch_range(group, begin, first, end);
+        contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
     }
-    else
-    {
-        if (lane == 0u)
-        {
-            uint begin, first, end;
-            const bool valid = jph_island_patch_range(group, begin, first, end);
-            contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        const uint2 tile = workgroupUniformLoad(contact_tile);
-        if (tile.y >= ContactParallelMinimum)
-            levels = jph_plan_contact_tile(tile, lane);
-        first_row = tile.x;
-        row_count = lane == 0u ? tile.y : 0u;
-    }
+    GroupMemoryBarrierWithGroupSync();
+    const uint2 tile = workgroupUniformLoad(contact_tile);
+    uint levels = 0u;
+    if (tile.y >= ContactParallelMinimum)
+        levels = jph_plan_contact_tile(tile, lane);
+    const uint first_row = tile.x;
+    const uint row_count = lane == 0u ? tile.y : 0u;
 
     // One solver body serves both contiguous rows and dependency-ordered rows.
     // A level only contains disjoint writers and completes before their successors.
@@ -1512,6 +1508,30 @@ void solve_position(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     PositionContactSolver solver;
     jph_solve_contact_tile(solver, group.x, lane);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void warm_contacts_direct(uint3 tid : SV_DispatchThreadID)
+{
+    WarmContactSolver solver = {contact_history[0].value};
+    jph_solve_contact_range(solver, tid.x);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void solve_velocity_direct(uint3 tid : SV_DispatchThreadID)
+{
+    VelocityContactSolver solver;
+    jph_solve_contact_range(solver, tid.x);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void solve_position_direct(uint3 tid : SV_DispatchThreadID)
+{
+    PositionContactSolver solver;
+    jph_solve_contact_range(solver, tid.x);
 }
 
 #include "rigid_sleep.slang"

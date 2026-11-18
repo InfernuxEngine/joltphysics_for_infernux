@@ -82,6 +82,7 @@ struct StageDefinition
     Domain domain;
     std::uint32_t groupSizeX, groupSizeY, groupSizeZ;
     std::uint32_t reads, writes;
+    const char *directEntry = nullptr; // Same island stage and resources, one independent range per lane.
 };
 
 inline constexpr const char *StepModuleName = "jph_gpu_rigid_step";
@@ -110,14 +111,14 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets)
             | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates),
-        Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
+        Mask(Resource::BodyStates) | Mask(Resource::Contacts), "solve_velocity_direct"},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
     {Stage::SolvePosition, "solve_position", Domain::IslandPatches, ContactSolverLanes, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
-        Mask(Resource::BodyStates)},
+        Mask(Resource::BodyStates), "solve_position_direct"},
     {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
             | Mask(Resource::KinematicTargets), Mask(Resource::KinematicTargets)},
@@ -147,7 +148,7 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates) | Mask(Resource::Contacts)
             | Mask(Resource::KinematicTargets) | Mask(Resource::ContactPatches)
             | Mask(Resource::SleepStates) | Mask(Resource::ContactHistory),
-        Mask(Resource::BodyStates) | Mask(Resource::Contacts)},
+        Mask(Resource::BodyStates) | Mask(Resource::Contacts), "warm_contacts_direct"},
     {Stage::StoreContactHistory, "store_contact_history", Domain::Patches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Contacts) | Mask(Resource::ContactPatches)
             | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::ContactHistory)},
