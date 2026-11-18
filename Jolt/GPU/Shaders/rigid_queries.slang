@@ -139,18 +139,18 @@ void query_store_shape(uint record, QueryShapeState shape)
 void query_store_motion(uint record, QueryMotionState motion)
 {
     uint base = record * 12u;
-    query_candidates[base].value = motion.meta;
-    query_candidates[base + 1u].value = asuint(motion.positionInverseMass);
-    query_candidates[base + 2u].value = asuint(motion.rotation);
-    query_candidates[base + 3u].value = asuint(motion.centerOfMass);
-    query_candidates[base + 4u].value = asuint(motion.linearVelocity);
-    query_candidates[base + 5u].value = asuint(motion.angularVelocity);
-    query_candidates[base + 6u].value = asuint(motion.inverseInertia0);
-    query_candidates[base + 7u].value = asuint(motion.inverseInertia1);
-    query_candidates[base + 8u].value = asuint(motion.inverseInertia2);
-    query_candidates[base + 9u].value = asuint(motion.inertia0);
-    query_candidates[base + 10u].value = asuint(motion.inertia1);
-    query_candidates[base + 11u].value = asuint(motion.inertia2);
+    query_hits[base].value = motion.meta;
+    query_hits[base + 1u].value = asuint(motion.positionInverseMass);
+    query_hits[base + 2u].value = asuint(motion.rotation);
+    query_hits[base + 3u].value = asuint(motion.centerOfMass);
+    query_hits[base + 4u].value = asuint(motion.linearVelocity);
+    query_hits[base + 5u].value = asuint(motion.angularVelocity);
+    query_hits[base + 6u].value = asuint(motion.inverseInertia0);
+    query_hits[base + 7u].value = asuint(motion.inverseInertia1);
+    query_hits[base + 8u].value = asuint(motion.inverseInertia2);
+    query_hits[base + 9u].value = asuint(motion.inertia0);
+    query_hits[base + 10u].value = asuint(motion.inertia1);
+    query_hits[base + 11u].value = asuint(motion.inertia2);
 }
 float3 query_box_face_normal(float3 point, float3 half_extent)
 {
@@ -663,7 +663,7 @@ void query_gather_shapes(QueryInput request, uint begin, inout uint count, inout
     }
 }
 
-void query_gather_motion(QueryInput request, uint begin, inout uint status)
+uint query_write_motion(QueryInput request, uint index)
 {
     uint slot = request.source.y;
     BodyModel model = body_models[slot];
@@ -671,8 +671,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
     if (!query_valid_quaternion(state.rotation) || !all(isfinite(state.positionCOM)) ||
         !all(isfinite(state.linearVelocity)) || !all(isfinite(state.angularVelocity)))
     {
-        status = QueryNumericalFailure;
-        return;
+        return QueryNumericalFailure;
     }
     state.rotation = normalize(state.rotation);
     QueryMotionState output;
@@ -690,8 +689,7 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
         if (!all(isfinite(diagonal)) || any(diagonal <= 0.0f) || !isfinite(model.mass.x) || model.mass.x <= 0.0f ||
             !query_valid_quaternion(model.inertiaRotation))
         {
-            status = QueryNumericalFailure;
-            return;
+            return QueryNumericalFailure;
         }
         float3 inertia = 1.0f / diagonal;
         float4 principal = normalize(jph_quat_mul(state.rotation, model.inertiaRotation));
@@ -708,10 +706,10 @@ void query_gather_motion(QueryInput request, uint begin, inout uint status)
         !all(isfinite(output.inverseInertia1)) || !all(isfinite(output.inverseInertia2)) ||
         !all(isfinite(output.inertia0)) || !all(isfinite(output.inertia1)) || !all(isfinite(output.inertia2)))
     {
-        status = QueryNumericalFailure;
-        return;
+        return QueryNumericalFailure;
     }
-    query_store_motion(begin, output);
+    query_store_motion(index, output);
+    return QuerySuccess;
 }
 
 
@@ -1030,6 +1028,27 @@ void query_cast_advance(QueryInput request, uint begin, inout QueryCastState sta
 
 #include "rigid_convex_queries.slang"
 
+// A typed motion batch has exactly one output per request, in request order.
+// Read the retained state directly; geometric searches and hit compaction are independent.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void query_read_motion(uint3 tid : SV_DispatchThreadID)
+{
+    uint index = tid.x;
+    if (index >= query_params.counts.x)
+        return;
+    uint status = query_write_motion(query_load_input(index), index);
+    if (status != QuerySuccess)
+    {
+        QueryMotionState invalid = (QueryMotionState)0;
+        invalid.meta = uint4(InvalidQueryBodySlot, 0u, InvalidQueryBodySlot, 0u);
+        query_store_motion(index, invalid);
+    }
+    QuerySpan span;
+    span.range = uint4(index, 1u, status, 0u);
+    query_store_span(index, span);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void query_evaluate(uint3 tid : SV_DispatchThreadID)
@@ -1062,8 +1081,6 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
     }
     else if (request.meta.x == QueryGatherShapes)
         query_gather_shapes(request, begin, count, status);
-    else if (request.meta.x == QueryGatherMotion)
-        query_gather_motion(request, begin, status);
     else if (request.meta.x == QueryPenetration)
     {
         QueryPrimitive other = query_load_primitive(request.source.y);
