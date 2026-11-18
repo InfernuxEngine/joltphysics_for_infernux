@@ -5,12 +5,14 @@
 #pragma once
 
 #include <Jolt/Physics/Constraints/Constraint.h>
+#include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsLock.h>
 #include <Jolt/Core/Mutex.h>
 
 JPH_NAMESPACE_BEGIN
 
 class IslandBuilder;
+class TwoBodyConstraint;
 class BodyManager;
 class StateRecorderFilter;
 #ifdef JPH_DEBUG_RENDERER
@@ -45,6 +47,11 @@ public:
 
 	/// Get total number of constraints
 	inline uint32			GetNumConstraints() const					{ return uint32(mConstraints.size()); }
+
+	/// During the serial continuous-impact stage the world already holds the constraint lock.
+	/// Append enabled joints incident on the specified body, in native constraint order.
+	void					GetBodyConstraintsDuringUpdate(BodyID inBody, Array<TwoBodyConstraint *> &outJoints) const;
+	static bool				sConstraintLess(const Constraint *inLHS, const Constraint *inRHS);
 
 	/// Determine the active constraints of a subset of the constraints
 	void					GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const;
@@ -94,6 +101,8 @@ private:
 	PhysicsLockContext		mLockContext;
 #endif // JPH_ENABLE_ASSERTS
 	Constraints				mConstraints;
+	mutable Array<std::pair<BodyID, uint32>> mBodyConstraints;
+	mutable bool			mBodyConstraintsDirty = false;
 	mutable Mutex			mConstraintsMutex;
 };
 

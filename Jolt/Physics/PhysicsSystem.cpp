@@ -345,12 +345,12 @@ bool PhysicsSystem::HasCoupledImpact(const PhysicsUpdateContext &inContext, Body
 	return std::binary_search(impacts.begin(), impacts.end(), inBody);
 }
 
-std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateContext &inContext, BodyID inBody) const
+std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(PhysicsUpdateContext &ioContext, BodyID inBody) const
 {
-	return GetSweepVelocityIsland(inContext.mSteps[inContext.mCoupledSubstep], mBodyManager.GetBody(inBody));
+	return GetSweepVelocityIsland(ioContext.mSteps[ioContext.mCoupledSubstep], mBodyManager.GetBody(inBody));
 }
 
-std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateContext::Step &step, const Body &body) const
+std::optional<uint32> PhysicsSystem::GetResidentSweepIsland(const PhysicsUpdateContext::Step &step, const Body &body) const
 {
 	if (!body.IsDynamic() || !body.IsActive() || body.GetMotionProperties()->GetIndexInActiveBodiesInternal() >= step.mActiveBodyReadIdx.load(memory_order_relaxed))
 		return {};
@@ -359,6 +359,91 @@ std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateC
 	if (mIslandBuilder.GetConstraintsInIsland(island, begin, end) || mIslandBuilder.GetContactsInIsland(island, begin, end))
 		return island;
 	return {};
+}
+
+std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(PhysicsUpdateContext::Step &step, const Body &body) const
+{
+	const auto resident = GetResidentSweepIsland(step, body);
+	if (!body.IsDynamic() || mConstraintManager.GetNumConstraints() == step.mNumActiveConstraints.load(memory_order_relaxed))
+		return resident;
+	if (const auto it = step.mSweepIslandByBody.find(body.GetID()); it != step.mSweepIslandByBody.end())
+		return it->second;
+
+	const auto active_at_start = [&](const Body &end) {
+		return end.IsActive() && end.GetMotionProperties()->GetIndexInActiveBodiesInternal() < step.mNumActiveBodiesAtStepStart;
+	};
+	if (resident && step.mCheckedResidentSweepIslands.find(*resident) != step.mCheckedResidentSweepIslands.end())
+		return resident;
+	if (active_at_start(body) && (!resident || step.mActiveBodyReadIdx.load(memory_order_relaxed) == step.mNumActiveBodiesAtStepStart))
+		return resident;
+
+	// A newly woken end may connect into an existing joint/contact island.
+	// Discover that union from the struck body, without waking its neighbors
+	// or admitting any new row before the motion actually reaches the hit.
+	Array<TwoBodyConstraint *> incident;
+	if (!resident)
+	{
+		mConstraintManager.GetBodyConstraintsDuringUpdate(body.GetID(), incident);
+		if (incident.empty())
+			return {};
+	}
+	PhysicsUpdateContext::Step::SweepIsland group;
+	UnorderedSet<BodyID> visited;
+	UnorderedSet<Constraint *> seen;
+	const auto visit = [&](const Body &end) {
+		if (!end.IsDynamic() || visited.find(end.GetID()) != visited.end())
+			return;
+		if (const auto island = GetResidentSweepIsland(step, end))
+		{
+			group.mResidentIslands.push_back(*island);
+			uint32 *jb, *je;
+			mIslandBuilder.GetConstraintsInIsland(*island, jb, je);
+			for (; jb != je; ++jb)
+				seen.insert(step.mContext->mActiveConstraints[*jb]);
+			BodyID *bb, *be;
+			mIslandBuilder.GetBodiesInIsland(*island, bb, be);
+			for (; bb != be; ++bb)
+				if (mBodyManager.GetBody(*bb).IsDynamic() && visited.insert(*bb).second)
+					group.mBodies.push_back(*bb);
+		}
+		else
+		{
+			visited.insert(end.GetID());
+			group.mBodies.push_back(end.GetID());
+		}
+	};
+	visit(body);
+	for (size_t i = 0; i < group.mBodies.size(); ++i)
+	{
+		const Body &end = mBodyManager.GetBody(group.mBodies[i]);
+		if (active_at_start(end))
+			continue;
+		if (resident || i != 0)
+		{
+			incident.clear();
+			mConstraintManager.GetBodyConstraintsDuringUpdate(end.GetID(), incident);
+		}
+		for (auto *joint : incident)
+			if (seen.insert(joint).second)
+			{
+				group.mNewJoints.push_back(joint);
+				visit(*joint->GetBody1());
+				visit(*joint->GetBody2());
+			}
+	}
+	if (group.mNewJoints.empty())
+	{
+		if (resident)
+			step.mCheckedResidentSweepIslands.insert(*resident);
+		return resident;
+	}
+	QuickSort(group.mNewJoints.begin(), group.mNewJoints.end(), ConstraintManager::sConstraintLess);
+	QuickSort(group.mResidentIslands.begin(), group.mResidentIslands.end());
+	const uint32 key = mIslandBuilder.GetNumIslands() + uint32(step.mSweepIslands.size());
+	for (BodyID id : group.mBodies)
+		step.mSweepIslandByBody.try_emplace(id, key);
+	step.mSweepIslands.push_back(std::move(group));
+	return key;
 }
 
 void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
@@ -382,7 +467,7 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 {
 	auto &impacts = step.mSweepImpacts;
 	auto &rows = step.mSweepContacts;
-	if (inFirstImpact == impacts.size() || (step.mNumActiveConstraints.load(memory_order_relaxed) == 0 && mContactManager.GetNumConstraints() == 0))
+	if (inFirstImpact == impacts.size() || (mConstraintManager.GetNumConstraints() == 0 && mContactManager.GetNumConstraints() == 0))
 		return true;
 
 	Array<uint32> islands;
@@ -399,22 +484,61 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 	struct LocalIsland
 	{
 		uint32 mIndex, mSteps;
-		uint32 *mJointsBegin, *mJointsEnd, *mContactsBegin, *mContactsEnd;
+		size_t mFirstJoint, mLastJoint, mFirstContact, mLastContact;
 		bool mChanged;
 	};
+	const uint32 resident_count = mIslandBuilder.GetNumIslands();
 	Array<LocalIsland> local;
+	Array<Constraint *> joints;
+	Array<std::pair<uint32 *, uint32 *>> contacts;
 	for (uint32 island : islands)
 	{
 		LocalIsland group{island};
-		mIslandBuilder.GetConstraintsInIsland(island, group.mJointsBegin, group.mJointsEnd);
-		mIslandBuilder.GetContactsInIsland(island, group.mContactsBegin, group.mContactsEnd);
+		group.mFirstJoint = joints.size();
+		group.mFirstContact = contacts.size();
 		CalculateSolverSteps steps(mPhysicsSettings);
-		for (auto j = group.mJointsBegin; j != group.mJointsEnd; ++j)
-			steps(ioContext.mActiveConstraints[*j]);
-		BodyID *begin, *end;
-		mIslandBuilder.GetBodiesInIsland(island, begin, end);
-		for (auto body = begin; body != end; ++body)
-			steps(mBodyManager.GetBody(*body).GetMotionProperties());
+		const auto add_resident = [&](uint32 idx) {
+			uint32 *begin, *end;
+			mIslandBuilder.GetConstraintsInIsland(idx, begin, end);
+			for (; begin != end; ++begin)
+				joints.push_back(ioContext.mActiveConstraints[*begin]);
+			if (mIslandBuilder.GetContactsInIsland(idx, begin, end))
+				contacts.emplace_back(begin, end);
+		};
+		const auto count_bodies = [&](const BodyID *begin, const BodyID *end) {
+			for (; begin != end; ++begin)
+				steps(mBodyManager.GetBody(*begin).GetMotionProperties());
+		};
+		if (island < resident_count)
+		{
+			add_resident(island);
+			BodyID *begin, *end;
+			mIslandBuilder.GetBodiesInIsland(island, begin, end);
+			count_bodies(begin, end);
+		}
+		else
+		{
+			auto &late = step.mSweepIslands[island - resident_count];
+			if (!late.mPrepared)
+			{
+				mBodyManager.ActivateBodies(late.mBodies.data(), int(late.mBodies.size()));
+				for (auto *joint : late.mNewJoints)
+				{
+					joint->ResetWarmStart();
+					joint->SetupVelocityConstraint(ioContext.mStepDeltaTime);
+				}
+				late.mPrepared = true;
+			}
+			for (uint32 idx : late.mResidentIslands)
+				add_resident(idx);
+			joints.insert(joints.end(), late.mNewJoints.begin(), late.mNewJoints.end());
+			QuickSort(joints.begin() + group.mFirstJoint, joints.end(), ConstraintManager::sConstraintLess);
+			count_bodies(late.mBodies.data(), late.mBodies.data() + late.mBodies.size());
+		}
+		group.mLastJoint = joints.size();
+		group.mLastContact = contacts.size();
+		for (size_t j = group.mFirstJoint; j < group.mLastJoint; ++j)
+			steps(joints[j]);
 		steps.Finalize();
 		group.mSteps = steps.GetNumVelocitySteps();
 		local.push_back(group);
@@ -450,8 +574,11 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 		for (auto &group : local)
 			for (uint iteration = 0; iteration < group.mSteps; ++iteration)
 			{
-				bool applied = ConstraintManager::sSolveVelocityConstraints(ioContext.mActiveConstraints, group.mJointsBegin, group.mJointsEnd, ioContext.mStepDeltaTime);
-				applied |= mContactManager.SolveVelocityConstraints(group.mContactsBegin, group.mContactsEnd);
+				bool applied = false;
+				for (size_t j = group.mFirstJoint; j < group.mLastJoint; ++j)
+					applied |= joints[j]->SolveVelocityConstraint(ioContext.mStepDeltaTime);
+				for (size_t c = group.mFirstContact; c < group.mLastContact; ++c)
+					applied |= mContactManager.SolveVelocityConstraints(contacts[c].first, contacts[c].second);
 				if (!applied) break;
 				group.mChanged = true;
 			}
@@ -488,13 +615,21 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 	for (const auto &group : local)
 		if (group.mChanged)
 		{
-			if (group.mContactsBegin != group.mContactsEnd)
-				mContactManager.StoreAppliedImpulses(group.mContactsBegin, group.mContactsEnd);
-			BodyID *begin, *end;
-			mIslandBuilder.GetBodiesInIsland(group.mIndex, begin, end);
-			for (auto body = begin; body != end; ++body)
-				if (mBodyManager.GetBody(*body).IsDynamic())
-					impacts.push_back(*body);
+			for (size_t c = group.mFirstContact; c < group.mLastContact; ++c)
+				mContactManager.StoreAppliedImpulses(contacts[c].first, contacts[c].second);
+			if (group.mIndex >= resident_count)
+			{
+				const auto &bodies = step.mSweepIslands[group.mIndex - resident_count].mBodies;
+				impacts.insert(impacts.end(), bodies.begin(), bodies.end());
+			}
+			else
+			{
+				BodyID *begin, *end;
+				mIslandBuilder.GetBodiesInIsland(group.mIndex, begin, end);
+				for (; begin != end; ++begin)
+					if (mBodyManager.GetBody(*begin).IsDynamic())
+						impacts.push_back(*begin);
+			}
 		}
 	return true;
 }

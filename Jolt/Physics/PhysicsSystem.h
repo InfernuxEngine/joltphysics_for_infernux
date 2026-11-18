@@ -191,7 +191,7 @@ public:
 	Vec3						GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const;
 	std::optional<float>		GetCoupledImpactTime(const PhysicsUpdateContext &inContext) const;
 	bool						HasCoupledImpact(const PhysicsUpdateContext &inContext, BodyID inBody) const;
-	std::optional<uint32>						GetSweepVelocityIsland(const PhysicsUpdateContext &inContext, BodyID inBody) const;
+	std::optional<uint32>		GetSweepVelocityIsland(PhysicsUpdateContext &ioContext, BodyID inBody) const;
 	/// Advance to the chosen event and prepare motion for the remaining interval.
 	void						AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
 	/// Consume the shared continuous decision once, then yield at position projection or the next substep.
@@ -344,7 +344,8 @@ private:
 	void						CaptureCCDSource(PhysicsUpdateContext::Step *ioStep, const Body &inBody, uint32 inActiveIndex, Vec3Arg inDisplacement, float inMinTravel);
 	void						BuildCCDMotionBounds(PhysicsUpdateContext::Step *ioStep) const;
 	void						AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
-	std::optional<uint32>		GetSweepVelocityIsland(const PhysicsUpdateContext::Step &inStep, const Body &inBody) const;
+	std::optional<uint32>		GetSweepVelocityIsland(PhysicsUpdateContext::Step &ioStep, const Body &inBody) const;
+	std::optional<uint32>		GetResidentSweepIsland(const PhysicsUpdateContext::Step &inStep, const Body &inBody) const;
 	void						PublishSweepContacts(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep);
 	bool						SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, size_t inFirstImpact);
 	void						ResolveCCDVelocities(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, float inEventFraction);

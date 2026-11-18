@@ -8,6 +8,8 @@
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhase.h>
 #include <Jolt/Core/StaticArray.h>
+#include <Jolt/Core/UnorderedMap.h>
+#include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/Core/JobSystem.h>
 #include <Jolt/Core/STLTempAllocator.h>
 
@@ -134,6 +136,18 @@ public:
 				return mBody1 < mBody2? SubShapeIDPair(mBody1, mShape1, mBody2, mShape2) : SubShapeIDPair(mBody2, mShape2, mBody1, mShape1);
 			}
 		};
+		// Joints on sleeping bodies enter at their first actual hit. The ordinary
+		// island table remains the snapshot used by the rest of this substep.
+		struct SweepIsland
+		{
+			Array<BodyID> mBodies;
+			Array<uint32> mResidentIslands;
+			Array<Constraint *> mNewJoints;
+			bool mPrepared = false;
+		};
+		Array<SweepIsland>	mSweepIslands;
+		UnorderedMap<BodyID, uint32> mSweepIslandByBody;
+		UnorderedSet<uint32>	mCheckedResidentSweepIslands;
 		Array<SweepContact>	mSweepContacts;
 		Array<BodyID>		mSweepImpacts;											///< Dynamic endpoints hit earlier in this substep
 		float				mSweepRemaining = 0.0f;									///< Duration of the recast trajectories
@@ -196,7 +210,7 @@ public:
 	float					mWarmStartImpulseRatio;									///< Ratio of this step delta time vs last step
 	atomic<uint32>			mErrors { 0 };											///< Errors that occurred during the update, actual type is EPhysicsUpdateError
 
-	Constraint **			mActiveConstraints = nullptr;							///< Constraints that were active at the start of the physics update step (activating bodies can activate constraints and we need a consistent snapshot). Only these constraints will be resolved.
+	Constraint **			mActiveConstraints = nullptr;							///< Ordinary substep constraint snapshot. Continuous impacts can admit sleeping joints separately at their event time.
 
 	BodyPair *				mBodyPairs = nullptr;									///< A list of body pairs found by the broadphase
 

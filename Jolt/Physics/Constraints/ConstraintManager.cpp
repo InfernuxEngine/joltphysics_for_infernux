@@ -5,6 +5,7 @@
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Physics/Constraints/ConstraintManager.h>
+#include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/StateRecorder.h>
@@ -18,6 +19,7 @@ void ConstraintManager::Add(Constraint **inConstraints, int inNumber)
 {
 	UniqueLock lock(mConstraintsMutex JPH_IF_ENABLE_ASSERTS(, mLockContext, EPhysicsLockTypes::ConstraintsList));
 
+	mBodyConstraintsDirty = true;
 	mConstraints.reserve(mConstraints.size() + inNumber);
 
 	for (Constraint **c = inConstraints, **c_end = inConstraints + inNumber; c < c_end; ++c)
@@ -58,6 +60,9 @@ void ConstraintManager::Remove(Constraint **inConstraints, int inNumber)
 		// Pop last constraint
 		mConstraints.pop_back();
 	}
+	mBodyConstraintsDirty = true;
+	if (mConstraints.empty())
+		mBodyConstraints = decltype(mBodyConstraints)();
 }
 
 Constraints ConstraintManager::GetConstraints() const
@@ -66,6 +71,29 @@ Constraints ConstraintManager::GetConstraints() const
 
 	Constraints copy = mConstraints;
 	return copy;
+}
+
+void ConstraintManager::GetBodyConstraintsDuringUpdate(BodyID inBody, Array<TwoBodyConstraint *> &outJoints) const
+{
+	if (mBodyConstraintsDirty)
+	{
+		mBodyConstraints.clear();
+		for (uint32 i = 0; i < mConstraints.size(); ++i)
+			if (auto *joint = mConstraints[i].GetPtr(); joint->GetType() == EConstraintType::TwoBodyConstraint)
+			{
+				auto *pair = static_cast<TwoBodyConstraint *>(joint);
+				for (const Body *end : {pair->GetBody1(), pair->GetBody2()})
+					if (!end->GetID().IsInvalid())
+						mBodyConstraints.emplace_back(end->GetID(), i);
+			}
+		QuickSort(mBodyConstraints.begin(), mBodyConstraints.end());
+		mBodyConstraintsDirty = false;
+	}
+	auto it = std::lower_bound(mBodyConstraints.begin(), mBodyConstraints.end(), inBody,
+		[](const auto &entry, BodyID id) { return entry.first < id; });
+	for (; it != mBodyConstraints.end() && it->first == inBody; ++it)
+		if (auto *joint = mConstraints[it->second].GetPtr(); joint->GetEnabled())
+			outJoints.push_back(static_cast<TwoBodyConstraint *>(joint));
 }
 
 void ConstraintManager::GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const
@@ -100,18 +128,18 @@ void ConstraintManager::sBuildIslands(Constraint **inActiveConstraints, uint32 i
 	}
 }
 
+bool ConstraintManager::sConstraintLess(const Constraint *inLHS, const Constraint *inRHS)
+{
+	if (inLHS->GetConstraintPriority() != inRHS->GetConstraintPriority())
+		return inLHS->GetConstraintPriority() < inRHS->GetConstraintPriority();
+	return inLHS->mConstraintIndex < inRHS->mConstraintIndex;
+}
+
 void ConstraintManager::sSortConstraints(Constraint **inActiveConstraints, uint32 *inConstraintIdxBegin, uint32 *inConstraintIdxEnd)
 {
 	JPH_PROFILE_FUNCTION();
-
-	QuickSort(inConstraintIdxBegin, inConstraintIdxEnd, [inActiveConstraints](uint32 inLHS, uint32 inRHS) {
-		const Constraint *lhs = inActiveConstraints[inLHS];
-		const Constraint *rhs = inActiveConstraints[inRHS];
-
-		if (lhs->GetConstraintPriority() != rhs->GetConstraintPriority())
-			return lhs->GetConstraintPriority() < rhs->GetConstraintPriority();
-
-		return lhs->mConstraintIndex < rhs->mConstraintIndex;
+	QuickSort(inConstraintIdxBegin, inConstraintIdxEnd, [inActiveConstraints](uint32 lhs, uint32 rhs) {
+		return sConstraintLess(inActiveConstraints[lhs], inActiveConstraints[rhs]);
 	});
 }
 
