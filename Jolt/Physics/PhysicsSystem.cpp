@@ -303,14 +303,16 @@ void PhysicsSystem::PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioCont
 	ioContext.mCoupledStage = Stage::Continuous;
 }
 
+static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBody, PhysicsUpdateContext::Step *inStep);
+
 Array<PhysicsSystem::CoupledContinuousContact> PhysicsSystem::GetCoupledContinuousContacts(const PhysicsUpdateContext &inContext) const
 {
 	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
 	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
 	Array<CoupledContinuousContact> contacts;
-	for (uint32 i = 0; i < step.mNumCCDBodies; ++i)
+	for (uint32 i = 0; i < step.GetCCDCount(); ++i)
 	{
-		const auto &body = step.mCCDBodies[i];
+		const auto &body = step.GetCCD(i);
 		if (!body.mBodyID2.IsInvalid())
 			contacts.push_back({body.mBodyID1, body.mBodyID2, body.mFraction, body.mFractionPlusSlop});
 	}
@@ -348,15 +350,13 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdat
 			auto *motion = body.GetMotionProperties();
 			uint32 index = motion->GetIndexInActiveBodiesInternal();
 			if (index < step.mNumActiveBodyToCCDBody)
-			{
 				step.mBodyMotions[index].mFraction = min(step.mBodyMotions[index].mFraction, update.mTravelFraction);
-				int ccd = step.mActiveBodyToCCDBody[index];
-				if (ccd >= 0 && update.mDiscardContact)
+			if (update.mDiscardContact)
+				if (auto *ccd = sGetCCDBody(body, &step))
 				{
-					step.mCCDBodies[ccd].mBodyID2 = BodyID();
-					step.mCCDBodies[ccd].mFractionPlusSlop = min(step.mCCDBodies[ccd].mFractionPlusSlop, update.mTravelFraction);
+					ccd->mBodyID2 = BodyID();
+					ccd->mFractionPlusSlop = min(ccd->mFractionPlusSlop, update.mTravelFraction);
 				}
-			}
 			if (update.mLinearImpulse != Vec3::sZero() || update.mAngularImpulse != Vec3::sZero())
 			{
 				motion->AddLinearVelocityStep(motion->GetInverseMass() * update.mLinearImpulse);
@@ -2000,10 +2000,12 @@ void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, Phy
 	JPH_ASSERT(ioStep->mCCDBodies == nullptr);
 	ioStep->mCCDBodiesCapacity = mBodyManager.GetNumActiveCCDBodies();
 	ioStep->mCCDBodies = (CCDBody *)temp_allocator->Allocate(ioStep->mCCDBodiesCapacity * sizeof(CCDBody));
+	ioStep->mCheckDormantCCD = mBodyManager.GetLinearCastBodiesUnsafe().size() > ioStep->mCCDBodiesCapacity;
 
 	// Initialize the mapping table between active body and CCD body
 	JPH_ASSERT(ioStep->mActiveBodyToCCDBody == nullptr);
-	ioStep->mNumActiveBodyToCCDBody = ioStep->mCCDBodiesCapacity > 0 || ioContext->mCoupledRetainMotion? mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
+	ioStep->mNumActiveBodyToCCDBody = ioStep->mCCDBodiesCapacity > 0 || ioStep->mCheckDormantCCD || ioContext->mCoupledRetainMotion?
+		mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
 	ioStep->mActiveBodyToCCDBody = (int *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(int));
 	ioStep->mBodyMotions = (PhysicsUpdateContext::Step::BodyMotion *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
 
@@ -2145,24 +2147,62 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 	// Validate that our reservations were correct
 	JPH_ASSERT(ioStep->mNumCCDBodies <= mBodyManager.GetNumActiveCCDBodies());
 
-	if (ioStep->mNumCCDBodies == 0)
+	if (ioStep->mNumCCDBodies > 0 || ioStep->mCheckDormantCCD)
+	{
+		JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::Read);)
+		AABox moving_bounds;
+		const BodyID *active_bodies = mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody);
+		// Conservative relative-motion bounds, shared by every cast. The per-body
+		// ray and shape tests below reject candidates using their actual trajectory.
+		for (uint32 i = 0; i < ioStep->mNumActiveBodyToCCDBody; ++i)
+		{
+			const Vec3 delta(ioStep->mBodyMotions[i].mDeltaPosition);
+			ioStep->mMinBodyMotion = Vec3::sMin(ioStep->mMinBodyMotion, delta);
+			ioStep->mMaxBodyMotion = Vec3::sMax(ioStep->mMaxBodyMotion, delta);
+			if (ioStep->mCheckDormantCCD && delta != Vec3::sZero())
+			{
+				const Body &body = mBodyManager.GetBody(active_bodies[i]);
+				if (body.IsSensor())
+					continue;
+				AABox swept = body.GetShape()->GetWorldSpaceBounds(body.GetCenterOfMassTransform(), Vec3::sOne());
+				swept.mMin += Vec3::sMin(delta, Vec3::sZero());
+				swept.mMax += Vec3::sMax(delta, Vec3::sZero());
+				moving_bounds.Encapsulate(swept);
+			}
+		}
+
+		if (moving_bounds.IsValid())
+		{
+			// Only registered continuous bodies can start a reverse relative cast.
+			// A stationary body outside this step's swept bounds needs no record.
+			const float movement_sq = Vec3::sMax(ioStep->mMinBodyMotion.Abs(), ioStep->mMaxBodyMotion.Abs()).LengthSq();
+			for (const Body *body : mBodyManager.GetLinearCastBodiesUnsafe())
+			{
+				if (body->IsActive() || !body->IsInBroadPhase() || !body->IsDynamic() || body->IsSensor()
+					|| !moving_bounds.Overlaps(body->GetWorldSpaceBounds()))
+					continue;
+				const float radius = body->GetShape()->GetInnerRadius();
+				const float threshold_sq = Square(mPhysicsSettings.mLinearCastThreshold * radius);
+				if (movement_sq >= threshold_sq)
+					ioStep->mDormantCCDBodies.emplace_back(body->GetID(), Vec3::sZero(), threshold_sq,
+						min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * radius));
+			}
+			if (ioStep->mDormantCCDBodies.size() > 1)
+				QuickSort(ioStep->mDormantCCDBodies.begin(), ioStep->mDormantCCDBodies.end(),
+					[](const CCDBody &inA, const CCDBody &inB) { return inA.mBodyID1 < inB.mBodyID1; });
+		}
+	}
+
+	const uint32 count = ioStep->GetCCDCount();
+	if (count == 0)
 	{
 		// No continuous collision detection jobs -> kick the next job ourselves
 		ioStep->mContactRemovedCallbacks.RemoveDependency();
 	}
 	else
 	{
-		// Conservative relative-motion bounds, shared by every cast. The per-body
-		// ray and shape tests below reject candidates using their actual trajectory.
-		for (uint32 i = 0; i < ioStep->mNumActiveBodyToCCDBody; ++i)
-		{
-			Vec3 delta(ioStep->mBodyMotions[i].mDeltaPosition);
-			ioStep->mMinBodyMotion = Vec3::sMin(ioStep->mMinBodyMotion, delta);
-			ioStep->mMaxBodyMotion = Vec3::sMax(ioStep->mMaxBodyMotion, delta);
-		}
-
 		// Run the continuous collision detection jobs
-		int num_continuous_collision_jobs = min(int(ioStep->mNumCCDBodies + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
+		int num_continuous_collision_jobs = min(int(count + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
 		ioStep->mResolveCCDContacts.AddDependency(num_continuous_collision_jobs);
 		ioStep->mContactRemovedCallbacks.AddDependency(num_continuous_collision_jobs - 1); // Already had 1 dependency
 		for (int i = 0; i < num_continuous_collision_jobs; ++i)
@@ -2199,7 +2239,7 @@ inline static Vec3 sCalculateBodyMotion(const Body &inBody, PhysicsUpdateContext
 }
 
 // Helper function that finds the CCD body corresponding to a body (if it exists)
-inline static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBody, PhysicsUpdateContext::Step *inStep)
+static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBody, PhysicsUpdateContext::Step *inStep)
 {
 	// Only rigid bodies can have a CCD body
 	if (!inBody.IsRigidBody())
@@ -2210,19 +2250,18 @@ inline static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBod
 	if (motion_properties == nullptr)
 		return nullptr;
 
-	// Sleeping bodies and targets just awakened by CCD did not capture a trajectory.
-	uint32 active_index = motion_properties->GetIndexInActiveBodiesInternal();
-	if (active_index >= inStep->mNumActiveBodyToCCDBody)
+	const uint32 active_index = motion_properties->GetIndexInActiveBodiesInternal();
+	if (active_index < inStep->mNumActiveBodyToCCDBody)
+	{
+		const int index = inStep->mActiveBodyToCCDBody[active_index];
+		return index < 0? nullptr : &inStep->mCCDBodies[index];
+	}
+	auto &dormant = inStep->mDormantCCDBodies;
+	if (dormant.empty())
 		return nullptr;
-
-	// Check if the active body has a corresponding CCD body
-	int ccd_index = inStep->mActiveBodyToCCDBody[active_index];
-	if (ccd_index < 0)
-		return nullptr;
-
-	PhysicsUpdateContext::Step::CCDBody *ccd_body = &inStep->mCCDBodies[ccd_index];
-	JPH_ASSERT(ccd_body->mBodyID1 == inBody.GetID(), "We found the wrong CCD body!");
-	return ccd_body;
+	const auto found = std::lower_bound(dormant.begin(), dormant.end(), inBody.GetID(),
+		[](const auto &inCandidate, BodyID inID) { return inCandidate.mBodyID1 < inID; });
+	return found != dormant.end() && found->mBodyID1 == inBody.GetID()? &*found : nullptr;
 }
 
 void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
@@ -2248,9 +2287,9 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 	{
 		// Fetch the next body to cast
 		uint32 idx = ioStep->mNextCCDBody++;
-		if (idx >= ioStep->mNumCCDBodies)
+		if (idx >= ioStep->GetCCDCount())
 			break;
-		CCDBody &ccd_body = ioStep->mCCDBodies[idx];
+		CCDBody &ccd_body = ioStep->GetCCD(idx);
 		const Body &body = mBodyManager.GetBody(ccd_body.mBodyID1);
 		Vec3 max_relative_motion = Vec3::sMax((ccd_body.mDeltaPosition - ioStep->mMinBodyMotion).Abs(), (ccd_body.mDeltaPosition - ioStep->mMaxBodyMotion).Abs());
 		if (max_relative_motion.LengthSq() < ccd_body.mLinearCastThresholdSq)
@@ -2649,7 +2688,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	TempAllocator *temp_allocator = ioContext->mTempAllocator;
 
 	// Check if there's anything to do
-	uint num_ccd_bodies = ioStep->mNumCCDBodies;
+	const uint32 num_ccd_bodies = ioStep->GetCCDCount();
 	if (num_ccd_bodies > 0)
 	{
 		// Sort on fraction so that we process earliest collisions first
@@ -2662,11 +2701,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 			JPH_PROFILE("Sort");
 
 			// We don't want to copy the entire struct (it's quite big), so we create a pointer array first
-			CCDBody *src_ccd_bodies = ioStep->mCCDBodies;
-			CCDBody **dst_ccd_bodies = sorted_ccd_bodies;
-			CCDBody **dst_ccd_bodies_end = dst_ccd_bodies + num_ccd_bodies;
-			while (dst_ccd_bodies < dst_ccd_bodies_end)
-				*(dst_ccd_bodies++) = src_ccd_bodies++;
+			for (uint32 i = 0; i < num_ccd_bodies; ++i)
+				sorted_ccd_bodies[i] = &ioStep->GetCCD(i);
 
 			// Which we then sort
 			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_ccd_bodies, [](const CCDBody *inBody1, const CCDBody *inBody2)
@@ -2683,6 +2719,18 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 		static constexpr int cBodiesBatch = 64;
 		BodyID *bodies_to_activate = (BodyID *)JPH_STACK_ALLOC(cBodiesBatch * sizeof(BodyID));
 		int num_bodies_to_activate = 0;
+		const auto wake = [&](const Body &inBody)
+		{
+			if (inBody.IsDynamic() && !inBody.IsActive())
+			{
+				bodies_to_activate[num_bodies_to_activate++] = inBody.GetID();
+				if (num_bodies_to_activate == cBodiesBatch)
+				{
+					mBodyManager.ActivateBodies(bodies_to_activate, num_bodies_to_activate);
+					num_bodies_to_activate = 0;
+				}
+			}
+		};
 
 		for (uint i = 0; i < num_ccd_bodies; ++i)
 		{
@@ -2692,7 +2740,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 			auto *motion1 = sGetBodyMotion(body1, ioStep);
 
 			// If there was a hit
-			if (!ccd_body->mBodyID2.IsInvalid() && motion1->mFraction >= ccd_body->mFraction)
+			if (!ccd_body->mBodyID2.IsInvalid() && (motion1 == nullptr || motion1->mFraction >= ccd_body->mFraction))
 			{
 				Body &body2 = mBodyManager.GetBody(ccd_body->mBodyID2);
 
@@ -2831,17 +2879,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 						}
 					}
 
-					// Activate the 2nd body if it is not already active
-					if (body2.IsDynamic() && !body2.IsActive())
-					{
-						bodies_to_activate[num_bodies_to_activate++] = ccd_body->mBodyID2;
-						if (num_bodies_to_activate == cBodiesBatch)
-						{
-							// Batch is full, activate now
-							mBodyManager.ActivateBodies(bodies_to_activate, num_bodies_to_activate);
-							num_bodies_to_activate = 0;
-						}
-					}
+					wake(body1);
+					wake(body2);
 
 				#ifdef JPH_DEBUG_RENDERER
 					if (sDrawMotionQualityLinearCast)
@@ -2865,7 +2904,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 				}
 			}
 
-			motion1->mFraction = min(motion1->mFraction, ccd_body->mFractionPlusSlop);
+			if (motion1 != nullptr)
+				motion1->mFraction = min(motion1->mFraction, ccd_body->mFractionPlusSlop);
 		}
 
 		// Activate the requested bodies
@@ -2908,6 +2948,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	temp_allocator->Free(ioStep->mCCDBodies, ioStep->mCCDBodiesCapacity * sizeof(CCDBody));
 	ioStep->mCCDBodies = nullptr;
 	ioStep->mCCDBodiesCapacity = 0;
+	ioStep->mDormantCCDBodies = Array<CCDBody>();
 }
 
 void PhysicsSystem::JobContactRemovedCallbacks(const PhysicsUpdateContext::Step *ioStep)

@@ -227,6 +227,12 @@ void BodyManager::FreeBody(Body *inBody) const
 	sDeleteBody(inBody);
 }
 
+static bool sUsesLinearCast(const Body &inBody)
+{
+	const MotionProperties *motion = inBody.GetMotionPropertiesUnchecked();
+	return inBody.IsRigidBody() && motion != nullptr && motion->GetMotionQuality() == EMotionQuality::LinearCast;
+}
+
 bool BodyManager::AddBody(Body *ioBody)
 {
 	// Return error when body was already added
@@ -264,6 +270,8 @@ bool BodyManager::AddBody(Body *ioBody)
 
 		// Update cached number of bodies
 		mNumBodies++;
+		if (sUsesLinearCast(*ioBody))
+			mLinearCastBodies.insert(ioBody);
 	}
 
 	// Get next sequence number and assign the ID
@@ -335,6 +343,8 @@ bool BodyManager::AddBodyWithCustomID(Body *ioBody, const BodyID &inBodyID)
 
 		// Update cached number of bodies
 		mNumBodies++;
+		if (sUsesLinearCast(*ioBody))
+			mLinearCastBodies.insert(ioBody);
 	}
 
 	// Assign the ID
@@ -352,6 +362,9 @@ Body *BodyManager::RemoveBodyInternal(const BodyID &inBodyID)
 	JPH_ASSERT(body->GetID() == inBodyID);
 	JPH_ASSERT(!body->IsActive());
 	JPH_ASSERT(!body->IsInBroadPhase(), "Use BodyInterface::RemoveBody to remove this body first!");
+
+	if (sUsesLinearCast(*body))
+		mLinearCastBodies.erase(body);
 
 	// Push the id onto the freelist
 	mBodies[idx] = (Body *)mBodyIDFreeListStart;
@@ -580,6 +593,7 @@ void BodyManager::SetMotionQuality(Body &ioBody, EMotionQuality inMotionQuality)
 	MotionProperties *mp = ioBody.GetMotionPropertiesUnchecked();
 	if (mp != nullptr && mp->GetMotionQuality() != inMotionQuality)
 	{
+		UniqueLock body_list_lock(mBodiesMutex JPH_IF_ENABLE_ASSERTS(, this, EPhysicsLockTypes::BodiesList));
 		UniqueLock lock(mActiveBodiesMutex JPH_IF_ENABLE_ASSERTS(, this, EPhysicsLockTypes::ActiveBodiesList));
 
 		JPH_ASSERT(!mActiveBodiesLocked);
@@ -589,6 +603,14 @@ void BodyManager::SetMotionQuality(Body &ioBody, EMotionQuality inMotionQuality)
 			--mNumActiveCCDBodies;
 
 		mp->mMotionQuality = inMotionQuality;
+
+		if (ioBody.IsRigidBody() && !ioBody.GetID().IsInvalid())
+		{
+			if (inMotionQuality == EMotionQuality::LinearCast)
+				mLinearCastBodies.insert(&ioBody);
+			else
+				mLinearCastBodies.erase(&ioBody);
+		}
 
 		if (is_active && mp->GetMotionQuality() == EMotionQuality::LinearCast)
 			++mNumActiveCCDBodies;

@@ -118,6 +118,15 @@ public:
 		CCDBody *			mCCDBodies = nullptr;									///< List of bodies that need to do continuous collision detection
 		uint32				mCCDBodiesCapacity = 0;									///< Capacity of the mCCDBodies list
 		atomic<uint32>		mNumCCDBodies = 0;										///< Number of CCD bodies in mCCDBodies
+		Array<CCDBody>		mDormantCCDBodies;										///< Relevant sleeping cast sources, ordered by body ID
+		bool				mCheckDormantCCD = false;								///< The world may have sleeping continuous targets for this step
+		uint32				GetCCDCount() const { return mNumCCDBodies.load(memory_order_relaxed) + uint32(mDormantCCDBodies.size()); }
+		CCDBody &			GetCCD(uint32 inIndex)
+		{
+			uint32 awake = mNumCCDBodies.load(memory_order_relaxed);
+			return inIndex < awake? mCCDBodies[inIndex] : mDormantCCDBodies[inIndex - awake];
+		}
+		const CCDBody &		GetCCD(uint32 inIndex) const { return const_cast<Step *>(this)->GetCCD(inIndex); }
 		atomic<uint32>		mNextCCDBody { 0 };										///< Next unprocessed body index in mCCDBodies
 		int *				mActiveBodyToCCDBody = nullptr;							///< A mapping between an index in BodyManager::mActiveBodies and the index in mCCDBodies
 		uint32				mNumActiveBodyToCCDBody = 0;							///< Number of indices in mActiveBodyToCCDBody

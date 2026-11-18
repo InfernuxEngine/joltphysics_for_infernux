@@ -7,6 +7,7 @@
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Core/Mutex.h>
 #include <Jolt/Core/MutexArray.h>
+#include <Jolt/Core/UnorderedSet.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -125,6 +126,9 @@ public:
 
 	/// Get the number of active bodies that are using continuous collision detection
 	uint32							GetNumActiveCCDBodies() const				{ return mNumActiveCCDBodies; }
+
+	/// Sparse list including sleeping motion-quality bodies. Read under LockAllBodies().
+	const UnorderedSet<const Body *> &GetLinearCastBodiesUnsafe() const			{ return mLinearCastBodies; }
 
 	/// Listener that is notified whenever a body is activated/deactivated
 	void							SetBodyActivationListener(BodyActivationListener *inListener);
@@ -339,6 +343,7 @@ private:
 
 	/// List of pointers to all bodies. Contains invalid pointers for deleted bodies, check with sIsValidBodyPointer. Note that this array is reserved to the max bodies that is passed in the Init function so that adding bodies will not reallocate the array.
 	BodyVector						mBodies;
+	UnorderedSet<const Body *>		mLinearCastBodies;
 
 	/// Current number of allocated bodies
 	uint							mNumBodies = 0;
