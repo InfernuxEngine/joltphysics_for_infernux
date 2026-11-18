@@ -309,8 +309,10 @@ void cvx_distance_done(RWStructuredBuffer<uint4> s,uint b)
         // shapes are separated even when their distance is below tolerance.
         // Keep full-simplex witnesses and avoid an EPA<->GJK restart cycle.
         float4 plane=cvx_f(s,b,39); n=plane.xyz;
-        distance=dot(n,p-a); // Projection of these retained FULL witnesses.
-        if(!(distance>0) || !isfinite(distance) || s[b].z==0u) { cvx_fail(s,b,19u); return; }
+        // The support plane is a lower bound for every point of the FULL
+        // simplex. Subtracting the separately rounded A/B witnesses can
+        // lose a positive gap when a CCD impact leaves the pair near touch.
+        distance=max(plane.w,dot(n,v));
     } else n=cvx_unit(v);
     float scale=cvx_f(s,b,3).w;
     float ra=s[b].z==0u?cvx_margin(cvx_operand(s,b,0))/scale:0;
