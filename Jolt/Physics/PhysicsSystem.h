@@ -187,7 +187,8 @@ public:
 	/// Run another native sweep in the touched islands.
 	/// After the last sweep, retain the current poses at the Integration boundary.
 	/// An admitted update must be advanced to completion.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext);
+	/// Keep an exhausted velocity stage open when another project impulse is expected.
+	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, bool inFinishWhenIdle = true);
 
 	/// Prepare clamped/rotated motion and local continuous candidates, retaining their unresolved response.
 	/// Retain all translations when a peer solver needs a shared-time continuous boundary.

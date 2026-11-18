@@ -13,6 +13,9 @@ RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<BodyForces> body_forces;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
 RWStructuredBuffer<BodySleepRecord> body_sleep;
+StructuredBuffer<uint2> participant_rows;
+RWStructuredBuffer<float> participant_motion;
+StructuredBuffer<float> participant_impulses;
 
 void command_reset_sleep(BodyState state,float3 extent,inout BodySleepRuntime sleep)
 {
@@ -25,6 +28,61 @@ void command_wake(BodyModel model,BodyState state,float3 extent,inout BodySleepR
         command_reset_sleep(state,extent,sleep);
         sleep.state.x=1u;
     }
+}
+
+// Scene resolves these sparse addresses once against this Fixed's admitted
+// author prefix. CPU rows in the project arrays are deliberately untouched.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void prepare_participant_bodies(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= command_params.spans.y) return;
+    uint2 row = participant_rows[command_params.spans.x + tid.x];
+    BodyModel model = body_models[row.x];
+    BodyState state = body_states[row.x];
+    BodySleepRuntime sleep = body_sleep[row.x].runtime;
+    command_wake(model, state, body_sleep[row.x].author.rootHalfExtent.xyz, sleep, false);
+    body_sleep[row.x].runtime = sleep;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void gather_participant_motion(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= command_params.spans.y) return;
+    uint2 row = participant_rows[command_params.spans.x + tid.x];
+    BodyState state = body_states[row.x];
+    uint first = row.y * 16u;
+    for (uint lane = 0u; lane < 4u; ++lane) {
+        participant_motion[first + lane] = lane == 3u ? 0.0f : state.positionCOM[lane];
+        participant_motion[first + 4u + lane] = state.rotation[lane];
+        participant_motion[first + 8u + lane] = lane == 3u ? 0.0f : state.linearVelocity[lane];
+        participant_motion[first + 12u + lane] = lane == 3u ? 0.0f : state.angularVelocity[lane];
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void apply_participant_impulses(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= command_params.spans.y) return;
+    uint2 row = participant_rows[command_params.spans.x + tid.x];
+    uint first = row.y * 6u;
+    float3 linear = float3(participant_impulses[first], participant_impulses[first + 1u], participant_impulses[first + 2u]);
+    float3 angular = float3(participant_impulses[first + 3u], participant_impulses[first + 4u], participant_impulses[first + 5u]);
+    // A zero increment does not restart an already active body's sleep history.
+    if (all(linear == float3(0.0f)) && all(angular == float3(0.0f))) return;
+    BodyModel model = body_models[row.x];
+    BodyState state = body_states[row.x];
+    state.linearVelocity.xyz += jph_inverse_linear_mass(model, linear);
+    state.angularVelocity.xyz += jph_inverse_inertia(model, state, angular);
+    jph_project_motion(model, state);
+    // As with native contact rows, let the connected constraints distribute
+    // momentum before the ordinary drift clamps the physical endpoint speeds.
+    BodySleepRuntime sleep = body_sleep[row.x].runtime;
+    command_wake(model, state, body_sleep[row.x].author.rootHalfExtent.xyz, sleep, false);
+    body_states[row.x] = state;
+    body_sleep[row.x].runtime = sleep;
 }
 
 float3 command_world_inertia(BodyModel model, BodyState state, float3 value)

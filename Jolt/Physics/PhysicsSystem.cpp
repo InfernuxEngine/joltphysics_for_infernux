@@ -259,7 +259,7 @@ void PhysicsSystem::ApplyCoupledVelocityImpulses(PhysicsUpdateContext &ioContext
 	}
 }
 
-std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext)
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, bool inFinishWhenIdle)
 {
 	using Stage = PhysicsUpdateContext::ECoupledStage;
 	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Velocity);
@@ -282,6 +282,8 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(P
 			mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 		}
 		if (swept)
+			return std::nullopt;
+		if (!inFinishWhenIdle)
 			return std::nullopt;
 
 		for (uint32 island : ioContext.mCoupledIslandOrder)
