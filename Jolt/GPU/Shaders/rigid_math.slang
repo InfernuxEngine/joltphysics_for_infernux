@@ -656,6 +656,12 @@ void jph_core_distance(JphCoreBox a, JphCoreBox b, out float3 pointA, out float3
     }
 }
 
+float jph_core_axis_radius(JphCoreBox box, float3 n)
+{
+    return abs(dot(box.axis[0], n)) * box.halfExtent.x + abs(dot(box.axis[1], n)) * box.halfExtent.y
+         + abs(dot(box.axis[2], n)) * box.halfExtent.z;
+}
+
 bool jph_core_sat(JphCoreBox a, JphCoreBox b, out float3 normal, out float depth, out uint feature)
 {
     float3 delta = b.center - a.center;
@@ -677,12 +683,8 @@ bool jph_core_sat(JphCoreBox a, JphCoreBox b, out float3 normal, out float depth
             continue; // Only exactly parallel edges omit this facet class.
         n /= axis_scale;
         n /= length(n);
-        float radiusA = abs(dot(a.axis[0], n)) * a.halfExtent.x
-                      + abs(dot(a.axis[1], n)) * a.halfExtent.y
-                      + abs(dot(a.axis[2], n)) * a.halfExtent.z;
-        float radiusB = abs(dot(b.axis[0], n)) * b.halfExtent.x
-                      + abs(dot(b.axis[1], n)) * b.halfExtent.y
-                      + abs(dot(b.axis[2], n)) * b.halfExtent.z;
+        float radiusA = jph_core_axis_radius(a, n);
+        float radiusB = jph_core_axis_radius(b, n);
         float center_distance = dot(delta, n);
         float penetration = radiusA + radiusB - abs(center_distance);
         overlapping = overlapping && penetration >= 0.0f;
@@ -832,13 +834,50 @@ uint jph_box_face_points(JphCoreBox a, JphCoreBox b, float3 normal, float specul
     return count;
 }
 
+// A face normal gives the exact Euclidean separation when the incident support
+// vertex projects inside that finite face. Keep that normal analytically:
+// subtracting two reconstructed witnesses can turn a sub-ulp tangential error
+// into most of the normal of an almost touching, sliding pair.
+bool jph_separated_box_face(JphCoreBox reference, JphCoreBox incident, out float3 outward,
+                            out float gap, out float3 on_reference, out float3 on_incident, out uint vertex)
+{
+    float3 delta = incident.center - reference.center;
+    for (uint i = 0u; i < 3u; ++i)
+    {
+        float center_distance = dot(delta, reference.axis[i]);
+        float3 n = center_distance >= 0.0f ? reference.axis[i] : -reference.axis[i];
+        float3 projection = float3(dot(incident.axis[0], n), dot(incident.axis[1], n), dot(incident.axis[2], n));
+        float distance = abs(center_distance) - (reference.halfExtent[i] + dot(abs(projection), incident.halfExtent));
+        if (distance < 0.0f)
+            continue;
+        uint v = (projection.x < 0.0f ? 1u : 0u) | (projection.y < 0.0f ? 2u : 0u) | (projection.z < 0.0f ? 4u : 0u);
+        float3 p = jph_core_vertex(incident, v);
+        float3 offset = p - reference.center;
+        uint u = (i + 1u) % 3u, t = (i + 2u) % 3u;
+        if (abs(dot(offset, reference.axis[u])) <= reference.halfExtent[u] &&
+            abs(dot(offset, reference.axis[t])) <= reference.halfExtent[t])
+        {
+            outward = n;
+            gap = distance;
+            on_reference = p - n * distance;
+            on_incident = p;
+            vertex = v;
+            return true;
+        }
+    }
+    outward = on_reference = on_incident = float3(0.0f);
+    gap = 0.0f;
+    vertex = 0u;
+    return false;
+}
+
 JphPairMetric jph_core_box_pair_metric(JphCoreBox a, JphCoreBox b)
 {
     float3 normal;
     float core_depth;
     uint axis_feature;
     bool core_overlap = jph_core_sat(a, b, normal, core_depth, axis_feature);
-    float3 pa, pb;
+    float3 pa, pb, face_normal;
     float core_distance;
     uint distance_feature;
     float penetration;
@@ -853,13 +892,33 @@ JphPairMetric jph_core_box_pair_metric(JphCoreBox a, JphCoreBox b)
         pb -= core_depth * normal;
         penetration = core_depth + a.radius + b.radius;
     }
+    else if (jph_separated_box_face(a, b, face_normal, core_distance, pa, pb, distance_feature))
+    {
+        normal = face_normal;
+        distance_feature += 8u; // vertex of B against A
+        penetration = a.radius + b.radius - core_distance;
+    }
+    else if (jph_separated_box_face(b, a, face_normal, core_distance, pb, pa, distance_feature))
+    {
+        normal = -face_normal;
+        penetration = a.radius + b.radius - core_distance;
+    }
     else
     {
         jph_core_distance(a, b, pa, pb, core_distance, distance_feature);
-        float distance = jph_capsule_length(pb - pa);
-        if (jph_capsule_max_abs(pb - pa) > 0.0f)
-            normal = jph_capsule_unit(pb - pa);
-        penetration = a.radius + b.radius - distance;
+        float3 witness = pb - pa;
+        if (core_distance > 0.0f)
+        {
+            float3 n = jph_capsule_unit(witness);
+            // A closest-pair normal must separate the *whole* boxes. At touching
+            // precision the residual can point along a common face instead.
+            float projected_gap = dot(b.center - a.center, n) - (jph_core_axis_radius(a, n) + jph_core_axis_radius(b, n));
+            if (projected_gap > 0.0f)
+                normal = n;
+            else
+                core_distance = -core_depth; // SAT already certified this separating axis.
+        }
+        penetration = a.radius + b.radius - core_distance;
     }
 
     JphPairMetric metric;
