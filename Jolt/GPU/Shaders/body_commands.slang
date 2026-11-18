@@ -16,6 +16,7 @@ RWStructuredBuffer<BodySleepRecord> body_sleep;
 StructuredBuffer<uint2> participant_rows;
 RWStructuredBuffer<float> participant_motion;
 StructuredBuffer<float> participant_impulses;
+RWStructuredBuffer<float> participant_impulse_journal;
 
 void command_reset_sleep(BodyState state,float3 extent,inout BodySleepRuntime sleep)
 {
@@ -318,4 +319,30 @@ void apply_body_commands(uint3 tid : SV_DispatchThreadID)
     body_forces[body] = forces;
     kinematic_targets[body] = target;
     body_sleep[body].runtime = sleep;
+}
+
+// A closed CPU-owner round retains only candidate motion on the device.
+// The host binds its exact CPU BodyModel rows and f32[16N] motion as BodyState.
+// No CPU integration, clamp, native body scatter, sleep or geometry work occurs.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void retain_participant_cpu_response(uint3 tid : SV_DispatchThreadID)
+{
+    const uint count = command_params.spans.y;
+    if (tid.x >= count) return;
+    const uint first = tid.x * 6u;
+    const float3 linear = float3(participant_impulses[first], participant_impulses[first + 1u], participant_impulses[first + 2u]);
+    const float3 angular = float3(participant_impulses[first + 3u], participant_impulses[first + 4u], participant_impulses[first + 5u]);
+    const uint journal = (command_params.spans.z * count + tid.x) * 6u;
+    participant_impulse_journal[journal] = linear.x;
+    participant_impulse_journal[journal + 1u] = linear.y;
+    participant_impulse_journal[journal + 2u] = linear.z;
+    participant_impulse_journal[journal + 3u] = angular.x;
+    participant_impulse_journal[journal + 4u] = angular.y;
+    participant_impulse_journal[journal + 5u] = angular.z;
+    const BodyModel model = body_models[tid.x];
+    BodyState state = body_states[tid.x];
+    state.linearVelocity.xyz += jph_inverse_linear_mass(model, linear);
+    state.angularVelocity.xyz += jph_inverse_inertia(model, state, angular);
+    body_states[tid.x] = state;
 }
