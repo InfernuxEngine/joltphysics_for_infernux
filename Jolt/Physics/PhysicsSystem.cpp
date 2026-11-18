@@ -877,6 +877,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 			mContactManager.FinalizeContactCacheAndCallContactPointRemovedCallbacks(0, 0);
 
 		mBodyManager.UnlockAllBodies();
+		mContactManager.TrimConstraintStorage();
 		return false;
 	}
 
@@ -2256,9 +2257,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 		#ifdef JPH_TRACK_SIMULATION_STATS
 			uint64 start_tick = GetProcessorTickCount();
 		#endif
-
-			// Convert indices to offsets so that we lose one indirection in the solver. We couldn't do this earlier as we need constraint indices to build islands.
-			mContactManager.ConstraintIdxToConstraintOffset(contacts_begin, contacts_end);
 
 			// Sorting is costly but needed for a deterministic simulation, allow the user to turn this off
 			if (mPhysicsSettings.mDeterministicSimulation)

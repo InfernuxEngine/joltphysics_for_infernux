@@ -741,8 +741,7 @@ ContactConstraintManager::ContactConstraintManager(const PhysicsSettings &inPhys
 
 ContactConstraintManager::~ContactConstraintManager()
 {
-	JPH_ASSERT(mConstraints == nullptr);
-	JPH_ASSERT(mConstraintIdxToOffset == nullptr);
+	JPH_ASSERT(mContactRows == nullptr);
 }
 
 void ContactConstraintManager::Init(uint inMaxBodyPairs, uint inMaxContactConstraints)
@@ -751,6 +750,8 @@ void ContactConstraintManager::Init(uint inMaxBodyPairs, uint inMaxContactConstr
 	mMaxConstraints = min(inMaxContactConstraints, cMaxContactConstraintsLimit);
 	JPH_ASSERT(mMaxConstraints == inMaxContactConstraints, "Cannot support this many contact constraints!");
 	mMaxConstraints = max(mMaxConstraints, 4u); // Because our hash map requires at least 4 buckets, we need to have a minimum number of constraints
+
+	mConstraintStorage.Init(mMaxConstraints * cMaxConstraintSize, cMaxConstraintSize);
 
 	// Calculate worst case cache usage
 	constexpr uint cMaxManifoldSizePerConstraint = sizeof(MKeyValue) + CachedManifold::sGetRequiredExtraSize(MaxContactPoints);
@@ -771,11 +772,9 @@ void ContactConstraintManager::PrepareConstraintBuffer(PhysicsUpdateContext *inC
 	mReadCache = &mCache[mCacheWriteIdx ^ 1];
 	mWriteCache = &mCache[mCacheWriteIdx];
 
-	// Allocate temporary constraint buffer
-	JPH_ASSERT(mConstraints == nullptr);
-	mConstraints = (uint8 *)inContext->mTempAllocator->Allocate(mMaxConstraints * cMaxConstraintSize);
-	JPH_ASSERT(mConstraintIdxToOffset == nullptr);
-	mConstraintIdxToOffset = (uint32 *)inContext->mTempAllocator->Allocate(mMaxConstraints * sizeof(uint32));
+	// The solver index is temporary. Packed contact records acquire storage on first use.
+	JPH_ASSERT(mContactRows == nullptr);
+	mContactRows = (ContactConstraintBase **)inContext->mTempAllocator->Allocate(mMaxConstraints * sizeof(ContactConstraintBase *));
 }
 
 template <EMotionType Type1, EMotionType Type2>
@@ -827,12 +826,19 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	// Store offset for constraint
 	uint32 constraint_offset = uint32(constraint_idx_and_constraint_offset >> 32);
 	JPH_ASSERT(constraint_offset + constraint_size <= mMaxConstraints * cMaxConstraintSize);
-	mConstraintIdxToOffset[constraint_idx] = constraint_offset;
 
 	// Construct constraint
-	ContactConstraint<Type1, Type2> *constraint = reinterpret_cast<ContactConstraint<Type1, Type2> *>(mConstraints + constraint_offset);
+	static_assert(alignof(ContactConstraint<Type1, Type2>) <= 16);
+	uint8 *address = mConstraintStorage.AllocateEntry(constraint_offset, constraint_size);
+	if (address == nullptr)
+	{
+		Trace("Could not allocate native solver contact storage");
+		std::abort();
+	}
+	ContactConstraint<Type1, Type2> *constraint = reinterpret_cast<ContactConstraint<Type1, Type2> *>(address);
 	JPH_ASSERT(IsAligned(constraint, alignof(ContactConstraint<Type1, Type2>)));
 	new (constraint) ContactConstraint<Type1, Type2>();
+	mContactRows[constraint_idx] = constraint;
 	constraint->mBody1 = &inBody1;
 	constraint->mBody2 = &inBody2;
 	constraint->mSortKey = inSortKey;
@@ -1493,19 +1499,13 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
 	JPH_ASSERT(outSettings.mIsSensor || !(inBody1.IsSensor() || inBody2.IsSensor()), "Sensors cannot be converted into regular bodies by a contact callback!");
 }
 
-void ContactConstraintManager::ConstraintIdxToConstraintOffset(uint32 *ioConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const
-{
-	for (uint32 *i = ioConstraintIdxBegin; i < inConstraintIdxEnd; ++i)
-		*i = mConstraintIdxToOffset[*i];
-}
-
-void ContactConstraintManager::SortContacts(uint32 *ioConstraintOffsetBegin, uint32 *inConstraintOffsetEnd) const
+void ContactConstraintManager::SortContacts(uint32 *ioConstraintOffsetBegin, uint32 *inContactIndexEnd) const
 {
 	JPH_PROFILE_FUNCTION();
 
-	QuickSort(ioConstraintOffsetBegin, inConstraintOffsetEnd, [this](uint32 inLHS, uint32 inRHS) {
-		const ContactConstraintBase &lhs = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + inLHS);
-		const ContactConstraintBase &rhs = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + inRHS);
+	QuickSort(ioConstraintOffsetBegin, inContactIndexEnd, [this](uint32 inLHS, uint32 inRHS) {
+		const ContactConstraintBase &lhs = *mContactRows[inLHS];
+		const ContactConstraintBase &rhs = *mContactRows[inRHS];
 
 		// Most of the time the sort key will be different so we sort on that
 		if (lhs.mSortKey != rhs.mSortKey)
@@ -1649,7 +1649,7 @@ void ContactConstraintManager::sWarmStartConstraint(ContactConstraintBase &ioCon
 }
 
 template <class MotionPropertiesCallback>
-void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback)
+void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -1673,16 +1673,16 @@ void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inCons
 		}
 	};
 
-	if (inConstraintOffsetBegin >= inConstraintOffsetEnd)
+	if (inContactIndexBegin >= inContactIndexEnd)
 		return;
 
-	ContactConstraintBase *next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *inConstraintOffsetBegin);
-	for (const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1; next_constraint != nullptr; ++next_constraint_offset)
+	ContactConstraintBase *next_constraint = mContactRows[*inContactIndexBegin];
+	for (const uint32 *next_contact_index = inContactIndexBegin + 1; next_constraint != nullptr; ++next_contact_index)
 	{
 		ContactConstraintBase &constraint = *next_constraint;
-		if (next_constraint_offset < inConstraintOffsetEnd)
+		if (next_contact_index < inContactIndexEnd)
 		{
-			next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *next_constraint_offset);
+			next_constraint = mContactRows[*next_contact_index];
 			PrefetchL1(next_constraint);
 		}
 		else
@@ -1704,8 +1704,8 @@ void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inCons
 }
 
 // Specialize for the two body callback types
-template void ContactConstraintManager::WarmStartVelocityConstraints<CalculateSolverSteps>(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, CalculateSolverSteps &ioCallback);
-template void ContactConstraintManager::WarmStartVelocityConstraints<DummyCalculateSolverSteps>(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, DummyCalculateSolverSteps &ioCallback);
+template void ContactConstraintManager::WarmStartVelocityConstraints<CalculateSolverSteps>(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd, float inWarmStartImpulseRatio, CalculateSolverSteps &ioCallback);
+template void ContactConstraintManager::WarmStartVelocityConstraints<DummyCalculateSolverSteps>(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd, float inWarmStartImpulseRatio, DummyCalculateSolverSteps &ioCallback);
 
 template <EMotionType Type1, EMotionType Type2>
 bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2)
@@ -1793,7 +1793,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 	return true;
 }
 
-bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd)
+bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -1817,18 +1817,18 @@ bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstrai
 		}
 	};
 
-	if (inConstraintOffsetBegin >= inConstraintOffsetEnd)
+	if (inContactIndexBegin >= inContactIndexEnd)
 		return false;
 
 	bool any_impulse_applied = false;
 
-	ContactConstraintBase *next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *inConstraintOffsetBegin);
-	for (const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1; next_constraint != nullptr; ++next_constraint_offset)
+	ContactConstraintBase *next_constraint = mContactRows[*inContactIndexBegin];
+	for (const uint32 *next_contact_index = inContactIndexBegin + 1; next_constraint != nullptr; ++next_contact_index)
 	{
 		ContactConstraintBase &constraint = *next_constraint;
-		if (next_constraint_offset < inConstraintOffsetEnd)
+		if (next_contact_index < inContactIndexEnd)
 		{
-			next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *next_constraint_offset);
+			next_constraint = mContactRows[*next_contact_index];
 			PrefetchL1(next_constraint);
 		}
 		else
@@ -1861,7 +1861,7 @@ void ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioCo
 	cached_manifold.mAngularFrictionLambda = constraint.mAngularFrictionConstraint.GetTotalLambda();
 }
 
-void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const
+void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd) const
 {
 	// Build dispatch table
 	using DispatchFunc = void (*)(ContactConstraintBase &, ManifoldCache &);
@@ -1883,17 +1883,17 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOf
 		}
 	};
 
-	if (inConstraintOffsetBegin >= inConstraintOffsetEnd)
+	if (inContactIndexBegin >= inContactIndexEnd)
 		return;
 
 	// Copy back total applied impulse to cache for the next frame
-	ContactConstraintBase *next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *inConstraintOffsetBegin);
-	for (const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1; next_constraint != nullptr; ++next_constraint_offset)
+	ContactConstraintBase *next_constraint = mContactRows[*inContactIndexBegin];
+	for (const uint32 *next_contact_index = inContactIndexBegin + 1; next_constraint != nullptr; ++next_contact_index)
 	{
 		ContactConstraintBase &constraint = *next_constraint;
-		if (next_constraint_offset < inConstraintOffsetEnd)
+		if (next_contact_index < inContactIndexEnd)
 		{
-			next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *next_constraint_offset);
+			next_constraint = mContactRows[*next_contact_index];
 			PrefetchL1(next_constraint);
 		}
 		else
@@ -1938,7 +1938,7 @@ void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstr
 void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImpulse> &outImpulses, bool inRequested) const
 {
 	outImpulses.clear();
-	if ((!mRecordAppliedContactImpulses && !inRequested) || mConstraints == nullptr)
+	if ((!mRecordAppliedContactImpulses && !inRequested) || mContactRows == nullptr)
 		return;
 
 	using DispatchFunc = void (*)(const ContactConstraintBase &, Array<AppliedContactImpulse> &);
@@ -1962,7 +1962,7 @@ void ContactConstraintManager::GetAppliedContactImpulses(Array<AppliedContactImp
 
 	for (uint32 constraint_index = 0; constraint_index < GetNumConstraints(); ++constraint_index)
 	{
-		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + mConstraintIdxToOffset[constraint_index]);
+		const ContactConstraintBase &constraint = *mContactRows[constraint_index];
 		DispatchFunc dispatch = table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()];
 		if (dispatch != nullptr)
 			dispatch(constraint, outImpulses);
@@ -2030,7 +2030,7 @@ bool ContactConstraintManager::sSolvePositionConstraint(ContactConstraintBase &i
 	return any_impulse_applied;
 }
 
-bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd)
+bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -2054,18 +2054,18 @@ bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstrai
 		}
 	};
 
-	if (inConstraintOffsetBegin >= inConstraintOffsetEnd)
+	if (inContactIndexBegin >= inContactIndexEnd)
 		return false;
 
 	bool any_impulse_applied = false;
 
-	ContactConstraintBase *next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *inConstraintOffsetBegin);
-	for (const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1; next_constraint != nullptr; ++next_constraint_offset)
+	ContactConstraintBase *next_constraint = mContactRows[*inContactIndexBegin];
+	for (const uint32 *next_contact_index = inContactIndexBegin + 1; next_constraint != nullptr; ++next_contact_index)
 	{
 		ContactConstraintBase &constraint = *next_constraint;
-		if (next_constraint_offset < inConstraintOffsetEnd)
+		if (next_contact_index < inContactIndexEnd)
 		{
-			next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *next_constraint_offset);
+			next_constraint = mContactRows[*next_contact_index];
 			PrefetchL1(next_constraint);
 		}
 		else
@@ -2082,9 +2082,17 @@ bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstrai
 	return any_impulse_applied;
 }
 
+void ContactConstraintManager::TrimConstraintStorage()
+{
+	const uint32 last_bytes = uint32(mNumConstraintsAndNextConstraintOffset.load(memory_order_relaxed) >> 32);
+	mConstraintStorage.TrimUnusedPages(max(mMaxSubstepContactBytes, last_bytes));
+	mMaxSubstepContactBytes = 0;
+}
+
 void ContactConstraintManager::RecycleConstraintBuffer()
 {
-	// Reset constraint array
+	// The working set of a Fixed includes its busiest collision substep.
+	mMaxSubstepContactBytes = max(mMaxSubstepContactBytes, uint32(mNumConstraintsAndNextConstraintOffset.load(memory_order_relaxed) >> 32));
 	mNumConstraintsAndNextConstraintOffset = 0;
 
 	// Store read / write cache
@@ -2094,11 +2102,10 @@ void ContactConstraintManager::RecycleConstraintBuffer()
 
 void ContactConstraintManager::FinishConstraintBuffer()
 {
+	TrimConstraintStorage();
 	// Free constraints buffer
-	mUpdateContext->mTempAllocator->Free(mConstraintIdxToOffset, mMaxConstraints * sizeof(uint32));
-	mConstraintIdxToOffset = nullptr;
-	mUpdateContext->mTempAllocator->Free(mConstraints, mMaxConstraints * cMaxConstraintSize);
-	mConstraints = nullptr;
+	mUpdateContext->mTempAllocator->Free(mContactRows, mMaxConstraints * sizeof(ContactConstraintBase *));
+	mContactRows = nullptr;
 	mNumConstraintsAndNextConstraintOffset = 0;
 
 	// Reset update context

@@ -34,6 +34,9 @@ public:
 	/// Resolve a freshly reserved offset, allocating the physical page on first write.
 	inline uint8 *			AllocateEntry(uint32 inOffset, uint32 inSize);
 
+	/// Release a bounded tail of unused pages while no entry is in use. Offsets may be reused on later writes.
+	inline void					TrimUnusedPages(uint32 inUsedBytes);
+
 	/// Convert an offset published by a map to a pointer.
 	template <class T>
 	inline T *				FromOffset(uint32 inOffset) const;
@@ -42,6 +45,7 @@ private:
 	static constexpr uint32	cPageSize = 32 * 1024;
 	atomic<uint8 *> *		mPages = nullptr;
 	uint32					mNumPages = 0;
+	uint32						mResidentEndPage = 0;
 	uint32					mObjectStoreSizeBytes = 0;
 	uint32					mMaxEntrySizeBytes = 0;
 	alignas(JPH_CACHE_LINE_SIZE) Mutex mPageMutex;

@@ -71,10 +71,25 @@ inline uint8 *LFHMAllocator::AllocateEntry(uint32 inOffset, uint32 inSize)
 			page = reinterpret_cast<uint8 *>(AlignedAllocate(data_size + overflow, 16));
 			if (page == nullptr)
 				return nullptr;
+			mResidentEndPage = max(mResidentEndPage, page_index + 1);
 			slot.store(page, memory_order_release);
 		}
 	}
 	return page + (inOffset & (cPageSize - 1));
+}
+
+inline void LFHMAllocator::TrimUnusedPages(uint32 inUsedBytes)
+{
+	// Keep one spare page for small fluctuations and retire at most four
+	// pages per completed update when a dense contact set goes idle.
+	const uint32 keep = inUsedBytes == 0? 0 : (inUsedBytes - 1) / cPageSize + 2;
+	const uint32 end = max(keep, mResidentEndPage - min(mResidentEndPage, 4u));
+	while (mResidentEndPage > end)
+	{
+		atomic<uint8 *> &slot = mPages[--mResidentEndPage];
+		if (uint8 *page = slot.exchange(nullptr, memory_order_relaxed))
+			AlignedFree(page);
+	}
 }
 
 template <class T>

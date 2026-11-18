@@ -109,6 +109,9 @@ public:
 			: ValidateResult::AcceptAllContactsForThisBodyPair;
 	}
 
+	/// Trim the contact working set at a quiescent update boundary.
+	void						TrimConstraintStorage();
+
 	/// Sets up the constraint buffer. Should be called before starting collision detection.
 	void						PrepareConstraintBuffer(PhysicsUpdateContext *inContext);
 
@@ -196,23 +199,20 @@ public:
 	/// Get the number of contact constraints that were found
 	uint32						GetNumConstraints() const											{ return min<uint32>(uint32(mNumConstraintsAndNextConstraintOffset.load(memory_order_relaxed)), mMaxConstraints); }
 
-	/// Update constraint indices to constraint offsets
-	void						ConstraintIdxToConstraintOffset(uint32 *ioConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
-
 	/// Sort contact constraints deterministically
-	void						SortContacts(uint32 *ioConstraintOffsetBegin, uint32 *inConstraintOffsetEnd) const;
+	void						SortContacts(uint32 *ioConstraintOffsetBegin, uint32 *inContactIndexEnd) const;
 
 	/// Get the affected bodies for a given constraint
-	inline void					GetAffectedBodies(uint32 inConstraintOffset, const Body *&outBody1, const Body *&outBody2) const
+	inline void					GetAffectedBodies(uint32 inContactIndex, const Body *&outBody1, const Body *&outBody2) const
 	{
-		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + inConstraintOffset);
+		const ContactConstraintBase &constraint = *mContactRows[inContactIndex];
 		outBody1 = constraint.mBody1;
 		outBody2 = constraint.mBody2;
 	}
 
 	/// Apply last frame's impulses as an initial guess for this frame's impulses
 	template <class MotionPropertiesCallback>
-	void						WarmStartVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
+	void						WarmStartVelocityConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
 
 	/// Solve velocity constraints, when almost nothing changes this should only apply very small impulses
 	/// since we're warm starting with the total impulse applied in the last frame above.
@@ -244,10 +244,10 @@ public:
 	/// e = the restitution coefficient, v_n^- is the normal velocity prior to the collision
 	///
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
-	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolveVelocityConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd);
 
 	/// Save back the lambdas to the contact cache for the next warm start
-	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
+	void						StoreAppliedImpulses(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd) const;
 
 	/// Solve position constraints.
 	/// This is using the approach described in 'Modeling and Solving Constraints' by Erin Catto presented at GDC 2007.
@@ -265,7 +265,7 @@ public:
 	///
 	/// beta = baumgarte stabilization factor.
 	/// dt = delta time.
-	bool						SolvePositionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolvePositionConstraints(const uint32 *inContactIndexBegin, const uint32 *inContactIndexEnd);
 
 	/// Recycle the constraint buffer. Should be called between collision simulation steps.
 	void						RecycleConstraintBuffer();
@@ -600,9 +600,10 @@ private:
 	CombineFunction				mCombineRestitution = [](const Body &inBody1, const SubShapeID &, const Body &inBody2, const SubShapeID &) { return max(inBody1.GetRestitution(), inBody2.GetRestitution()); };
 
 	/// The constraints that were added this frame
-	uint8 *						mConstraints = nullptr; ///< Cast to ContactConstraint<MotionType1, MotionType2> depending on the motion types of the bodies in the constraint
-	uint32 *					mConstraintIdxToOffset = nullptr; ///< Maps from constraint index to offset in mConstraints
+	LFHMAllocator				mConstraintStorage; ///< Packed variable-size contacts. Allocate pages when narrow phase actually emits rows.
+	ContactConstraintBase **		mContactRows = nullptr; ///< Direct row pointers indexed by the contact IDs used to build islands.
 	uint32						mMaxConstraints = 0;
+	uint32						mMaxSubstepContactBytes = 0;
 	atomic<uint64>				mNumConstraintsAndNextConstraintOffset { 0 }; // Lower 32 bits: number of constraints, upper 32 bits next constraint offset
 
 	/// Context used for this physics update
