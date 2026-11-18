@@ -345,15 +345,17 @@ bool PhysicsSystem::HasCoupledImpact(const PhysicsUpdateContext &inContext, Body
 	return std::binary_search(impacts.begin(), impacts.end(), inBody);
 }
 
-bool PhysicsSystem::HasSweepVelocityRows(const PhysicsUpdateContext &inContext, BodyID inBody) const
+std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateContext &inContext, BodyID inBody) const
 {
 	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
 	const Body &body = mBodyManager.GetBody(inBody);
 	if (!body.IsDynamic() || !body.IsActive() || body.GetMotionProperties()->GetIndexInActiveBodiesInternal() >= step.mActiveBodyReadIdx.load(memory_order_relaxed))
-		return false;
+		return {};
 	const uint32 island = body.GetMotionProperties()->GetIslandIndexInternal();
 	uint32 *begin, *end;
-	return mIslandBuilder.GetConstraintsInIsland(island, begin, end) || mIslandBuilder.GetContactsInIsland(island, begin, end);
+	if (mIslandBuilder.GetConstraintsInIsland(island, begin, end) || mIslandBuilder.GetContactsInIsland(island, begin, end))
+		return island;
+	return {};
 }
 
 void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)

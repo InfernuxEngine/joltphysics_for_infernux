@@ -191,7 +191,7 @@ public:
 	Vec3						GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const;
 	std::optional<float>		GetCoupledImpactTime(const PhysicsUpdateContext &inContext) const;
 	bool						HasCoupledImpact(const PhysicsUpdateContext &inContext, BodyID inBody) const;
-	bool						HasSweepVelocityRows(const PhysicsUpdateContext &inContext, BodyID inBody) const;
+	std::optional<uint32>						GetSweepVelocityIsland(const PhysicsUpdateContext &inContext, BodyID inBody) const;
 	/// Advance to the chosen event and prepare motion for the remaining interval.
 	void						AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
 	/// Consume the shared continuous decision once, then yield at position projection or the next substep.

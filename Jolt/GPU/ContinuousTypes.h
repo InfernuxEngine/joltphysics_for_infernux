@@ -23,7 +23,8 @@ struct JPH_CCD_ALIGN ContinuousCpuBody
 struct JPH_CCD_ALIGN ContinuousSample
 {
     BodyState state;
-    JPH_CCD_FLOAT4 displacement; // Remaining translation xyz and earlier impact flag w.
+    float dx, dy, dz;
+    JPH_CCD_UINT islandAndImpact; // World-local event island in the high bits, earlier impact in bit zero.
 };
 struct JPH_CCD_ALIGN ContinuousMixedHit
 {
