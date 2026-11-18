@@ -467,7 +467,7 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 {
 	auto &impacts = step.mSweepImpacts;
 	auto &rows = step.mSweepContacts;
-	if (inFirstImpact == impacts.size() || (mConstraintManager.GetNumConstraints() == 0 && mContactManager.GetNumConstraints() == 0))
+	if (inFirstImpact == impacts.size() || (rows.empty() && mConstraintManager.GetNumConstraints() == 0 && mContactManager.GetNumConstraints() == 0))
 		return true;
 
 	Array<uint32> islands;
@@ -2963,11 +2963,20 @@ Vec3 PhysicsSystem::sSolveCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody
 		}
 	}
 	using Part = ContactConstraintPart<EMotionType::Dynamic, Type2>;
+	// The solver reads the inverse mass along the test direction. The actual
+	// impulse still uses the body's mass and projects its velocity onto the allowed axes.
+	const auto prepare_axis = [&](Part &part, Vec3Arg axis, float bias = 0.0f) {
+		const float linear1 = inv_m1 * mp1.LockTranslation(axis).LengthSq();
+		float linear2 = 0.0f;
+		if constexpr (Type2 == EMotionType::Dynamic)
+			linear2 = inv_m2 * ioBody2.GetMotionProperties()->LockTranslation(axis).LengthSq();
+		part.CalculateConstraintProperties(linear1, inv_i1, inArm1, linear2, inv_i2, inArm2, axis, bias);
+	};
 	const Vec3 n = row.mNormal;
 	const float previous = max(0.0f, row.mImpulse.Dot(n));
 	Part normal;
 	normal.SetTotalLambda(previous);
-	normal.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, n, row.mNormalBias);
+	prepare_axis(normal, n, row.mNormalBias);
 	if (inMeasuredMass > 0.0f)
 	{
 		const float speed = (v2 + w2.Cross(inArm2) - v1 - w1.Cross(inArm1)).Dot(n);
@@ -2979,6 +2988,9 @@ Vec3 PhysicsSystem::sSolveCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody
 
 	if (settings.mCombinedFriction > 0.0f)
 	{
+		v1 = mp1.LockTranslation(v1);
+		if constexpr (Type2 == EMotionType::Dynamic)
+			v2 = ioBody2.GetMotionProperties()->LockTranslation(v2);
 		const Vec3 relative = v2 + w2.Cross(inArm2) - v1 - w1.Cross(inArm1);
 		const Vec3 slip = relative - n * relative.Dot(n);
 		const Vec3 held = row.mImpulse - previous * n;
@@ -2989,8 +3001,8 @@ Vec3 PhysicsSystem::sSolveCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody
 			Part tx, ty;
 			tx.SetTotalLambda(held.Dot(x));
 			ty.SetTotalLambda(held.Dot(y));
-			tx.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, x);
-			ty.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, y);
+			prepare_axis(tx, x);
+			prepare_axis(ty, y);
 			float lx = tx.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, x);
 			float ly = ty.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, y);
 			const float bound = settings.mCombinedFriction * normal.GetTotalLambda();
@@ -3058,13 +3070,31 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 			if (num_impacts > 1)
 				temp_allocator->Free(sorted_ccd_bodies, num_impacts * sizeof(CCDBody *));
 		});
+		Array<BodyID> shared_ends;
 		if (num_impacts > 1)
 		{
 			JPH_PROFILE("Sort");
 			uint32 next = 0;
+			shared_ends.reserve(2 * size_t(num_impacts));
 			for (uint32 i = 0; i < num_ccd_bodies; ++i)
 				if (auto &body = ioStep->GetCCD(i); accepted(body))
+				{
 					sorted_ccd_bodies[next++] = &body;
+					for (BodyID id : {body.mBodyID1, body.mBodyID2})
+						if (mBodyManager.GetBody(id).IsDynamic())
+							shared_ends.push_back(id);
+				}
+			QuickSort(shared_ends.begin(), shared_ends.end());
+			size_t count = 0;
+			for (size_t i = 0; i < shared_ends.size();)
+			{
+				const size_t start = i++;
+				while (i < shared_ends.size() && shared_ends[i] == shared_ends[start])
+					++i;
+				if (i - start > 1)
+					shared_ends[count++] = shared_ends[start];
+			}
+			shared_ends.resize(count);
 
 			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_impacts, [](const CCDBody *inBody1, const CCDBody *inBody2)
 				{
@@ -3166,12 +3196,19 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 								continue;
 							}
 						}
-						row.mImpulse = sApplyCCDContact(body1, r1_plus_u, body2, r2, row, 0.0f);
-						row.mLastImpulse = row.mImpulse.Dot(row.mNormal);
+						// When arrivals share a moving end, capture every restitution target
+						// before the first row is allowed to change its velocity.
+						const bool simultaneous = std::binary_search(shared_ends.begin(), shared_ends.end(), row.mBody1)
+							|| std::binary_search(shared_ends.begin(), shared_ends.end(), row.mBody2);
+						if (!simultaneous)
+						{
+							row.mImpulse = sApplyCCDContact(body1, r1_plus_u, body2, r2, row, 0.0f);
+							row.mLastImpulse = row.mImpulse.Dot(row.mNormal);
+						}
 						ioStep->mSweepImpacts.push_back(body1.GetID());
 						if (body2.IsDynamic())
 							ioStep->mSweepImpacts.push_back(body2.GetID());
-						if (GetSweepVelocityIsland(*ioStep, body1) || GetSweepVelocityIsland(*ioStep, body2))
+						if (simultaneous || GetSweepVelocityIsland(*ioStep, body1) || GetSweepVelocityIsland(*ioStep, body2))
 							ioStep->mSweepContacts.push_back(row);
 						else if (auto *listener = ioContext->mContactReportListener)
 							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, row.mShape1, body2, row.mShape2,
