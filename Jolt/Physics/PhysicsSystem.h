@@ -321,6 +321,7 @@ public:
 
 private:
 	using CCDBody = PhysicsUpdateContext::Step::CCDBody;
+	using SweepContact = PhysicsUpdateContext::Step::SweepContact;
 
 	bool						PrepareUpdate(float inDeltaTime, int inCollisionSteps, PhysicsUpdateContext &ioContext, JobSystem *inJobSystem);
 	EPhysicsUpdateError			FinishUpdate(PhysicsUpdateContext &ioContext);
@@ -343,7 +344,9 @@ private:
 	void						CaptureCCDSource(PhysicsUpdateContext::Step *ioStep, const Body &inBody, uint32 inActiveIndex, Vec3Arg inDisplacement, float inMinTravel);
 	void						BuildCCDMotionBounds(PhysicsUpdateContext::Step *ioStep) const;
 	void						AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
-	void						SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, size_t inFirstImpact);
+	std::optional<uint32>		GetSweepVelocityIsland(const PhysicsUpdateContext::Step &inStep, const Body &inBody) const;
+	void						PublishSweepContacts(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep);
+	bool						SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, size_t inFirstImpact);
 	void						ResolveCCDVelocities(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, float inEventFraction);
 	void						MoveCCDPositions(PhysicsUpdateContext::Step *ioStep, std::optional<float> inEventFraction = {});
 	void						ReleaseCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
@@ -379,7 +382,8 @@ private:
 
 	/// Helper function that solves the velocity of a CCD contact
 	template <EMotionType Type2>
-	static void					sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings, Vec3 *outImpulse);
+	static Vec3					sSolveCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody2, Vec3Arg inArm2, const SweepContact &inContact, float inMeasuredMass);
+	static Vec3					sApplyCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody2, Vec3Arg inArm2, const SweepContact &inContact, float inMeasuredMass);
 
 	/// Number of constraints to process at once in JobDetermineActiveConstraints
 	static constexpr int		cDetermineActiveConstraintsBatchSize = 64;

@@ -119,6 +119,22 @@ public:
 		uint32				mCCDBodiesCapacity = 0;									///< Capacity of the mCCDBodies list
 		atomic<uint32>		mNumCCDBodies = 0;										///< Number of CCD bodies in mCCDBodies
 		Array<CCDBody>		mDormantCCDBodies;										///< Relevant sleeping cast sources, ordered by body ID
+		// Only contacts with a velocity constraint at the impact instant need
+		// an accumulator beyond the initial cast. The next positive advance retires them.
+		struct SweepContact
+		{
+			BodyID mBody1, mBody2;
+			SubShapeID mShape1, mShape2;
+			RVec3 mPoint;
+			Vec3 mNormal, mIncoming, mImpulse;
+			ContactSettings mSettings;
+			float mNormalBias, mLastSpeed, mLastImpulse;
+			SubShapeIDPair Key() const
+			{
+				return mBody1 < mBody2? SubShapeIDPair(mBody1, mShape1, mBody2, mShape2) : SubShapeIDPair(mBody2, mShape2, mBody1, mShape1);
+			}
+		};
+		Array<SweepContact>	mSweepContacts;
 		Array<BodyID>		mSweepImpacts;											///< Dynamic endpoints hit earlier in this substep
 		float				mSweepRemaining = 0.0f;									///< Duration of the recast trajectories
 		bool				mCheckDormantCCD = false;								///< The world may have sleeping continuous targets for this step

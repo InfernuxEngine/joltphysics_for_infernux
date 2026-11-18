@@ -347,8 +347,11 @@ bool PhysicsSystem::HasCoupledImpact(const PhysicsUpdateContext &inContext, Body
 
 std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateContext &inContext, BodyID inBody) const
 {
-	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
-	const Body &body = mBodyManager.GetBody(inBody);
+	return GetSweepVelocityIsland(inContext.mSteps[inContext.mCoupledSubstep], mBodyManager.GetBody(inBody));
+}
+
+std::optional<uint32> PhysicsSystem::GetSweepVelocityIsland(const PhysicsUpdateContext::Step &step, const Body &body) const
+{
 	if (!body.IsDynamic() || !body.IsActive() || body.GetMotionProperties()->GetIndexInActiveBodiesInternal() >= step.mActiveBodyReadIdx.load(memory_order_relaxed))
 		return {};
 	const uint32 island = body.GetMotionProperties()->GetIslandIndexInternal();
@@ -365,56 +368,141 @@ void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float i
 	AdvanceSweep(ioContext, ioContext.mSteps[ioContext.mCoupledSubstep], inFraction, inRemainingTime, inImpulses, inImpulseCount);
 }
 
-// A hit changes the velocities used by the existing joints and supporting contacts.
-// Reuse their substep accumulators before advancing any body along the next interval.
-void PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, size_t inFirstImpact)
+void PhysicsSystem::PublishSweepContacts(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &step)
 {
-	auto &impacts = ioStep.mSweepImpacts;
-	if (inFirstImpact == impacts.size() || (ioStep.mNumActiveConstraints.load(memory_order_relaxed) == 0 && mContactManager.GetNumConstraints() == 0))
-		return;
+	if (auto *listener = ioContext.mContactReportListener)
+		for (const SweepContact &row : step.mSweepContacts)
+			listener->OnCCDContactSolved(uint32(&step - ioContext.mSteps.data()), mBodyManager.GetBody(row.mBody1), row.mShape1,
+				mBodyManager.GetBody(row.mBody2), row.mShape2, row.mPoint, row.mNormal, row.mIncoming, ioContext.mReportContactImpulses? row.mImpulse : Vec3::sZero());
+	step.mSweepContacts.clear();
+}
+
+// Reuse the ordinary substep's joint/contact accumulators at the event pose.
+bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &step, size_t inFirstImpact)
+{
+	auto &impacts = step.mSweepImpacts;
+	auto &rows = step.mSweepContacts;
+	if (inFirstImpact == impacts.size() || (step.mNumActiveConstraints.load(memory_order_relaxed) == 0 && mContactManager.GetNumConstraints() == 0))
+		return true;
 
 	Array<uint32> islands;
-	const uint32 resident = ioStep.mActiveBodyReadIdx.load(memory_order_relaxed);
 	for (size_t i = inFirstImpact; i < impacts.size(); ++i)
-	{
-		const auto *motion = mBodyManager.GetBody(impacts[i]).GetMotionProperties();
-		// Bodies woken by this hit enter the ordinary island builder on the next substep.
-		if (motion->GetIndexInActiveBodiesInternal() < resident)
-			islands.push_back(motion->GetIslandIndexInternal());
-	}
+		if (auto island = GetSweepVelocityIsland(step, mBodyManager.GetBody(impacts[i])))
+			islands.push_back(*island);
+	for (const auto &row : rows)
+		for (BodyID id : {row.mBody1, row.mBody2})
+			if (auto island = GetSweepVelocityIsland(step, mBodyManager.GetBody(id)))
+				islands.push_back(*island);
 	QuickSort(islands.begin(), islands.end());
 	islands.erase(std::unique(islands.begin(), islands.end()), islands.end());
+
+	struct LocalIsland
+	{
+		uint32 mIndex, mSteps;
+		uint32 *mJointsBegin, *mJointsEnd, *mContactsBegin, *mContactsEnd;
+		bool mChanged;
+	};
+	Array<LocalIsland> local;
 	for (uint32 island : islands)
 	{
-		uint32 *constraints_begin, *constraints_end, *contacts_begin, *contacts_end;
-		const bool joints = mIslandBuilder.GetConstraintsInIsland(island, constraints_begin, constraints_end);
-		const bool contacts = mIslandBuilder.GetContactsInIsland(island, contacts_begin, contacts_end);
-		if (!joints && !contacts)
-			continue;
-		bool changed = false;
-		for (uint iteration = 0; iteration < mPhysicsSettings.mNumVelocitySteps; ++iteration)
+		LocalIsland group{island};
+		mIslandBuilder.GetConstraintsInIsland(island, group.mJointsBegin, group.mJointsEnd);
+		mIslandBuilder.GetContactsInIsland(island, group.mContactsBegin, group.mContactsEnd);
+		CalculateSolverSteps steps(mPhysicsSettings);
+		for (auto j = group.mJointsBegin; j != group.mJointsEnd; ++j)
+			steps(ioContext.mActiveConstraints[*j]);
+		BodyID *begin, *end;
+		mIslandBuilder.GetBodiesInIsland(island, begin, end);
+		for (auto body = begin; body != end; ++body)
+			steps(mBodyManager.GetBody(*body).GetMotionProperties());
+		steps.Finalize();
+		group.mSteps = steps.GetNumVelocitySteps();
+		local.push_back(group);
+	}
+	// Restitution uses the velocity on arrival, even when a heavy connected
+	// body takes up the first impulse. Only independent normal rows may infer
+	// the constrained effective mass from the preceding velocity change.
+	const auto group_key = [&](BodyID id) -> uint64 {
+		auto &body = mBodyManager.GetBody(id);
+		if (!body.IsDynamic()) return UINT64_MAX;
+		if (auto island = GetSweepVelocityIsland(step, body)) return *island;
+		return (uint64(1) << 32) + id.GetIndexAndSequenceNumber();
+	};
+	Array<uint64> groups;
+	if (rows.size() > 1)
+	{
+		for (auto &row : rows)
+			for (BodyID id : {row.mBody1, row.mBody2})
+				if (const uint64 key = group_key(id); key != UINT64_MAX)
+					groups.push_back(key);
+		QuickSort(groups.begin(), groups.end());
+	}
+	const auto single = [&](BodyID id) {
+		const uint64 key = group_key(id);
+		if (key == UINT64_MAX || groups.empty()) return true;
+		const auto hits = std::equal_range(groups.begin(), groups.end(), key);
+		return hits.second - hits.first == 1;
+	};
+	const float tolerance = cDefaultCollisionTolerance / ioContext.mStepDeltaTime;
+	uint64 rounds = 0;
+	for (;;)
+	{
+		for (auto &group : local)
+			for (uint iteration = 0; iteration < group.mSteps; ++iteration)
+			{
+				bool applied = ConstraintManager::sSolveVelocityConstraints(ioContext.mActiveConstraints, group.mJointsBegin, group.mJointsEnd, ioContext.mStepDeltaTime);
+				applied |= mContactManager.SolveVelocityConstraints(group.mContactsBegin, group.mContactsEnd);
+				if (!applied) break;
+				group.mChanged = true;
+			}
+		bool corrected = false;
+		for (auto &row : rows)
 		{
-			bool applied = ConstraintManager::sSolveVelocityConstraints(ioContext.mActiveConstraints, constraints_begin, constraints_end, ioContext.mStepDeltaTime);
-			applied |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
-			if (!applied)
-				break;
-			changed = true;
+			Body &a = mBodyManager.GetBody(row.mBody1), &b = mBodyManager.GetBody(row.mBody2);
+			const Vec3 ra(row.mPoint - a.GetCenterOfMassPosition()), rb(row.mPoint - b.GetCenterOfMassPosition());
+			const Vec3 relative = b.GetPointVelocityCOM(rb) - a.GetPointVelocityCOM(ra);
+			const float speed = relative.Dot(row.mNormal), total = row.mImpulse.Dot(row.mNormal);
+			const Vec3 tangent = row.mImpulse - total * row.mNormal, slip = relative - speed * row.mNormal;
+			const bool sliding = slip.LengthSq() > Square(tolerance);
+			const float bound = row.mSettings.mCombinedFriction * total;
+			const float error = speed + row.mNormalBias;
+			if (error >= -tolerance && (total <= 0.0f || error <= tolerance)
+				&& (!sliding || bound <= 0.0f || -tangent.Dot(slip.Normalized()) >= bound * (1.0f - 1.0e-5f)))
+				continue;
+			const float change = speed - row.mLastSpeed;
+			const bool normal_only = row.mSettings.mCombinedFriction == 0.0f || (!sliding && tangent.LengthSq() <= Square(1.0e-5f * total));
+			const float mass = normal_only && row.mLastImpulse * change > 0.0f && single(row.mBody1) && single(row.mBody2)? row.mLastImpulse / change : 0.0f;
+			const Vec3 impulse = sApplyCCDContact(a, ra, b, rb, row, mass);
+			row.mLastImpulse = (impulse - row.mImpulse).Dot(row.mNormal);
+			row.mLastSpeed = speed;
+			row.mImpulse = impulse;
+			corrected = true;
 		}
-		if (changed)
+		if (!corrected) break;
+		if (++rounds > 64 + 4 * uint64(impacts.size() + rows.size()))
 		{
-			if (contacts)
-				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+			ioContext.mErrors.fetch_or(uint32(EPhysicsUpdateError::ContinuousMotionDidNotConverge));
+			return false;
+		}
+	}
+	for (const auto &group : local)
+		if (group.mChanged)
+		{
+			if (group.mContactsBegin != group.mContactsEnd)
+				mContactManager.StoreAppliedImpulses(group.mContactsBegin, group.mContactsEnd);
 			BodyID *begin, *end;
-			mIslandBuilder.GetBodiesInIsland(island, begin, end);
+			mIslandBuilder.GetBodiesInIsland(group.mIndex, begin, end);
 			for (auto body = begin; body != end; ++body)
 				if (mBodyManager.GetBody(*body).IsDynamic())
 					impacts.push_back(*body);
 		}
-	}
+	return true;
 }
 
 void PhysicsSystem::AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &step, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
 {
+	if (inFraction > 0.0f)
+		PublishSweepContacts(ioContext, step);
 	const size_t first_impact = step.mSweepImpacts.size();
 	ResolveCCDVelocities(&ioContext, &step, inFraction);
 	MoveCCDPositions(&step, inFraction);
@@ -434,7 +522,8 @@ void PhysicsSystem::AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateC
 			mBodyManager.ActivateBodies(&impulse.mBody, 1);
 	}
 
-	SolveSweepIslandConstraints(ioContext, step, first_impact);
+	if (!SolveSweepIslandConstraints(ioContext, step, first_impact))
+		return;
 	auto &impacts = step.mSweepImpacts;
 	// Limit physical velocities after the connected mass has taken its impulse.
 	for (size_t i = first_impact; i < impacts.size(); ++i)
@@ -2717,79 +2806,87 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 }
 
 template <EMotionType Type2>
-void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inInvI1, Vec3Arg inR1PlusU, Body &ioBody2, Vec3Arg inR2, Vec3Arg inContactNormal, float inNormalVelocityBias, Vec3Arg inFrictionDirection, const ContactSettings &inContactSettings, Vec3 *outImpulse)
+Vec3 PhysicsSystem::sSolveCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody2, Vec3Arg inArm2, const SweepContact &row, float inMeasuredMass)
 {
-	MotionProperties *body_mp = ioBody1.GetMotionProperties();
-
-	// Get inverse mass of body 2
-	float inv_m2;
-	Mat44 inv_i2;
-	if constexpr (Type2 == EMotionType::Dynamic)
-	{
-		inv_m2 = inContactSettings.mInvMassScale2 * ioBody2.GetMotionPropertiesUnchecked()->GetInverseMassUnchecked();
-		inv_i2 = inContactSettings.mInvInertiaScale2 * ioBody2.GetInverseInertia();
-	}
-	else
-	{
-		inv_m2 = 0.0f;
-		inv_i2 = Mat44::sZero();
-	}
-
-	// Get velocities
-	Vec3 linear_velocity1 = body_mp->GetLinearVelocity();
-	Vec3 angular_velocity1 = body_mp->GetAngularVelocity();
-	Vec3 linear_velocity2, angular_velocity2;
+	const auto &settings = row.mSettings;
+	MotionProperties &mp1 = *ioBody1.GetMotionProperties();
+	const float inv_m1 = settings.mInvMassScale1 * mp1.GetInverseMass();
+	const Mat44 inv_i1 = settings.mInvInertiaScale1 * ioBody1.GetInverseInertia();
+	float inv_m2 = 0.0f;
+	Mat44 inv_i2 = Mat44::sZero();
+	Vec3 v1 = mp1.GetLinearVelocity(), w1 = mp1.GetAngularVelocity();
+	Vec3 v2 = Vec3::sZero(), w2 = Vec3::sZero();
 	if constexpr (Type2 != EMotionType::Static)
 	{
-		const MotionProperties *body2_mp = ioBody2.GetMotionPropertiesUnchecked();
-		linear_velocity2 = body2_mp->GetLinearVelocity();
-		angular_velocity2 = body2_mp->GetAngularVelocity();
-	}
-	else
-	{
-		linear_velocity2 = Vec3::sZero();
-		angular_velocity2 = Vec3::sZero();
-	}
-
-	// Solve contact constraint
-	ContactConstraintPart<EMotionType::Dynamic, EMotionType::Dynamic> contact_constraint;
-	contact_constraint.SetTotalLambda(0.0f);
-	contact_constraint.CalculateConstraintProperties(inInvM1, inInvI1, inR1PlusU, inv_m2, inv_i2, inR2, inContactNormal, inNormalVelocityBias);
-	contact_constraint.SolveVelocityConstraint(linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, inInvM1, inv_m2, inContactNormal, -FLT_MAX, FLT_MAX);
-	if (outImpulse != nullptr)
-		*outImpulse = contact_constraint.GetTotalLambda() * inContactNormal;
-
-	// Apply friction
-	if (inContactSettings.mCombinedFriction > 0.0f)
-	{
-		// Calculate friction direction by removing normal velocity from the relative velocity
-		float friction_direction_len_sq = inFrictionDirection.LengthSq();
-		if (friction_direction_len_sq > 1.0e-12f)
+		const auto &mp2 = *ioBody2.GetMotionPropertiesUnchecked();
+		v2 = mp2.GetLinearVelocity();
+		w2 = mp2.GetAngularVelocity();
+		if constexpr (Type2 == EMotionType::Dynamic)
 		{
-			// Normalize friction direction
-			Vec3 friction_direction = inFrictionDirection / Sqrt(friction_direction_len_sq);
-
-			// Calculate max friction impulse
-			float max_lambda_f = inContactSettings.mCombinedFriction * contact_constraint.GetTotalLambda();
-
-			ContactConstraintPart<EMotionType::Dynamic, EMotionType::Dynamic> friction;
-			friction.SetTotalLambda(0.0f);
-			friction.CalculateConstraintProperties(inInvM1, inInvI1, inR1PlusU, inv_m2, inv_i2, inR2, friction_direction, 0.0f);
-			friction.SolveVelocityConstraint(linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, inInvM1, inv_m2, friction_direction, -max_lambda_f, max_lambda_f);
-			if (outImpulse != nullptr)
-				*outImpulse += friction.GetTotalLambda() * friction_direction;
+			inv_m2 = settings.mInvMassScale2 * mp2.GetInverseMassUnchecked();
+			inv_i2 = settings.mInvInertiaScale2 * ioBody2.GetInverseInertia();
 		}
 	}
-
-	// Write back velocities
-	body_mp->SetLinearVelocityClamped(linear_velocity1);
-	body_mp->SetAngularVelocityClamped(angular_velocity1);
-	if constexpr (Type2 != EMotionType::Static)
+	using Part = ContactConstraintPart<EMotionType::Dynamic, Type2>;
+	const Vec3 n = row.mNormal;
+	const float previous = max(0.0f, row.mImpulse.Dot(n));
+	Part normal;
+	normal.SetTotalLambda(previous);
+	normal.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, n, row.mNormalBias);
+	if (inMeasuredMass > 0.0f)
 	{
-		MotionProperties *body2_mp = ioBody2.GetMotionProperties();
-		body2_mp->SetLinearVelocityClamped(linear_velocity2);
-		body2_mp->SetAngularVelocityClamped(angular_velocity2);
+		const float speed = (v2 + w2.Cross(inArm2) - v1 - w1.Cross(inArm1)).Dot(n);
+		normal.SolveVelocityConstraintApplyLambda(v1, w1, v2, w2, inv_m1, inv_m2, n, max(0.0f, previous - inMeasuredMass * (speed + row.mNormalBias)));
 	}
+	else
+		normal.SolveVelocityConstraint(v1, w1, v2, w2, inv_m1, inv_m2, n, 0.0f, FLT_MAX);
+	Vec3 impulse = normal.GetTotalLambda() * n;
+
+	if (settings.mCombinedFriction > 0.0f)
+	{
+		const Vec3 relative = v2 + w2.Cross(inArm2) - v1 - w1.Cross(inArm1);
+		const Vec3 slip = relative - n * relative.Dot(n);
+		const Vec3 held = row.mImpulse - previous * n;
+		if (slip.LengthSq() > 1.0e-12f || held.LengthSq() > 0.0f)
+		{
+			// Use both tangents so changing slip direction preserves the old impulse.
+			const Vec3 x = slip.NormalizedOr(n.GetNormalizedPerpendicular()), y = n.Cross(x);
+			Part tx, ty;
+			tx.SetTotalLambda(held.Dot(x));
+			ty.SetTotalLambda(held.Dot(y));
+			tx.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, x);
+			ty.CalculateConstraintProperties(inv_m1, inv_i1, inArm1, inv_m2, inv_i2, inArm2, y);
+			float lx = tx.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, x);
+			float ly = ty.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, y);
+			const float bound = settings.mCombinedFriction * normal.GetTotalLambda();
+			const float length_sq = Square(lx) + Square(ly);
+			if (length_sq > Square(bound))
+			{
+				const float scale = bound / Sqrt(length_sq);
+				lx *= scale;
+				ly *= scale;
+			}
+			tx.SolveVelocityConstraintApplyLambda(v1, w1, v2, w2, inv_m1, inv_m2, x, lx);
+			ty.SolveVelocityConstraintApplyLambda(v1, w1, v2, w2, inv_m1, inv_m2, y, ly);
+			impulse += lx * x + ly * y;
+		}
+	}
+	mp1.ApplyLinearVelocityStep(v1);
+	mp1.ApplyAngularVelocityStep(mp1.LockAngular(w1));
+	if constexpr (Type2 == EMotionType::Dynamic)
+	{
+		auto &mp2 = *ioBody2.GetMotionPropertiesUnchecked();
+		mp2.ApplyLinearVelocityStep(v2);
+		mp2.ApplyAngularVelocityStep(mp2.LockAngular(w2));
+	}
+	return impulse;
+}
+
+Vec3 PhysicsSystem::sApplyCCDContact(Body &ioBody1, Vec3Arg inArm1, Body &ioBody2, Vec3Arg inArm2, const SweepContact &inContact, float inMeasuredMass)
+{
+	using Solve = Vec3 (*)(Body &, Vec3Arg, Body &, Vec3Arg, const SweepContact &, float);
+	static constexpr Solve solve[] = {sSolveCCDContact<EMotionType::Static>, sSolveCCDContact<EMotionType::Kinematic>, sSolveCCDContact<EMotionType::Dynamic>};
+	return solve[int(ioBody2.GetMotionType())](ioBody1, inArm1, ioBody2, inArm2, inContact, inMeasuredMass);
 }
 
 void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, float inEventFraction)
@@ -2812,6 +2909,7 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 	};
 	CCDBody *single = nullptr;
 	uint32 num_impacts = 0;
+	const size_t held = ioStep->mSweepContacts.size();
 	for (uint32 i = 0; i < num_ccd_bodies; ++i)
 		if (auto &body = ioStep->GetCCD(i); accepted(body))
 		{
@@ -2903,10 +3001,6 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 					Vec3 r1_plus_u = Vec3(ccd_body->mContactPointOn2 - (body1.GetCenterOfMassPosition() + ccd_body->mFraction * ccd_body->mDeltaPosition));
 					Vec3 v1 = body1.GetPointVelocityCOM(r1_plus_u);
 
-					// Calculate inverse mass for body 1
-					float inv_m1 = contact_settings.mInvMassScale1 * body_mp->GetInverseMass();
-					Mat44 inv_i1 = contact_settings.mInvInertiaScale1 * body1.GetInverseInertia();
-
 					if (body2.IsRigidBody())
 					{
 						// Calculate contact point velocity for body 2
@@ -2924,28 +3018,36 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 						else
 							normal_velocity_bias = 0.0f;
 
-						// Calculate direction in which the friction operates
-						Vec3 friction_direction = relative_velocity - normal_velocity * ccd_body->mContactNormal;
-
-						// Dispatch to the correct form
-						using DispatchFunc = void (*)(Body &, float, Mat44Arg, Vec3Arg, Body &, Vec3Arg, Vec3Arg, float, Vec3Arg, const ContactSettings &, Vec3 *);
-						static const DispatchFunc table[3] = {
-							sSolveCCDContact<EMotionType::Static>,
-							sSolveCCDContact<EMotionType::Kinematic>,
-							sSolveCCDContact<EMotionType::Dynamic>
-						};
-						ContactListener *listener = ioContext->mContactReportListener;
-						Vec3 impulse = Vec3::sZero();
-						table[(int)body2.GetMotionType()](body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body->mContactNormal, normal_velocity_bias, friction_direction, contact_settings, ioContext->mReportContactImpulses? &impulse : nullptr);
+						SweepContact row{body1.GetID(), body2.GetID(), ccd_body->mSubShapeID1, ccd_body->mSubShapeID2,
+							ccd_body->mContactPointOn2, ccd_body->mContactNormal, relative_velocity, Vec3::sZero(), contact_settings, normal_velocity_bias, normal_velocity, 0.0f};
+						if (held)
+						{
+							const auto key = row.Key();
+							const auto begin = ioStep->mSweepContacts.begin(), end = begin + held;
+							const auto same = std::lower_bound(begin, end, key, [](const SweepContact &c, const auto &k) { return c.Key() < k; });
+							if (same != end && same->Key() == key)
+							{
+								ioStep->mSweepImpacts.push_back(body1.GetID());
+								continue;
+							}
+						}
+						row.mImpulse = sApplyCCDContact(body1, r1_plus_u, body2, r2, row, 0.0f);
+						row.mLastImpulse = row.mImpulse.Dot(row.mNormal);
 						ioStep->mSweepImpacts.push_back(body1.GetID());
 						if (body2.IsDynamic())
 							ioStep->mSweepImpacts.push_back(body2.GetID());
-						if (listener != nullptr)
-							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, ccd_body->mSubShapeID1,
-								body2, ccd_body->mSubShapeID2, ccd_body->mContactPointOn2, ccd_body->mContactNormal, relative_velocity, impulse);
+						if (GetSweepVelocityIsland(*ioStep, body1) || GetSweepVelocityIsland(*ioStep, body2))
+							ioStep->mSweepContacts.push_back(row);
+						else if (auto *listener = ioContext->mContactReportListener)
+							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, row.mShape1, body2, row.mShape2,
+								row.mPoint, row.mNormal, row.mIncoming, ioContext->mReportContactImpulses? row.mImpulse : Vec3::sZero());
 					}
 					else
 					{
+						// Calculate inverse mass for body 1
+						float inv_m1 = contact_settings.mInvMassScale1 * body_mp->GetInverseMass();
+						Mat44 inv_i1 = contact_settings.mInvInertiaScale1 * body1.GetInverseInertia();
+
 						SoftBodyMotionProperties *soft_mp = static_cast<SoftBodyMotionProperties *>(body2.GetMotionProperties());
 						const SoftBodyShape *soft_shape = static_cast<const SoftBodyShape *>(body2.GetShape());
 
@@ -3045,6 +3147,8 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 
 	}
 
+	if (ioStep->mSweepContacts.size() > held && ioStep->mSweepContacts.size() > 1)
+		QuickSort(ioStep->mSweepContacts.begin(), ioStep->mSweepContacts.end(), [](const SweepContact &a, const SweepContact &b) { return a.Key() < b.Key(); });
 }
 
 void PhysicsSystem::MoveCCDPositions(PhysicsUpdateContext::Step *ioStep, std::optional<float> inEventFraction)
@@ -3113,6 +3217,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 		AdvanceSweep(*ioContext, *ioStep, *fraction, next, nullptr, 0);
 		remaining = next;
 	}
+	PublishSweepContacts(*ioContext, *ioStep);
 	MoveCCDPositions(ioStep);
 	ReleaseCCDWorkspace(ioContext, ioStep);
 }
