@@ -784,13 +784,16 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     uint patch_index = candidate_base + candidate_ordinal; // WORD address.
     uint slot = candidate_ordinal * MaxContactPointsPerPair; // CONTACT ordinal.
     ContactPatch patch = contact_patches[patch_index];
-    Contact empty;
-    empty.meta = uint4(0u);
-    empty.normalDepth = empty.localAnchorA = empty.localAnchorB = empty.impulse = float4(0.0f);
-    for (uint point = 0u; point < MaxContactPointsPerPair; ++point) contacts[slot + point] = empty;
     if (patch.leaves.w != step_params.selection.x
         || !jph_selected_range(patch.leaves.x, step_params.selection.z, step_params.selectedCounts.y)
-        || !jph_selected_range(patch.leaves.y, step_params.selection.z, step_params.selectedCounts.y)) return;
+        || !jph_selected_range(patch.leaves.y, step_params.selection.z, step_params.selectedCounts.y))
+    {
+        Contact empty;
+        empty.meta = uint4(0u);
+        empty.normalDepth = empty.localAnchorA = empty.localAnchorB = empty.impulse = float4(0.0f);
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point) contacts[slot + point] = empty;
+        return;
+    }
     ShapeModel shape_a = shape_models[patch.leaves.x];
     ShapeModel shape_b = shape_models[patch.leaves.y];
     uint a = shape_a.meta.y;
@@ -826,31 +829,30 @@ void narrowphase_candidates(uint3 tid : SV_DispatchThreadID)
     // consume this initialized prefix until every persistent slot completes.
     if (shape_a.meta.x > ShapeCapsule || shape_b.meta.x > ShapeCapsule)
         return;
-    if ((shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox) ||
-        shape_a.meta.x == ShapeCapsule || shape_b.meta.x == ShapeCapsule)
+    bool box_pair = shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox;
+    if (box_pair || shape_a.meta.x == ShapeCapsule || shape_b.meta.x == ShapeCapsule)
     {
         JphBoxManifold manifold;
-        bool flip = false;
-        if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeBox)
+        bool flip = shape_b.meta.x == ShapeCapsule && shape_a.meta.x != ShapeCapsule;
+        if (box_pair)
             manifold = jph_box_box(ca, qa, ga, cb, qb, gb, speculative_distance);
         else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeCapsule)
             manifold = jph_capsule_capsule(ca, qa, ga.y, ga.w, cb, qb, gb.y, gb.w, speculative_distance);
-        else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeSphere)
-            manifold = jph_capsule_sphere(ca, qa, ga.y, ga.w, cb, gb.w, speculative_distance);
-        else if (shape_a.meta.x == ShapeSphere && shape_b.meta.x == ShapeCapsule)
-        {
-            manifold = jph_capsule_sphere(cb, qb, gb.y, gb.w, ca, ga.w, speculative_distance);
-            flip = true;
-        }
-        else if (shape_a.meta.x == ShapeCapsule && shape_b.meta.x == ShapeBox)
-            manifold = jph_capsule_box(ca, qa, ga.y, ga.w, cb, qb, gb, speculative_distance);
-        else if (shape_a.meta.x == ShapeBox && shape_b.meta.x == ShapeCapsule)
-        {
-            manifold = jph_capsule_box(cb, qb, gb.y, gb.w, ca, qa, ga, speculative_distance);
-            flip = true;
-        }
         else
-            return; // Unsupported leaf kinds are rejected at author admission.
+        {
+            // Mixed manifolds are generated capsule-first and published in original A/B order.
+            float3 capsule_center = flip ? cb : ca;
+            float4 capsule_rotation = flip ? qb : qa;
+            float4 capsule_geometry = flip ? gb : ga;
+            float3 other_center = flip ? ca : cb;
+            float4 other_geometry = flip ? ga : gb;
+            if (shape_a.meta.x == ShapeSphere || shape_b.meta.x == ShapeSphere)
+                manifold = jph_capsule_sphere(capsule_center, capsule_rotation, capsule_geometry.y, capsule_geometry.w,
+                                              other_center, other_geometry.w, speculative_distance);
+            else
+                manifold = jph_capsule_box(capsule_center, capsule_rotation, capsule_geometry.y, capsule_geometry.w,
+                                           other_center, flip ? qa : qb, other_geometry, speculative_distance);
+        }
         if (manifold.count == 0u)
             return;
         if (flip)
