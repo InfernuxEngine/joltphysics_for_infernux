@@ -292,17 +292,88 @@ std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(P
 	return std::nullopt;
 }
 
-std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext)
+void PhysicsSystem::PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, bool inRetainMotion)
 {
 	using Stage = PhysicsUpdateContext::ECoupledStage;
 	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Integration);
 	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
+	ioContext.mCoupledRetainMotion = inRetainMotion;
+	step.mPreIntegrateVelocity.RemoveDependency();
+	JPH_ASSERT(step.mPostIntegrateVelocity.IsDone() && !step.mResolveCCDContacts.IsDone());
+	ioContext.mCoupledStage = Stage::Continuous;
+}
+
+Array<PhysicsSystem::CoupledContinuousContact> PhysicsSystem::GetCoupledContinuousContacts(const PhysicsUpdateContext &inContext) const
+{
+	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
+	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
+	Array<CoupledContinuousContact> contacts;
+	for (uint32 i = 0; i < step.mNumCCDBodies; ++i)
+	{
+		const auto &body = step.mCCDBodies[i];
+		if (!body.mBodyID2.IsInvalid())
+			contacts.push_back({body.mBodyID1, body.mBodyID2, body.mFraction, body.mFractionPlusSlop});
+	}
+	return contacts;
+}
+
+Vec3 PhysicsSystem::GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const
+{
+	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
+	JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::Read);)
+	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
+	const auto &body = mBodyManager.GetBody(inBody);
+	if (body.IsRigidBody() && !body.IsStatic())
+	{
+		uint32 index = body.GetMotionProperties()->GetIndexInActiveBodiesInternal();
+		if (index < step.mNumActiveBodyToCCDBody)
+			return Vec3(step.mBodyMotions[index].mDeltaPosition);
+	}
+	return Vec3::sZero();
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, const CoupledContinuousUpdate *inUpdates, uint32 inUpdateCount)
+{
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Continuous);
+	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
+	{
+		JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::ReadWrite);)
+		JPH_IF_ENABLE_ASSERTS(BodyManager::GrantActiveBodiesAccess grant_active(true, false);)
+		for (uint32 i = 0; i < inUpdateCount; ++i)
+		{
+			const auto &update = inUpdates[i];
+			Body &body = mBodyManager.GetBody(update.mBody);
+			JPH_ASSERT(body.IsDynamic() && body.IsRigidBody());
+			auto *motion = body.GetMotionProperties();
+			uint32 index = motion->GetIndexInActiveBodiesInternal();
+			if (index < step.mNumActiveBodyToCCDBody)
+			{
+				step.mBodyMotions[index].mFraction = min(step.mBodyMotions[index].mFraction, update.mTravelFraction);
+				int ccd = step.mActiveBodyToCCDBody[index];
+				if (ccd >= 0 && update.mDiscardContact)
+				{
+					step.mCCDBodies[ccd].mBodyID2 = BodyID();
+					step.mCCDBodies[ccd].mFractionPlusSlop = min(step.mCCDBodies[ccd].mFractionPlusSlop, update.mTravelFraction);
+				}
+			}
+			if (update.mLinearImpulse != Vec3::sZero() || update.mAngularImpulse != Vec3::sZero())
+			{
+				motion->AddLinearVelocityStep(motion->GetInverseMass() * update.mLinearImpulse);
+				motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), update.mAngularImpulse));
+				motion->ClampLinearVelocity();
+				motion->ClampAngularVelocity();
+				if (!body.IsActive())
+					mBodyManager.ActivateBodies(&update.mBody, 1);
+			}
+		}
+	}
 	const bool coupled_positions = mPhysicsSettings.mNumPositionSteps > 0 && !ioContext.mCoupledBodies.empty();
 	if (mPhysicsSettings.mNumPositionSteps > 0 && !coupled_positions)
 		JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
 
-	// Integrate and resolve CCD once. A coupled position phase retains the bounds/sleep jobs.
-	step.mPreIntegrateVelocity.RemoveDependency();
+	// Apply the retained motion and CCD response once. Position retains the bounds/sleep jobs.
+	step.mResolveCCDContacts.RemoveDependency();
 	if (coupled_positions)
 	{
 		JPH_ASSERT(step.mResolveCCDContacts.IsDone() && !step.mSolvePositionConstraints.front().IsDone());
@@ -816,7 +887,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 					context.mPhysicsSystem->JobResolveCCDContacts(&context, &step);
 
 					JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
-				}, 2); // depends on: integrate velocities, detect ccd contacts (added dynamically), finish building jobs.
+				}, 2 + (context.IsCoupledUpdate()? 1 : 0)); // plus the retained continuous decision for a coupled update.
 
 			// Unblock previous job
 			step.mPostIntegrateVelocity.RemoveDependency();
@@ -1932,7 +2003,7 @@ void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, Phy
 
 	// Initialize the mapping table between active body and CCD body
 	JPH_ASSERT(ioStep->mActiveBodyToCCDBody == nullptr);
-	ioStep->mNumActiveBodyToCCDBody = ioStep->mCCDBodiesCapacity > 0? mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
+	ioStep->mNumActiveBodyToCCDBody = ioStep->mCCDBodiesCapacity > 0 || ioContext->mCoupledRetainMotion? mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
 	ioStep->mActiveBodyToCCDBody = (int *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(int));
 	ioStep->mBodyMotions = (PhysicsUpdateContext::Step::BodyMotion *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
 
@@ -2218,7 +2289,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			{
 				// Check if this is a possible earlier hit than the one before
 				float fraction = inResult.mFraction;
-				if (fraction < mCCDBody.mFractionPlusSlop)
+				if (fraction < mCCDBody.mFraction)
 				{
 					// Normalize normal
 					Vec3 normal = inResult.mPenetrationAxis.Normalized();
@@ -2231,90 +2302,87 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
 					Vec3 movement2 = sCalculateBodyMotion(body2, mStep);
 					float denominator = normal.Dot(mCCDBody.mDeltaPosition - movement2);
-					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
+					if (denominator > 0.0f)
 					{
-						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
-						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
+						float fraction_plus_slop = min(1.0f, fraction + mCCDBody.mMaxPenetration / denominator);
+						// Check if we've already accepted all hits from this body
+						if (mValidateBodyPair)
 						{
-							// Check if we've already accepted all hits from this body
-							if (mValidateBodyPair)
+							// Validate the contact result
+							const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
+							if (body2.IsRigidBody())
 							{
-								// Validate the contact result
-								const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
-								if (body2.IsRigidBody())
+								ValidateResult validate_result = mContactConstraintManager.ValidateContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult, true); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
+								switch (validate_result)
 								{
-									ValidateResult validate_result = mContactConstraintManager.ValidateContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult, true); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
-									switch (validate_result)
-									{
-									case ValidateResult::AcceptContact:
-										// Just continue
-										break;
+								case ValidateResult::AcceptContact:
+									// Just continue
+									break;
 
-									case ValidateResult::AcceptAllContactsForThisBodyPair:
-										// Accept this and all following contacts from this body
-										mValidateBodyPair = false;
-										break;
+								case ValidateResult::AcceptAllContactsForThisBodyPair:
+									// Accept this and all following contacts from this body
+									mValidateBodyPair = false;
+									break;
 
-									case ValidateResult::RejectContact:
-										return;
+								case ValidateResult::RejectContact:
+									return;
 
-									case ValidateResult::RejectAllContactsForThisBodyPair:
-										// Reject this and all following contacts from this body
-										mRejectAll = true;
-										ForceEarlyOut();
-										return;
-									}
+								case ValidateResult::RejectAllContactsForThisBodyPair:
+									// Reject this and all following contacts from this body
+									mRejectAll = true;
+									ForceEarlyOut();
+									return;
+								}
+							}
+							else
+							{
+								SoftBodyContactSettings sb_settings;
+								sb_settings.mIsSensor = false;
+								if ((mSoftBodyContactListener == nullptr
+									|| mSoftBodyContactListener->OnSoftBodyContactValidate(body2, body1, sb_settings) == SoftBodyValidateResult::AcceptContact) // Note reversal, soft body needs to be first parameter
+									&& !sb_settings.mIsSensor) // If the contact listener turned this into a sensor, we want to ignore it
+								{
+									// Convert the soft body contact settings (note bodies are swapped)
+									mCCDBody.mContactSettings.mInvMassScale1 = sb_settings.mInvMassScale2;
+									mCCDBody.mContactSettings.mInvMassScale2 = sb_settings.mInvMassScale1;
+									mCCDBody.mContactSettings.mInvInertiaScale1 = sb_settings.mInvInertiaScale2;
+
+									// Accept this and all following contacts from this body
+									mValidateBodyPair = false;
 								}
 								else
 								{
-									SoftBodyContactSettings sb_settings;
-									sb_settings.mIsSensor = false;
-									if ((mSoftBodyContactListener == nullptr
-										|| mSoftBodyContactListener->OnSoftBodyContactValidate(body2, body1, sb_settings) == SoftBodyValidateResult::AcceptContact) // Note reversal, soft body needs to be first parameter
-										&& !sb_settings.mIsSensor) // If the contact listener turned this into a sensor, we want to ignore it
-									{
-										// Convert the soft body contact settings (note bodies are swapped)
-										mCCDBody.mContactSettings.mInvMassScale1 = sb_settings.mInvMassScale2;
-										mCCDBody.mContactSettings.mInvMassScale2 = sb_settings.mInvMassScale1;
-										mCCDBody.mContactSettings.mInvInertiaScale1 = sb_settings.mInvInertiaScale2;
-
-										// Accept this and all following contacts from this body
-										mValidateBodyPair = false;
-									}
-									else
-									{
-										// Reject this and all following contacts from this body
-										mRejectAll = true;
-										ForceEarlyOut();
-										return;
-									}
+									// Reject this and all following contacts from this body
+									mRejectAll = true;
+									ForceEarlyOut();
+									return;
 								}
 							}
-
-							// This is the earliest hit so far, store it
-							mCCDBody.mContactNormal = normal;
-							mCCDBody.mBodyID2 = inResult.mBodyID2;
-							mCCDBody.mSubShapeID1 = inResult.mSubShapeID1;
-							mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
-							mCCDBody.mFraction = fraction;
-							mCCDBody.mFractionPlusSlop = fraction_plus_slop;
-							mResult = inResult;
-
-							// Result was assuming body 2 is not moving, but it is, so we need to correct for it
-							movement2 *= fraction;
-							if (!movement2.IsNearZero())
-							{
-								mResult.mContactPointOn1 += movement2;
-								mResult.mContactPointOn2 += movement2;
-								for (Vec3 &v : mResult.mShape1Face)
-									v += movement2;
-								for (Vec3 &v : mResult.mShape2Face)
-									v += movement2;
-							}
-
-							// Update early out fraction
-							UpdateEarlyOutFraction(fraction_plus_slop);
 						}
+
+						// This is the earliest hit so far, store it
+						mCCDBody.mContactNormal = normal;
+						mCCDBody.mBodyID2 = inResult.mBodyID2;
+						mCCDBody.mSubShapeID1 = inResult.mSubShapeID1;
+						mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
+						mCCDBody.mFraction = fraction;
+						mCCDBody.mFractionPlusSlop = fraction_plus_slop;
+						mResult = inResult;
+
+						// Result was assuming body 2 is not moving, but it is, so we need to correct for it
+						movement2 *= fraction;
+						if (!movement2.IsNearZero())
+						{
+							mResult.mContactPointOn1 += movement2;
+							mResult.mContactPointOn2 += movement2;
+							for (Vec3 &v : mResult.mShape1Face)
+								v += movement2;
+							for (Vec3 &v : mResult.mShape2Face)
+								v += movement2;
+						}
+
+						// Select by actual impact time. Penetration allowance is for drift only.
+						UpdateEarlyOutFraction(fraction);
 					}
 				}
 			}
@@ -2439,7 +2507,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 	#endif
 
 		// Check if there was a hit
-		if (ccd_body.mFractionPlusSlop < 1.0f)
+		if (!ccd_body.mBodyID2.IsInvalid())
 		{
 			const Body &body2 = mBodyManager.GetBody(ccd_body.mBodyID2);
 
@@ -2603,8 +2671,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 			// Which we then sort
 			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_ccd_bodies, [](const CCDBody *inBody1, const CCDBody *inBody2)
 				{
-					if (inBody1->mFractionPlusSlop != inBody2->mFractionPlusSlop)
-						return inBody1->mFractionPlusSlop < inBody2->mFractionPlusSlop;
+					if (inBody1->mFraction != inBody2->mFraction)
+						return inBody1->mFraction < inBody2->mFraction;
 
 					return inBody1->mBodyID1 < inBody2->mBodyID1;
 				});

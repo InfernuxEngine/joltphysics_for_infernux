@@ -185,9 +185,25 @@ public:
 	/// An admitted update must be advanced to completion.
 	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses = nullptr, uint32 inImpulseCount = 0);
 
-	/// Release the prepared integration once, then yield at position projection or the next substep.
-	/// Peer work may retain the Integration boundary across host frames before calling this method.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext);
+	/// Prepare clamped/rotated motion and local continuous candidates, retaining their unresolved response.
+	/// Retain all translations when a peer solver needs a shared-time continuous boundary.
+	void						PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, bool inRetainMotion = false);
+	struct CoupledContinuousContact
+	{
+		BodyID					mBody1, mBody2;
+		float					mFraction, mTravelFraction;
+	};
+	Array<CoupledContinuousContact> GetCoupledContinuousContacts(const PhysicsUpdateContext &inContext) const;
+	Vec3						GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const;
+	struct CoupledContinuousUpdate
+	{
+		BodyID					mBody;
+		float					mTravelFraction;
+		bool					mDiscardContact;
+		Vec3					mLinearImpulse, mAngularImpulse;
+	};
+	/// Consume the shared continuous decision once, then yield at position projection or the next substep.
+	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, const CoupledContinuousUpdate *inUpdates = nullptr, uint32 inUpdateCount = 0);
 
 	struct CoupledBodyCorrection
 	{

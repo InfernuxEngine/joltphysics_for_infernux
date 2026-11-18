@@ -318,6 +318,35 @@ void jph_apply_impulse(BodyModel ma, inout BodyState sa, float3 ra,
     }
 }
 
+// Return the impulse applied to B, and keep the incoming point velocity for reports.
+float3 jph_solve_sweep_impact(BodyModel ma, inout BodyState sa, float3 ra,
+                              BodyModel mb, inout BodyState sb, float3 rb, float3 normal,
+                              float friction, float restitution, float minRestitutionSpeed,
+                              out float3 incoming)
+{
+    incoming = jph_point_velocity(ma, sa, ra) - jph_point_velocity(mb, sb, rb);
+    float speed = max(0.0f, dot(incoming, normal));
+    float bounce = speed > minRestitutionSpeed ? restitution : 0.0f;
+    float lambda = (1.0f + bounce) * speed * jph_effective_mass(ma, sa, ra, mb, sb, rb, normal);
+    jph_apply_impulse(ma, sa, ra, mb, sb, rb, normal, lambda);
+    float3 impulse = normal * lambda;
+    if (friction > 0.0f)
+    {
+        float3 relative = jph_point_velocity(ma, sa, ra) - jph_point_velocity(mb, sb, rb);
+        float3 tangent = relative - normal * dot(normal, relative);
+        float tangentSpeed = length(tangent);
+        if (tangentSpeed > 0.0f)
+        {
+            tangent /= tangentSpeed;
+            float tangentLambda = min(friction * lambda,
+                tangentSpeed * jph_effective_mass(ma, sa, ra, mb, sb, rb, tangent));
+            jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent, tangentLambda);
+            impulse += tangent * tangentLambda;
+        }
+    }
+    return impulse;
+}
+
 void jph_contact_points(Contact contact, BodyState sa, BodyState sb,
                         out float3 pa, out float3 pb, out float3 ra, out float3 rb)
 {

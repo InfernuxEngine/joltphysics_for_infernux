@@ -219,7 +219,7 @@ bool cvx_sweep_hit(uint base)
     contacts[convex_scratch[base + 48u].x] = hit;
     uint count = step_params.selectedCounts.x;
     uint2 edge = identity.zw - step_params.selection.y;
-    sweep_choice[count + edge.x].min(asuint(cutoff));
+    sweep_choice[count + edge.x].min(asuint(fraction));
     if (b.displacement.w == 0.0f) return false;
     sweep_choice[3u * count].store(1u);
     convex_scratch[base + 50u] = uint4(edge, 0u, 0u);
@@ -325,11 +325,11 @@ void sweep_store_cutoffs(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint local = stage_work.range.x + tid.x;
     uint root = sweep_choice[local].load();
-    uint cutoff = sweep_choice[step_params.selectedCounts.x + root].load();
-    // Clip this connected set to its first trustworthy linear sweep. A later
-    // hit predicted on a trajectory changed by the first impulse is stale.
-    if (cutoff != 0xffffffffu)
-        sweep_bodies[local].linearResponse.w = asfloat(cutoff);
+    uint ordinal = sweep_choice[2u * step_params.selectedCounts.x + root].load();
+    // The first impact is selected by its actual time. All bodies in the
+    // component advance by the selected contact's permitted travel, including slop.
+    if (ordinal != 0xffffffffu)
+        sweep_bodies[local].linearResponse.w = contacts[ordinal].impulse.w;
 }
 
 [shader("compute")]
@@ -342,7 +342,7 @@ void sweep_select_pair(uint3 tid : SV_DispatchThreadID)
     if (hit.meta.z == 0u) return;
     uint root = sweep_choice[hit.meta.x - step_params.selection.y].load();
     uint count = step_params.selectedCounts.x;
-    if (sweep_choice[count + root].load() == asuint(hit.impulse.w))
+    if (sweep_choice[count + root].load() == asuint(hit.normalDepth.w))
         sweep_choice[2u * count + root].min(ordinal);
 }
 
@@ -376,24 +376,13 @@ void sweep_apply_impact(uint3 tid : SV_DispatchThreadID)
     bool dynamicTarget = jph_dynamic(mb);
     if (!dynamicTarget) mb.meta.z = MotionKinematic;
     float3 n = hit.normalDepth.xyz, ra = hit.localAnchorA.xyz, rb = hit.localAnchorB.xyz;
-    float3 incoming = jph_point_velocity(ma, sa, ra) - jph_point_velocity(mb, sb, rb);
-    float speed = dot(incoming, n);
     if (shape_models[patch.leaves.x].meta.y != hit.meta.x) patch.leaves.xy = patch.leaves.yx;
     ShapeModel ashape = shape_models[patch.leaves.x], bshape = shape_models[patch.leaves.y];
-    float restitution = speed > step_params.restitution.x
-        ? jph_combine_material(ashape.material.y, ashape.surface.w, bshape.material.y, bshape.surface.w) : 0.0f;
-    float normalImpulse = (1.0f + restitution) * speed * jph_effective_mass(ma, sa, ra, mb, sb, rb, n);
-    jph_apply_impulse(ma, sa, ra, mb, sb, rb, n, normalImpulse);
-    float3 relative = jph_point_velocity(ma, sa, ra) - jph_point_velocity(mb, sb, rb);
-    float3 tangent = relative - n * dot(n, relative);
+    float restitution = jph_combine_material(ashape.material.y, ashape.surface.w, bshape.material.y, bshape.surface.w);
     float friction = jph_combine_material(ashape.material.x, ashape.surface.z, bshape.material.x, bshape.surface.z);
-    float tangentSpeed = length(tangent), tangentImpulse = 0.0f;
-    if (tangentSpeed > 0.0f && friction > 0.0f)
-    {
-        tangent /= tangentSpeed;
-        tangentImpulse = min(friction * normalImpulse, tangentSpeed * jph_effective_mass(ma, sa, ra, mb, sb, rb, tangent));
-        jph_apply_impulse(ma, sa, ra, mb, sb, rb, tangent, tangentImpulse);
-    }
+    float3 incoming;
+    float3 impulse = jph_solve_sweep_impact(ma, sa, ra, mb, sb, rb, n, friction, restitution,
+                                             step_params.restitution.x, incoming);
     float fraction = hit.normalDepth.w;
     float3 linear = jph_clamp_speed(sa.linearVelocity.xyz, ma.damping.z);
     float3 angular = jph_clamp_speed(sa.angularVelocity.xyz, ma.damping.w);
@@ -411,7 +400,7 @@ void sweep_apply_impact(uint3 tid : SV_DispatchThreadID)
     hit.normalDepth.w = 0.0f;
     hit.localAnchorA = float4(a.positionCOM.xyz + fraction * a.displacement.xyz + ra, 0.0f);
     hit.localAnchorB = float4(-incoming, 0.0f);
-    hit.impulse = float4(n * normalImpulse + tangent * tangentImpulse, 0.0f);
+    hit.impulse = float4(impulse, fraction);
     contacts[ordinal] = hit;
     patch.leaves.zw = uint2(PatchActive, 1u);
     contact_patches[index] = patch;
