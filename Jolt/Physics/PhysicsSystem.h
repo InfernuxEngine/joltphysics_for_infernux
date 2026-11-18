@@ -180,10 +180,14 @@ public:
 	/// must stay on the calling owner thread until completion. Between calls use no-lock reads only.
 	bool						BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
 
-	/// Apply a completed peer response and run another native sweep in the touched islands.
+	/// Apply completed world-space impulse deltas to the current candidates. Other producers may
+	/// read the updated velocities or contribute to the same round before its owner advances it.
+	void						ApplyCoupledVelocityImpulses(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
+
+	/// Run another native sweep in the touched islands.
 	/// After the last sweep, retain the current poses at the Integration boundary.
 	/// An admitted update must be advanced to completion.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses = nullptr, uint32 inImpulseCount = 0);
+	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext);
 
 	/// Prepare clamped/rotated motion and local continuous candidates, retaining their unresolved response.
 	/// Retain all translations when a peer solver needs a shared-time continuous boundary.

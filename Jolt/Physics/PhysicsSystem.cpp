@@ -244,24 +244,28 @@ bool PhysicsSystem::BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, 
 	return true;
 }
 
-std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
+void PhysicsSystem::ApplyCoupledVelocityImpulses(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
+{
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Velocity);
+	JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);)
+	for (uint32 i = 0; i < inImpulseCount; ++i)
+	{
+		const CoupledBodyImpulse &impulse = inImpulses[i];
+		JPH_ASSERT(std::binary_search(ioContext.mCoupledBodies.begin(), ioContext.mCoupledBodies.end(), impulse.mBody));
+		Body &body = mBodyManager.GetBody(impulse.mBody);
+		MotionProperties *motion = body.GetMotionProperties();
+		motion->AddLinearVelocityStep(motion->GetInverseMass() * impulse.mLinear);
+		motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), impulse.mAngular));
+	}
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext)
 {
 	using Stage = PhysicsUpdateContext::ECoupledStage;
 	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Velocity);
 	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
 	{
-#ifdef JPH_ENABLE_ASSERTS
-		BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);
-#endif
-		for (uint32 i = 0; i < inImpulseCount; ++i)
-		{
-			const CoupledBodyImpulse &impulse = inImpulses[i];
-			JPH_ASSERT(std::binary_search(ioContext.mCoupledBodies.begin(), ioContext.mCoupledBodies.end(), impulse.mBody));
-			Body &body = mBodyManager.GetBody(impulse.mBody);
-			MotionProperties *motion = body.GetMotionProperties();
-			motion->AddLinearVelocityStep(motion->GetInverseMass() * impulse.mLinear);
-			motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), impulse.mAngular));
-		}
+		JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);)
 
 		bool swept = false;
 		for (uint32 island : ioContext.mCoupledIslandOrder)
