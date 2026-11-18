@@ -1431,44 +1431,60 @@ void jph_finish_contact_level()
 
 void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, uint lane)
 {
+    uint first_row = 0u;
+    uint row_count = 0u;
+    uint levels = 0u;
     if (stage_work.range.y < ContactParallelMinimum)
     {
         uint begin, first, end;
         if (jph_island_patch_range(group * ContactSolverLanes + lane, begin, first, end))
-            for (uint i = first; i < end; ++i)
-                solver.solve(jph_island_patch_record(begin + i).x);
-        return;
+        {
+            first_row = begin + first;
+            row_count = end - first;
+        }
     }
-
-    if (lane == 0u)
-    {
-        uint begin, first, end;
-        const bool valid = jph_island_patch_range(group, begin, first, end);
-        contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    const uint2 tile = workgroupUniformLoad(contact_tile);
-    uint levels = 0u;
-    if (tile.y >= ContactParallelMinimum)
-        levels = jph_plan_contact_tile(tile, lane);
-    if (levels == 0u)
+    else
     {
         if (lane == 0u)
-            for (uint i = 0u; i < tile.y; ++i)
-                solver.solve(jph_island_patch_record(tile.x + i).x);
-        return;
+        {
+            uint begin, first, end;
+            const bool valid = jph_island_patch_range(group, begin, first, end);
+            contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        const uint2 tile = workgroupUniformLoad(contact_tile);
+        if (tile.y >= ContactParallelMinimum)
+            levels = jph_plan_contact_tile(tile, lane);
+        first_row = tile.x;
+        row_count = lane == 0u ? tile.y : 0u;
     }
 
-    // Each level has disjoint dynamic writers. The preceding writer of each
-    // body always has a lower level, so its original PGS order is preserved.
-    uint first = 0u;
-    for (uint level = 0u; level < levels; ++level)
+    // One solver body serves both contiguous rows and dependency-ordered rows.
+    // A level only contains disjoint writers and completes before their successors.
+    uint level_begin = 0u;
+    for (uint level = 0u; level < max(levels, 1u); ++level)
     {
-        const uint end = contact_level_ends[level];
-        for (uint i = first + lane; i < end; i += ContactSolverLanes)
-            solver.solve(contact_order[i]);
-        jph_finish_contact_level();
-        first = end;
+        uint row = first_row;
+        uint end = first_row + row_count;
+        uint stride = 1u;
+        if (levels != 0u)
+        {
+            row = level_begin + lane;
+            end = contact_level_ends[level];
+            stride = ContactSolverLanes;
+            level_begin = end;
+        }
+        for (; row < end; row += stride)
+        {
+            uint source;
+            if (levels != 0u)
+                source = contact_order[row];
+            else
+                source = jph_island_patch_record(row).x;
+            solver.solve(source);
+        }
+        if (levels != 0u)
+            jph_finish_contact_level();
     }
 }
 
