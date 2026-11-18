@@ -101,7 +101,7 @@ public:
 	/// sensors must be rejected here: changing the selected closest contact to a
 	/// sensor in OnContactAdded cannot recover a solid contact behind it. CCD does
 	/// not generate sensor overlaps; those remain part of discrete detection.
-	virtual ValidateResult	OnCCDContactValidate(const Body &inBody1, const Body &inBody2, RVec3Arg inBaseOffset, const CollideShapeResult &inCollisionResult) { return OnContactValidate(inBody1, inBody2, inBaseOffset, inCollisionResult); }
+	virtual ValidateResult	OnCCDContactValidate(const Body &inBody1, const Body &inBody2, RVec3Arg inBaseOffset, const CollideShapeResult &inCollisionResult, [[maybe_unused]] bool inFromEarlierImpact) { return OnContactValidate(inBody1, inBody2, inBaseOffset, inCollisionResult); }
 
 	/// Called whenever a new contact point is detected.
 	///

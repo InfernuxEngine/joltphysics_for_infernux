@@ -13,6 +13,7 @@ enum class EPhysicsUpdateError : uint32
 	ManifoldCacheFull		= 1 << 0,		///< The manifold cache is full, this means that the total number of contacts between bodies is too high. Some contacts were ignored. Increase inMaxContactConstraints in PhysicsSystem::Init.
 	BodyPairCacheFull		= 1 << 1,		///< The body pair cache is full, this means that too many bodies contacted. Some contacts were ignored. Increase inMaxBodyPairs in PhysicsSystem::Init.
 	ContactConstraintsFull	= 1 << 2,		///< The contact constraints buffer is full. Some contacts were ignored. Increase inMaxContactConstraints in PhysicsSystem::Init.
+	ContinuousMotionDidNotConverge = 1 << 3,	///< A sequence of impacts could not settle at the same physical time.
 };
 
 /// OR operator for EPhysicsUpdateError

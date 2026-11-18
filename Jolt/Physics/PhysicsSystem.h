@@ -188,22 +188,13 @@ public:
 	/// Prepare clamped/rotated motion and local continuous candidates, retaining their unresolved response.
 	/// Retain all translations when a peer solver needs a shared-time continuous boundary.
 	void						PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, bool inRetainMotion = false);
-	struct CoupledContinuousContact
-	{
-		BodyID					mBody1, mBody2;
-		float					mFraction, mTravelFraction;
-	};
-	Array<CoupledContinuousContact> GetCoupledContinuousContacts(const PhysicsUpdateContext &inContext) const;
 	Vec3						GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const;
-	struct CoupledContinuousUpdate
-	{
-		BodyID					mBody;
-		float					mTravelFraction;
-		bool					mDiscardContact;
-		Vec3					mLinearImpulse, mAngularImpulse;
-	};
+	std::optional<float>		GetCoupledImpactTime(const PhysicsUpdateContext &inContext) const;
+	bool						HasCoupledImpact(const PhysicsUpdateContext &inContext, BodyID inBody) const;
+	/// Advance to the chosen event and prepare motion for the remaining interval.
+	void						AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
 	/// Consume the shared continuous decision once, then yield at position projection or the next substep.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, const CoupledContinuousUpdate *inUpdates = nullptr, uint32 inUpdateCount = 0);
+	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext);
 
 	struct CoupledBodyCorrection
 	{
@@ -347,6 +338,13 @@ private:
 	void						JobBodySetIslandIndex();
 	void						JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
+	void						AllocateCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, uint32 inAdditionalSources = 0);
+	void						CaptureCCDSource(PhysicsUpdateContext::Step *ioStep, const Body &inBody, uint32 inActiveIndex, Vec3Arg inDisplacement, float inMinTravel);
+	void						BuildCCDMotionBounds(PhysicsUpdateContext::Step *ioStep) const;
+	void						AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
+	void						ResolveCCDVelocities(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, float inEventFraction);
+	void						MoveCCDPositions(PhysicsUpdateContext::Step *ioStep, std::optional<float> inEventFraction = {});
+	void						ReleaseCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep) const;
 	void						JobFindCCDContacts(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);

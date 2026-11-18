@@ -392,7 +392,6 @@ struct JPH_GPU_ALIGN SweepBody
     JPH_GPU_FLOAT4 angularResponse; // angular velocity change xyz, w marks a solved impact.
 };
 
-JPH_GPU_CONSTANT(SweepCoupled, 0);
 JPH_GPU_CONSTANT(SweepInitial, 1);
 JPH_GPU_CONSTANT(SweepContinuation, 2);
 JPH_GPU_CONSTANT(SweepEventContacts, 3);

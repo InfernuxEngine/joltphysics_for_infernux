@@ -303,22 +303,6 @@ void PhysicsSystem::PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioCont
 	ioContext.mCoupledStage = Stage::Continuous;
 }
 
-static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBody, PhysicsUpdateContext::Step *inStep);
-
-Array<PhysicsSystem::CoupledContinuousContact> PhysicsSystem::GetCoupledContinuousContacts(const PhysicsUpdateContext &inContext) const
-{
-	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
-	const auto &step = inContext.mSteps[inContext.mCoupledSubstep];
-	Array<CoupledContinuousContact> contacts;
-	for (uint32 i = 0; i < step.GetCCDCount(); ++i)
-	{
-		const auto &body = step.GetCCD(i);
-		if (!body.mBodyID2.IsInvalid())
-			contacts.push_back({body.mBodyID1, body.mBodyID2, body.mFraction, body.mFractionPlusSlop});
-	}
-	return contacts;
-}
-
 Vec3 PhysicsSystem::GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const
 {
 	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
@@ -334,40 +318,99 @@ Vec3 PhysicsSystem::GetCoupledDisplacement(const PhysicsUpdateContext &inContext
 	return Vec3::sZero();
 }
 
-std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, const CoupledContinuousUpdate *inUpdates, uint32 inUpdateCount)
+static std::optional<float> sEarliestCCDImpact(const PhysicsUpdateContext::Step &step)
+{
+	std::optional<float> earliest;
+	for (uint32 i = 0; i < step.GetCCDCount(); ++i)
+	{
+		const auto &hit = step.GetCCD(i);
+		if (!hit.mBodyID2.IsInvalid())
+		{
+			const float fraction = max(0.0f, hit.mFraction);
+			earliest = min(earliest.value_or(fraction), fraction);
+		}
+	}
+	return earliest;
+}
+
+std::optional<float> PhysicsSystem::GetCoupledImpactTime(const PhysicsUpdateContext &inContext) const
+{
+	JPH_ASSERT(inContext.mPhysicsSystem == this && inContext.mCoupledStage == PhysicsUpdateContext::ECoupledStage::Continuous);
+	return sEarliestCCDImpact(inContext.mSteps[inContext.mCoupledSubstep]);
+}
+
+bool PhysicsSystem::HasCoupledImpact(const PhysicsUpdateContext &inContext, BodyID inBody) const
+{
+	const auto &impacts = inContext.mSteps[inContext.mCoupledSubstep].mSweepImpacts;
+	return std::binary_search(impacts.begin(), impacts.end(), inBody);
+}
+
+void PhysicsSystem::AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
+{
+	using Stage = PhysicsUpdateContext::ECoupledStage;
+	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Continuous && ioContext.mCoupledRetainMotion);
+	AdvanceSweep(ioContext, ioContext.mSteps[ioContext.mCoupledSubstep], inFraction, inRemainingTime, inImpulses, inImpulseCount);
+}
+
+void PhysicsSystem::AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &step, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount)
+{
+	ResolveCCDVelocities(&ioContext, &step, inFraction);
+	MoveCCDPositions(&step, inFraction);
+	ReleaseCCDWorkspace(&ioContext, &step);
+
+	JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::ReadWrite);)
+	JPH_IF_ENABLE_ASSERTS(BodyManager::GrantActiveBodiesAccess grant_active(true, false);)
+	for (uint32 i = 0; i < inImpulseCount; ++i)
+	{
+		const auto &impulse = inImpulses[i];
+		Body &body = mBodyManager.GetBody(impulse.mBody);
+		auto *motion = body.GetMotionProperties();
+		motion->AddLinearVelocityStep(motion->GetInverseMass() * impulse.mLinear);
+		motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), impulse.mAngular));
+		motion->ClampLinearVelocity();
+		motion->ClampAngularVelocity();
+		step.mSweepImpacts.push_back(body.GetID());
+		if (!body.IsActive())
+			mBodyManager.ActivateBodies(&impulse.mBody, 1);
+	}
+
+	auto &impacts = step.mSweepImpacts;
+	QuickSort(impacts.begin(), impacts.end());
+	impacts.erase(std::unique(impacts.begin(), impacts.end()), impacts.end());
+	step.mSweepRemaining = inRemainingTime;
+	if (inRemainingTime <= 0.0f)
+		return;
+
+	// Reuse the native cast workspace at this new origin. Gravity, rotation
+	// and velocity constraints are part of the already admitted substep.
+	const uint32 extra_sources = uint32(std::count_if(impacts.begin(), impacts.end(), [&](BodyID inID)
+	{
+		return mBodyManager.GetBody(inID).GetMotionProperties()->GetMotionQuality() == EMotionQuality::Discrete;
+	}));
+	AllocateCCDWorkspace(&ioContext, &step, extra_sources);
+	const BodyID *active = mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody);
+	for (uint32 i = 0; i < step.mNumActiveBodyToCCDBody; ++i)
+	{
+		const Body &body = mBodyManager.GetBody(active[i]);
+		const Vec3 delta = body.GetLinearVelocity() * inRemainingTime;
+		auto *motion = new (&step.mBodyMotions[i]) PhysicsUpdateContext::Step::BodyMotion;
+		delta.StoreFloat3(&motion->mDeltaPosition);
+		step.mActiveBodyToCCDBody[i] = -1;
+		const bool carried = std::binary_search(impacts.begin(), impacts.end(), body.GetID());
+		if (body.IsDynamic() && !body.IsSensor() &&
+			(body.GetMotionProperties()->GetMotionQuality() == EMotionQuality::LinearCast || carried) &&
+			body.GetShape()->GetInnerRadius() > 0.0f)
+			CaptureCCDSource(&step, body, i, delta, cDefaultCollisionTolerance);
+	}
+	BuildCCDMotionBounds(&step);
+	JobFindCCDContacts(&ioContext, &step);
+}
+
+std::optional<EPhysicsUpdateError> PhysicsSystem::AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext)
 {
 	using Stage = PhysicsUpdateContext::ECoupledStage;
 	JPH_ASSERT(ioContext.mPhysicsSystem == this && ioContext.mCoupledStage == Stage::Continuous);
 	PhysicsUpdateContext::Step &step = ioContext.mSteps[ioContext.mCoupledSubstep];
-	{
-		JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::ReadWrite);)
-		JPH_IF_ENABLE_ASSERTS(BodyManager::GrantActiveBodiesAccess grant_active(true, false);)
-		for (uint32 i = 0; i < inUpdateCount; ++i)
-		{
-			const auto &update = inUpdates[i];
-			Body &body = mBodyManager.GetBody(update.mBody);
-			JPH_ASSERT(body.IsDynamic() && body.IsRigidBody());
-			auto *motion = body.GetMotionProperties();
-			uint32 index = motion->GetIndexInActiveBodiesInternal();
-			if (index < step.mNumActiveBodyToCCDBody)
-				step.mBodyMotions[index].mFraction = min(step.mBodyMotions[index].mFraction, update.mTravelFraction);
-			if (update.mDiscardContact)
-				if (auto *ccd = sGetCCDBody(body, &step))
-				{
-					ccd->mBodyID2 = BodyID();
-					ccd->mFractionPlusSlop = min(ccd->mFractionPlusSlop, update.mTravelFraction);
-				}
-			if (update.mLinearImpulse != Vec3::sZero() || update.mAngularImpulse != Vec3::sZero())
-			{
-				motion->AddLinearVelocityStep(motion->GetInverseMass() * update.mLinearImpulse);
-				motion->AddAngularVelocityStep(motion->MultiplyWorldSpaceInverseInertiaByVector(body.GetRotation(), update.mAngularImpulse));
-				motion->ClampLinearVelocity();
-				motion->ClampAngularVelocity();
-				if (!body.IsActive())
-					mBodyManager.ActivateBodies(&update.mBody, 1);
-			}
-		}
-	}
 	const bool coupled_positions = mPhysicsSettings.mNumPositionSteps > 0 && !ioContext.mCoupledBodies.empty();
 	if (mPhysicsSettings.mNumPositionSteps > 0 && !coupled_positions)
 		JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
@@ -762,7 +805,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 
 					if (step.mStartNextStep.IsValid())
 						step.mStartNextStep.RemoveDependency();
-				}, 1); // depends on the find ccd contacts
+				}, 1); // All continuous contacts are complete once the motion is committed.
 
 			// This job will set the island index on each body (only used for debug drawing purposes)
 			// It will also delete any bodies that have been destroyed in the last frame
@@ -885,6 +928,7 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 			step.mResolveCCDContacts = inJobSystem->CreateJob("ResolveCCDContacts", cColorResolveCCDContacts, [&context, &step]()
 				{
 					context.mPhysicsSystem->JobResolveCCDContacts(&context, &step);
+					step.mContactRemovedCallbacks.RemoveDependency();
 
 					JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
 				}, 2 + (context.IsCoupledUpdate()? 1 : 0)); // plus the retained continuous decision for a coupled update.
@@ -1995,12 +2039,19 @@ JPH_SUPPRESS_WARNING_POP
 
 void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
 {
+	AllocateCCDWorkspace(ioContext, ioStep);
+	mLargeIslandSplitter.PrepareForSolvePositions();
+}
+
+void PhysicsSystem::AllocateCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, uint32 inAdditionalSources)
+{
 	// Reserve enough space for all bodies that may need a cast
 	TempAllocator *temp_allocator = ioContext->mTempAllocator;
 	JPH_ASSERT(ioStep->mCCDBodies == nullptr);
-	ioStep->mCCDBodiesCapacity = mBodyManager.GetNumActiveCCDBodies();
+	uint32 active_ccd = mBodyManager.GetNumActiveCCDBodies();
+	ioStep->mCCDBodiesCapacity = active_ccd + inAdditionalSources;
 	ioStep->mCCDBodies = (CCDBody *)temp_allocator->Allocate(ioStep->mCCDBodiesCapacity * sizeof(CCDBody));
-	ioStep->mCheckDormantCCD = mBodyManager.GetLinearCastBodiesUnsafe().size() > ioStep->mCCDBodiesCapacity;
+	ioStep->mCheckDormantCCD = mBodyManager.GetLinearCastBodiesUnsafe().size() > active_ccd;
 
 	// Initialize the mapping table between active body and CCD body
 	JPH_ASSERT(ioStep->mActiveBodyToCCDBody == nullptr);
@@ -2008,9 +2059,17 @@ void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, Phy
 		mBodyManager.GetNumActiveBodies(EBodyType::RigidBody) : 0;
 	ioStep->mActiveBodyToCCDBody = (int *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(int));
 	ioStep->mBodyMotions = (PhysicsUpdateContext::Step::BodyMotion *)temp_allocator->Allocate(ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
+}
 
-	// Prepare the split island builder for solving the position constraints
-	mLargeIslandSplitter.PrepareForSolvePositions();
+void PhysicsSystem::CaptureCCDSource(PhysicsUpdateContext::Step *ioStep, const Body &inBody, uint32 inActiveIndex, Vec3Arg inDisplacement, float inMinTravel)
+{
+	const float radius = inBody.GetShape()->GetInnerRadius();
+	JPH_ASSERT(radius > 0.0f, "Linear casts require a shape with a positive inner radius");
+	const uint32 index = ioStep->mNumCCDBodies++;
+	JPH_ASSERT(inActiveIndex < ioStep->mNumActiveBodyToCCDBody && index < ioStep->mCCDBodiesCapacity);
+	ioStep->mActiveBodyToCCDBody[inActiveIndex] = index;
+	new (&ioStep->mCCDBodies[index]) CCDBody(inBody.GetID(), inDisplacement, Square(inMinTravel),
+		min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * radius));
 }
 
 void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
@@ -2098,15 +2157,9 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 				{
 					// Determine inner radius (the smallest sphere that fits into the shape)
 					float inner_radius = body.GetShape()->GetInnerRadius();
-					JPH_ASSERT(inner_radius > 0.0f, "The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.");
-
 					// Even a stationary continuous body can be hit by a moving discrete body.
 					// The threshold is applied to relative movement for each candidate pair.
-					float linear_cast_threshold_sq = Square(mPhysicsSettings.mLinearCastThreshold * inner_radius);
-					uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
-					JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
-					ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
-					new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
+					CaptureCCDSource(ioStep, body, active_body_idx, delta_pos, mPhysicsSettings.mLinearCastThreshold * inner_radius);
 				}
 				break;
 			}
@@ -2142,10 +2195,9 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 		mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
 }
 
-void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep) const
+void PhysicsSystem::BuildCCDMotionBounds(PhysicsUpdateContext::Step *ioStep) const
 {
-	// Validate that our reservations were correct
-	JPH_ASSERT(ioStep->mNumCCDBodies <= mBodyManager.GetNumActiveCCDBodies());
+	JPH_ASSERT(ioStep->mNumCCDBodies <= ioStep->mCCDBodiesCapacity);
 
 	if (ioStep->mNumCCDBodies > 0 || ioStep->mCheckDormantCCD)
 	{
@@ -2193,18 +2245,17 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 		}
 	}
 
+}
+
+void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep) const
+{
+	BuildCCDMotionBounds(ioStep);
 	const uint32 count = ioStep->GetCCDCount();
-	if (count == 0)
-	{
-		// No continuous collision detection jobs -> kick the next job ourselves
-		ioStep->mContactRemovedCallbacks.RemoveDependency();
-	}
-	else
+	if (count > 0)
 	{
 		// Run the continuous collision detection jobs
 		int num_continuous_collision_jobs = min(int(count + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
 		ioStep->mResolveCCDContacts.AddDependency(num_continuous_collision_jobs);
-		ioStep->mContactRemovedCallbacks.AddDependency(num_continuous_collision_jobs - 1); // Already had 1 dependency
 		for (int i = 0; i < num_continuous_collision_jobs; ++i)
 		{
 			JobHandle job = ioContext->mJobSystem->CreateJob("FindCCDContacts", cColorFindCCDContacts, [ioContext, ioStep]()
@@ -2212,7 +2263,6 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 				ioContext->mPhysicsSystem->JobFindCCDContacts(ioContext, ioStep);
 
 				ioStep->mResolveCCDContacts.RemoveDependency();
-				ioStep->mContactRemovedCallbacks.RemoveDependency();
 			});
 			ioContext->mBarrier->AddJob(job);
 		}
@@ -2341,7 +2391,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
 					Vec3 movement2 = sCalculateBodyMotion(body2, mStep);
 					float denominator = normal.Dot(mCCDBody.mDeltaPosition - movement2);
-					if (denominator > 0.0f)
+					if (denominator > (mStep->mSweepRemaining > 0.0f? cDefaultCollisionTolerance : 0.0f))
 					{
 						float fraction_plus_slop = min(1.0f, fraction + mCCDBody.mMaxPenetration / denominator);
 						// Check if we've already accepted all hits from this body
@@ -2351,7 +2401,9 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 							const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
 							if (body2.IsRigidBody())
 							{
-								ValidateResult validate_result = mContactConstraintManager.ValidateContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult, true); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
+								const auto &impacts = mStep->mSweepImpacts;
+								const bool carried = !impacts.empty() && (std::binary_search(impacts.begin(), impacts.end(), body1.GetID()) || std::binary_search(impacts.begin(), impacts.end(), body2.GetID()));
+								ValidateResult validate_result = mContactConstraintManager.ValidateCCDContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult, carried); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
 								switch (validate_result)
 								{
 								case ValidateResult::AcceptContact:
@@ -2674,7 +2726,7 @@ void PhysicsSystem::sSolveCCDContact(Body &ioBody1, float inInvM1, Mat44Arg inIn
 	}
 }
 
-void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
+void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, float inEventFraction)
 {
 #ifdef JPH_ENABLE_ASSERTS
 	// Read/write body access
@@ -2684,28 +2736,38 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	BodyManager::GrantActiveBodiesAccess grant_active(true, false);
 #endif
 
-	uint32 num_active_bodies_after_find_collisions = ioStep->mActiveBodyReadIdx;
 	TempAllocator *temp_allocator = ioContext->mTempAllocator;
 
-	// Check if there's anything to do
+	// Only contacts at the chosen instant participate. The common single-hit
+	// case needs no temporary array, even in a world with many cast sources.
 	const uint32 num_ccd_bodies = ioStep->GetCCDCount();
-	if (num_ccd_bodies > 0)
+	const auto accepted = [inEventFraction](const CCDBody &body) {
+		return !body.mBodyID2.IsInvalid() && body.mFraction <= inEventFraction;
+	};
+	CCDBody *single = nullptr;
+	uint32 num_impacts = 0;
+	for (uint32 i = 0; i < num_ccd_bodies; ++i)
+		if (auto &body = ioStep->GetCCD(i); accepted(body))
+		{
+			single = &body;
+			++num_impacts;
+		}
+	if (num_impacts > 0)
 	{
-		// Sort on fraction so that we process earliest collisions first
-		// This is needed to make the simulation deterministic and also to be able to stop contact processing
-		// between body pairs if an earlier hit was found involving the body by another CCD body
-		// (if it's body ID < this CCD body's body ID - see filtering logic in CCDBroadPhaseCollector)
-		CCDBody **sorted_ccd_bodies = (CCDBody **)temp_allocator->Allocate(num_ccd_bodies * sizeof(CCDBody *));
-		JPH_SCOPE_EXIT([temp_allocator, sorted_ccd_bodies, num_ccd_bodies]{ temp_allocator->Free(sorted_ccd_bodies, num_ccd_bodies * sizeof(CCDBody *)); });
+		CCDBody **sorted_ccd_bodies = num_impacts == 1? &single : (CCDBody **)temp_allocator->Allocate(num_impacts * sizeof(CCDBody *));
+		JPH_SCOPE_EXIT([temp_allocator, sorted_ccd_bodies, num_impacts]{
+			if (num_impacts > 1)
+				temp_allocator->Free(sorted_ccd_bodies, num_impacts * sizeof(CCDBody *));
+		});
+		if (num_impacts > 1)
 		{
 			JPH_PROFILE("Sort");
-
-			// We don't want to copy the entire struct (it's quite big), so we create a pointer array first
+			uint32 next = 0;
 			for (uint32 i = 0; i < num_ccd_bodies; ++i)
-				sorted_ccd_bodies[i] = &ioStep->GetCCD(i);
+				if (auto &body = ioStep->GetCCD(i); accepted(body))
+					sorted_ccd_bodies[next++] = &body;
 
-			// Which we then sort
-			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_ccd_bodies, [](const CCDBody *inBody1, const CCDBody *inBody2)
+			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_impacts, [](const CCDBody *inBody1, const CCDBody *inBody2)
 				{
 					if (inBody1->mFraction != inBody2->mFraction)
 						return inBody1->mFraction < inBody2->mFraction;
@@ -2732,7 +2794,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 			}
 		};
 
-		for (uint i = 0; i < num_ccd_bodies; ++i)
+		for (uint i = 0; i < num_impacts; ++i)
 		{
 			const CCDBody *ccd_body = sorted_ccd_bodies[i];
 			Body &body1 = mBodyManager.GetBody(ccd_body->mBodyID1);
@@ -2809,6 +2871,9 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 						ContactListener *listener = ioContext->mContactReportListener;
 						Vec3 impulse = Vec3::sZero();
 						table[(int)body2.GetMotionType()](body1, inv_m1, inv_i1, r1_plus_u, body2, r2, ccd_body->mContactNormal, normal_velocity_bias, friction_direction, contact_settings, ioContext->mReportContactImpulses? &impulse : nullptr);
+						ioStep->mSweepImpacts.push_back(body1.GetID());
+						if (body2.IsDynamic())
+							ioStep->mSweepImpacts.push_back(body2.GetID());
 						if (listener != nullptr)
 							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, ccd_body->mSubShapeID1,
 								body2, ccd_body->mSubShapeID2, ccd_body->mContactPointOn2, ccd_body->mContactNormal, relative_velocity, impulse);
@@ -2914,6 +2979,12 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 
 	}
 
+}
+
+void PhysicsSystem::MoveCCDPositions(PhysicsUpdateContext::Step *ioStep, std::optional<float> inEventFraction)
+{
+	JPH_IF_ENABLE_ASSERTS(BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::ReadWrite);)
+	const uint32 num_active_bodies_after_find_collisions = ioStep->mActiveBodyReadIdx;
 	// Apply each trajectory once, after all earliest-hit decisions. Newly awakened
 	// targets were appended to the active list and have no motion in this substep.
 	static constexpr int cBoundsBatch = 64;
@@ -2924,8 +2995,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	{
 		Body &body = mBodyManager.GetBody(active_bodies[i]);
 		const auto &motion = ioStep->mBodyMotions[i];
-		body.AddPositionStep(Vec3(motion.mDeltaPosition) * motion.mFraction);
-		if (i >= num_active_bodies_after_find_collisions)
+		body.AddPositionStep(Vec3(motion.mDeltaPosition) * inEventFraction.value_or(motion.mFraction));
+		if (inEventFraction || i >= num_active_bodies_after_find_collisions)
 		{
 			body.CalculateWorldSpaceBoundsInternal();
 			bodies_to_update_bounds[num_bodies_to_update_bounds++] = body.GetID();
@@ -2938,7 +3009,11 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	}
 	if (num_bodies_to_update_bounds > 0)
 		mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
+}
 
+void PhysicsSystem::ReleaseCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
+{
+	TempAllocator *temp_allocator = ioContext->mTempAllocator;
 	// Ensure we free the CCD bodies array now, will not call the destructor!
 	temp_allocator->Free(ioStep->mBodyMotions, ioStep->mNumActiveBodyToCCDBody * sizeof(PhysicsUpdateContext::Step::BodyMotion));
 	ioStep->mBodyMotions = nullptr;
@@ -2949,6 +3024,31 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	ioStep->mCCDBodies = nullptr;
 	ioStep->mCCDBodiesCapacity = 0;
 	ioStep->mDormantCCDBodies = Array<CCDBody>();
+	ioStep->mNumCCDBodies = 0;
+	ioStep->mNextCCDBody = 0;
+	ioStep->mMinBodyMotion = ioStep->mMaxBodyMotion = Vec3::sZero();
+}
+
+void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
+{
+	float remaining = ioStep->mSweepRemaining > 0.0f? ioStep->mSweepRemaining : ioContext->mStepDeltaTime;
+	uint64 same_time_impacts = 0;
+	while (auto fraction = sEarliestCCDImpact(*ioStep))
+	{
+		float next = remaining * (1.0f - *fraction);
+		if (next < remaining)
+			same_time_impacts = 0;
+		else if (++same_time_impacts > 64u + 4u * uint64(ioStep->mNumActiveBodyToCCDBody))
+		{
+			ioContext->mErrors.fetch_or(uint32(EPhysicsUpdateError::ContinuousMotionDidNotConverge));
+			ReleaseCCDWorkspace(ioContext, ioStep);
+			return;
+		}
+		AdvanceSweep(*ioContext, *ioStep, *fraction, next, nullptr, 0);
+		remaining = next;
+	}
+	MoveCCDPositions(ioStep);
+	ReleaseCCDWorkspace(ioContext, ioStep);
 }
 
 void PhysicsSystem::JobContactRemovedCallbacks(const PhysicsUpdateContext::Step *ioStep)

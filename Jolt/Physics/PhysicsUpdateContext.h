@@ -119,6 +119,8 @@ public:
 		uint32				mCCDBodiesCapacity = 0;									///< Capacity of the mCCDBodies list
 		atomic<uint32>		mNumCCDBodies = 0;										///< Number of CCD bodies in mCCDBodies
 		Array<CCDBody>		mDormantCCDBodies;										///< Relevant sleeping cast sources, ordered by body ID
+		Array<BodyID>		mSweepImpacts;											///< Dynamic endpoints hit earlier in this substep
+		float				mSweepRemaining = 0.0f;									///< Duration of the recast trajectories
 		bool				mCheckDormantCCD = false;								///< The world may have sleeping continuous targets for this step
 		uint32				GetCCDCount() const { return mNumCCDBodies.load(memory_order_relaxed) + uint32(mDormantCCDBodies.size()); }
 		CCDBody &			GetCCD(uint32 inIndex)

@@ -6,11 +6,11 @@
 #ifdef __cplusplus
 namespace JPH { namespace GPU {
 #define JPH_CCD_ALIGN alignas(16)
-#define JPH_CCD_UINT4 UInt4
+#define JPH_CCD_UINT uint32_t
 #define JPH_CCD_FLOAT4 Float4
 #else
 #define JPH_CCD_ALIGN
-#define JPH_CCD_UINT4 uint4
+#define JPH_CCD_UINT uint
 #define JPH_CCD_FLOAT4 float4
 #endif
 
@@ -23,19 +23,14 @@ struct JPH_CCD_ALIGN ContinuousCpuBody
 struct JPH_CCD_ALIGN ContinuousSample
 {
     BodyState state;
-    JPH_CCD_FLOAT4 displacement;
-    JPH_CCD_UINT4 identity; // Global body slot, component root, first TOI bits or UINT32_MAX, zero.
-};
-struct JPH_CCD_ALIGN ContinuousRootPolicy
-{
-    JPH_CCD_UINT4 decision; // Component root, shared first-impact time bits, zero, zero.
+    JPH_CCD_FLOAT4 displacement; // Remaining translation xyz and earlier impact flag w.
 };
 struct JPH_CCD_ALIGN ContinuousMixedHit
 {
-    JPH_CCD_UINT4 bodies; // CPU body row, GPU slot, zero, zero.
+    JPH_CCD_UINT cpuRow, gpuSlot;
+    float fraction, minRestitutionSpeed;
     JPH_CCD_FLOAT4 normalFriction;
     JPH_CCD_FLOAT4 pointRestitution;
-    JPH_CCD_FLOAT4 time; // TOI, travel fraction, minimum restitution speed, zero.
 };
 struct JPH_CCD_ALIGN ContinuousReceipt
 {
@@ -45,13 +40,12 @@ struct JPH_CCD_ALIGN ContinuousReceipt
 };
 #ifdef __cplusplus
 static_assert(sizeof(ContinuousCpuBody) == 160);
-static_assert(sizeof(ContinuousSample) == 96);
-static_assert(sizeof(ContinuousRootPolicy) == 16);
-static_assert(sizeof(ContinuousMixedHit) == 64);
+static_assert(sizeof(ContinuousSample) == 80);
+static_assert(sizeof(ContinuousMixedHit) == 48);
 static_assert(sizeof(ContinuousReceipt) == 48);
 } }
 #endif
 #undef JPH_CCD_ALIGN
-#undef JPH_CCD_UINT4
+#undef JPH_CCD_UINT
 #undef JPH_CCD_FLOAT4
 #endif
