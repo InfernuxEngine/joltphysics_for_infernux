@@ -12,7 +12,8 @@ ConstantBuffer<StageWork> stage_work;
 StructuredBuffer<BodyModel> body_models;
 StructuredBuffer<ShapeModel> shape_models;
 RWStructuredBuffer<BodyForces> body_forces;
-RWStructuredBuffer<BodyState> body_states;
+// Subsequent contact levels read the body states written by other lanes.
+globallycoherent RWStructuredBuffer<BodyState> body_states;
 RWStructuredBuffer<Aabb> bounds;
 RWStructuredBuffer<Contact> contacts;
 RWStructuredBuffer<KinematicTarget> kinematic_targets;
@@ -1064,17 +1065,6 @@ void jph_warm_contact(uint ordinal, uint4 header)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void warm_contacts(uint3 tid : SV_DispatchThreadID)
-{
-    uint begin, first, end;
-    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
-    uint4 header = contact_history[0].value;
-    for (uint i = first; i < end; ++i)
-        jph_warm_contact(jph_island_patch_source(begin, i), header);
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
 void store_contact_history(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
@@ -1214,18 +1204,6 @@ void jph_solve_patch_velocity(uint patch_index)
     }
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void solve_velocity(uint3 tid : SV_DispatchThreadID)
-{
-    uint begin, first, end;
-    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
-    // This lane owns this island's entire Dynamic write domain. The host
-    // submits local slices in ascending order before the next solver phase.
-    for (uint local = first; local < end; ++local)
-        jph_solve_patch_velocity(jph_island_patch_source(begin, local));
-}
-
 bool jph_can_drift(uint index, BodyModel model)
 {
     return jph_nonstatic(model) && jph_resident(model)
@@ -1354,18 +1332,174 @@ void jph_solve_contact_position(uint source_row)
         body_states[b] = sb;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void solve_position(uint3 tid : SV_DispatchThreadID)
+interface ContactSolver
 {
-    uint patch_begin, first, end;
-    if (!jph_island_contact_range(tid.x, patch_begin, first, end)) return;
-    for (uint local = first; local < end; ++local)
+    void solve(uint source);
+}
+
+struct WarmContactSolver : ContactSolver
+{
+    uint4 history;
+    void solve(uint source) { jph_warm_contact(source, history); }
+}
+
+struct VelocityContactSolver : ContactSolver
+{
+    void solve(uint source) { jph_solve_patch_velocity(source); }
+}
+
+struct PositionContactSolver : ContactSolver
+{
+    void solve(uint source)
     {
-        uint patch = jph_island_patch_source(patch_begin, local / MaxContactPointsPerPair);
-        uint point = local % MaxContactPointsPerPair;
-        jph_solve_contact_position(patch * MaxContactPointsPerPair + point);
+        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+            jph_solve_contact_position(source * MaxContactPointsPerPair + point);
     }
+}
+
+groupshared uint2 contact_tile;
+groupshared uint4 contact_rows[IslandPatchQuantum];
+groupshared uint2 contact_predecessors[IslandPatchQuantum];
+groupshared uint contact_levels[IslandPatchQuantum + 1u];
+groupshared uint contact_level_ends[IslandPatchQuantum];
+groupshared uint contact_order[IslandPatchQuantum];
+groupshared uint contact_level_count;
+
+uint2 jph_contact_predecessors(uint row)
+{
+    const uint2 writers = contact_rows[row].yz;
+    uint2 previous = uint2(0u);
+    bool find_a = writers.x != ConstraintInvalid;
+    bool find_b = writers.y != ConstraintInvalid;
+    for (uint i = row; i > 0u && (find_a || find_b); --i)
+    {
+        const uint2 endpoints = contact_rows[i - 1u].yz;
+        if (find_a && any(endpoints == writers.x)) { previous.x = i; find_a = false; }
+        if (find_b && any(endpoints == writers.y)) { previous.y = i; find_b = false; }
+    }
+    return previous;
+}
+
+uint jph_plan_contact_tile(uint2 tile, uint lane)
+{
+    for (uint row = lane; row < tile.y; row += ContactSolverLanes)
+    {
+        contact_rows[row] = jph_island_patch_record(tile.x + row);
+        contact_level_ends[row] = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint row = lane; row < tile.y; row += ContactSolverLanes)
+        contact_predecessors[row] = jph_contact_predecessors(row);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u)
+    {
+        contact_levels[0] = 0u;
+        uint level_count = 0u;
+        for (uint row = 0u; row < tile.y; ++row)
+        {
+            const uint2 previous = contact_predecessors[row];
+            const uint level = max(contact_levels[previous.x], contact_levels[previous.y]) + 1u;
+            contact_levels[row + 1u] = level;
+            ++contact_level_ends[level - 1u];
+            level_count = max(level_count, level);
+        }
+        contact_level_count = 0u;
+        // A narrow dependency chain has little work to share between barriers.
+        if (level_count <= tile.y / 2u)
+        {
+            uint offset = 0u;
+            for (uint level = 0u; level < level_count; ++level)
+            {
+                const uint count = contact_level_ends[level];
+                contact_level_ends[level] = offset;
+                offset += count;
+            }
+            for (uint row = 0u; row < tile.y; ++row)
+            {
+                const uint index = contact_level_ends[contact_levels[row + 1u] - 1u]++;
+                contact_order[index] = contact_rows[row].x;
+            }
+            contact_level_count = level_count;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    return workgroupUniformLoad(contact_level_count);
+}
+
+void jph_finish_contact_level()
+{
+    __target_switch
+    {
+    case wgsl: __intrinsic_asm "storageBarrier()";
+    default: DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
+void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, uint lane)
+{
+    if (stage_work.range.y < ContactParallelMinimum)
+    {
+        uint begin, first, end;
+        if (jph_island_patch_range(group * ContactSolverLanes + lane, begin, first, end))
+            for (uint i = first; i < end; ++i)
+                solver.solve(jph_island_patch_record(begin + i).x);
+        return;
+    }
+
+    if (lane == 0u)
+    {
+        uint begin, first, end;
+        const bool valid = jph_island_patch_range(group, begin, first, end);
+        contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const uint2 tile = workgroupUniformLoad(contact_tile);
+    uint levels = 0u;
+    if (tile.y >= ContactParallelMinimum)
+        levels = jph_plan_contact_tile(tile, lane);
+    if (levels == 0u)
+    {
+        if (lane == 0u)
+            for (uint i = 0u; i < tile.y; ++i)
+                solver.solve(jph_island_patch_record(tile.x + i).x);
+        return;
+    }
+
+    // Each level has disjoint dynamic writers. The preceding writer of each
+    // body always has a lower level, so its original PGS order is preserved.
+    uint first = 0u;
+    for (uint level = 0u; level < levels; ++level)
+    {
+        const uint end = contact_level_ends[level];
+        for (uint i = first + lane; i < end; i += ContactSolverLanes)
+            solver.solve(contact_order[i]);
+        jph_finish_contact_level();
+        first = end;
+    }
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void warm_contacts(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    WarmContactSolver solver = {contact_history[0].value};
+    jph_solve_contact_tile(solver, group.x, lane);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void solve_velocity(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    VelocityContactSolver solver;
+    jph_solve_contact_tile(solver, group.x, lane);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
+void solve_position(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    PositionContactSolver solver;
+    jph_solve_contact_tile(solver, group.x, lane);
 }
 
 #include "rigid_sleep.slang"

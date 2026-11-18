@@ -562,7 +562,10 @@ void constraint_write_sources(uint3 tid : SV_DispatchThreadID)
     uint base = kind == ConstraintJoint ? constraint_params.references.z : constraint_params.references.w;
     uint destination = kind == ConstraintJoint ? constraint_params.sources.x : constraint_params.sources.y;
     uint4 key = cs_load(base + i);
-    cs_store(destination + i, uint4(key.z, 0u, 0u, 0u));
+    uint2 writers = uint2(0u);
+    if (kind == ConstraintPatch && key.z != ConstraintInvalid)
+        writers = cs_load(cs_ref_base(kind) + 2u * key.z).yz;
+    cs_store(destination + i, uint4(key.z, writers, 0u));
 }
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_write_islands(uint3 tid : SV_DispatchThreadID)

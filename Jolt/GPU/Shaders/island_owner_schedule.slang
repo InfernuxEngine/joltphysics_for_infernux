@@ -48,26 +48,12 @@ bool jph_island_patch_range(uint lane, out uint begin, out uint first, out uint 
     return true;
 }
 
-bool jph_island_contact_range(uint lane, out uint patch_begin, out uint first, out uint end)
-{
-    patch_begin = first = end = 0u;
-    uint4 jr, pr;
-    if (!jph_island_unit(lane, false, jr, pr)) return false;
-    // Plan acceptance proves this multiplication cannot overflow.
-    uint count = pr.y * MaxContactPointsPerPair;
-    first = stage_work.range.x;
-    if (first >= count) return false;
-    patch_begin = pr.x;
-    end = first + min(stage_work.range.y, count - first);
-    return true;
-}
-
 uint jph_island_joint_source(uint begin, uint local)
 {
     return constraint_schedule[constraint_schedule[2].value.w + begin + local].value.x;
 }
 
-uint jph_island_patch_source(uint begin, uint local)
+uint4 jph_island_patch_record(uint index)
 {
-    return constraint_schedule[constraint_schedule[3].value.x + begin + local].value.x;
+    return constraint_schedule[constraint_schedule[3].value.x + index].value;
 }

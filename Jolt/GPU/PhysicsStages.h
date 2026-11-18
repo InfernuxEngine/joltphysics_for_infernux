@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <Jolt/GPU/PhysicsTypes.h>
+#include <Jolt/GPU/ConstraintTypes.h>
 
 namespace JPH { namespace GPU {
 
@@ -59,7 +59,7 @@ enum class Stage : std::uint32_t
 
 enum class Domain : std::uint32_t
 {
-    Bodies, Shapes, Patches, Contacts, IslandPatches, IslandContacts, IslandJoints, Joints
+    Bodies, Shapes, Patches, Contacts, IslandPatches, IslandJoints, Joints
 };
 
 // Total rectangular items per dispatch, independent of island/world capacity.
@@ -69,9 +69,8 @@ enum class Domain : std::uint32_t
 constexpr std::uint32_t WorkItemLimit(Domain inDomain)
 {
     switch (inDomain) {
-    case Domain::IslandJoints: return 64;
-    case Domain::IslandPatches: return 256;
-    case Domain::IslandContacts: return 1024;
+    case Domain::IslandJoints: return IslandJointQuantum;
+    case Domain::IslandPatches: return IslandPatchQuantum;
     default: return 2048;
     }
 }
@@ -106,7 +105,7 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::BodyForces) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
             | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates), Mask(Resource::Contacts)},
-    {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, 64, 1, 1,
+    {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, ContactSolverLanes, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets)
@@ -115,7 +114,7 @@ inline constexpr StageDefinition Stages[] = {
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
-    {Stage::SolvePosition, "solve_position", Domain::IslandContacts, 64, 1, 1,
+    {Stage::SolvePosition, "solve_position", Domain::IslandPatches, ContactSolverLanes, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates)},
@@ -143,7 +142,7 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::Joints) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates) | Mask(Resource::Joints)},
-    {Stage::WarmContacts, "warm_contacts", Domain::IslandPatches, 64, 1, 1,
+    {Stage::WarmContacts, "warm_contacts", Domain::IslandPatches, ContactSolverLanes, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::BodyStates) | Mask(Resource::Contacts)
             | Mask(Resource::KinematicTargets) | Mask(Resource::ContactPatches)

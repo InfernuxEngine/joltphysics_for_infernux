@@ -26,7 +26,8 @@ CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
 CS_CONST(IslandJointQuantum, 64u);
 CS_CONST(IslandPatchQuantum, 256u);
-CS_CONST(IslandContactQuantum, 1024u);
+CS_CONST(ContactSolverLanes, 64u);
+CS_CONST(ContactParallelMinimum, ContactSolverLanes / 2u);
 CS_CONST(ConstraintInvalid, 0xffffffffu);
 CS_CONST(ConstraintJoint, 0u);
 CS_CONST(ConstraintPatch, 1u);
@@ -73,7 +74,9 @@ struct CS_ALIGN ConstraintParams
 // range[i].word0=(world,root,jointBegin,jointCount)
 // range[i].word1=(patchBegin,patchCount,0,0)
 // begin/count index the respective source-word stream (not absolute words).
-// Tables contain (islandID,0,0,0); sources contain (sourceOrdinal,0,0,0).
+// Tables contain (islandID,0,0,0). Joint sources contain (sourceOrdinal,0,0,0).
+// Patch sources contain (sourceOrdinal,writerA,writerB,0). Readonly endpoints
+// use ConstraintInvalid so static and kinematic state can be read in parallel.
 // Joint ordinals address the unchanged accepted JointStream. Patch ordinals
 // address the unchanged candidate bank and four original Contact records.
 // Within each range all source ordinals strictly increase, independently for
