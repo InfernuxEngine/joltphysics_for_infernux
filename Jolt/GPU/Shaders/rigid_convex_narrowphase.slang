@@ -766,6 +766,7 @@ void sweep_resume_motion(uint3 tid : SV_DispatchThreadID)
     uint local = stage_work.range.x + tid.x;
     float remaining = asfloat(stage_work.range.w);
     SweepBody motion = sweep_bodies[local];
+    motion.positionCOM.xyz += asfloat(stage_work.range.z) * motion.displacement.xyz;
     BodyModel model = body_models[step_params.selection.y + local];
     motion.positionCOM.w = max(motion.positionCOM.w, motion.angularResponse.w);
     motion.linearVelocity.xyz += motion.linearResponse.xyz;
