@@ -217,6 +217,7 @@ protected:
 
 private:
 	friend class ConstraintManager;
+	friend class PhysicsSystem;
 
 	/// Index that indicates this constraint is not in the constraint manager
 	static constexpr uint32		cInvalidConstraintIndex = 0xffffffff;
@@ -235,6 +236,9 @@ private:
 
 	/// If this constraint is currently enabled
 	bool						mEnabled = true;
+
+	/// A transient impact impulse remains observable, but is not a force estimate for the next substep.
+	bool						mHadSweepImpulse = false;
 
 	/// User data value (can be used by application)
 	uint64						mUserData;

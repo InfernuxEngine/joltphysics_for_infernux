@@ -160,7 +160,8 @@ void ConstraintManager::sWarmStartVelocityConstraints(Constraint **inActiveConst
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
 		ioCallback(c);
-		c->WarmStartVelocityConstraint(inWarmStartImpulseRatio);
+		c->WarmStartVelocityConstraint(c->mHadSweepImpulse? 0.0f : inWarmStartImpulseRatio);
+		c->mHadSweepImpulse = false;
 	}
 }
 

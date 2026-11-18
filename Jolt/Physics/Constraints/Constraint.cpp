@@ -51,11 +51,13 @@ ConstraintSettings::ConstraintResult ConstraintSettings::sRestoreFromBinaryState
 void Constraint::SaveState(StateRecorder &inStream) const
 {
 	inStream.Write(mEnabled);
+	inStream.Write(mHadSweepImpulse);
 }
 
 void Constraint::RestoreState(StateRecorder &inStream)
 {
 	inStream.Read(mEnabled);
+	inStream.Read(mHadSweepImpulse);
 }
 
 void Constraint::ToConstraintSettings(ConstraintSettings &outSettings) const

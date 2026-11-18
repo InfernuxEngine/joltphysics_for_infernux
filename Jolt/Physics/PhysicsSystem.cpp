@@ -576,7 +576,11 @@ bool PhysicsSystem::SolveSweepIslandConstraints(PhysicsUpdateContext &ioContext,
 			{
 				bool applied = false;
 				for (size_t j = group.mFirstJoint; j < group.mLastJoint; ++j)
-					applied |= joints[j]->SolveVelocityConstraint(ioContext.mStepDeltaTime);
+					if (joints[j]->SolveVelocityConstraint(ioContext.mStepDeltaTime))
+					{
+						joints[j]->mHadSweepImpulse = true;
+						applied = true;
+					}
 				for (size_t c = group.mFirstContact; c < group.mLastContact; ++c)
 					applied |= mContactManager.SolveVelocityConstraints(contacts[c].first, contacts[c].second);
 				if (!applied) break;
@@ -3208,7 +3212,11 @@ void PhysicsSystem::ResolveCCDVelocities(PhysicsUpdateContext *ioContext, Physic
 						ioStep->mSweepImpacts.push_back(body1.GetID());
 						if (body2.IsDynamic())
 							ioStep->mSweepImpacts.push_back(body2.GetID());
-						if (simultaneous || GetSweepVelocityIsland(*ioStep, body1) || GetSweepVelocityIsland(*ioStep, body2))
+						// Off-center inertia or translation locks can couple a tangent
+						// impulse back into the normal velocity.
+						const bool has_friction_impulse = contact_settings.mCombinedFriction > 0.0f
+							&& row.mImpulse.Cross(row.mNormal).LengthSq() > Square(1.0e-5f * row.mLastImpulse);
+						if (simultaneous || has_friction_impulse || GetSweepVelocityIsland(*ioStep, body1) || GetSweepVelocityIsland(*ioStep, body2))
 							ioStep->mSweepContacts.push_back(row);
 						else if (auto *listener = ioContext->mContactReportListener)
 							listener->OnCCDContactSolved(uint32(ioStep - ioContext->mSteps.data()), body1, row.mShape1, body2, row.mShape2,
