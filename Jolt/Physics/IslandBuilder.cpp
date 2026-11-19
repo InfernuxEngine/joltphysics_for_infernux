@@ -29,14 +29,18 @@ IslandBuilder::~IslandBuilder()
 	delete [] mBodyLinks;
 }
 
-void IslandBuilder::Init(uint32 inMaxActiveBodies)
+void IslandBuilder::ReserveBodyLinks(uint32 inBodyCount)
 {
-	mMaxActiveBodies = inMaxActiveBodies;
+	if (inBodyCount <= mBodyLinkCapacity)
+		return;
 
-	// Link each body to itself, BuildBodyIslands() will restore this so that we don't need to do this each step
-	JPH_ASSERT(mBodyLinks == nullptr);
-	mBodyLinks = new BodyLink [mMaxActiveBodies];
-	for (uint32 i = 0; i < mMaxActiveBodies; ++i)
+	// BuildBodyIslands restores every active link to itself before the next step.
+	uint32 capacity = GetNextPowerOf2(inBodyCount);
+	BodyLink *links = new BodyLink [capacity];
+	delete [] mBodyLinks;
+	mBodyLinks = links;
+	mBodyLinkCapacity = capacity;
+	for (uint32 i = 0; i < capacity; ++i)
 		mBodyLinks[i].mLinkedTo.store(i, memory_order_relaxed);
 }
 
@@ -99,7 +103,7 @@ uint32 IslandBuilder::GetLowestBodyIndex(uint32 inActiveBodyIndex) const
 void IslandBuilder::LinkBodies(uint32 inFirst, uint32 inSecond)
 {
 	// Both need to be active, we don't want to create an island with static objects
-	if (inFirst >= mMaxActiveBodies || inSecond >= mMaxActiveBodies)
+	if (inFirst >= mBodyLinkCapacity || inSecond >= mBodyLinkCapacity)
 		return;
 
 #ifdef JPH_VALIDATE_ISLAND_BUILDER

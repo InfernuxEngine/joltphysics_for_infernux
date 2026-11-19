@@ -21,8 +21,8 @@ public:
 	/// Destructor
 							~IslandBuilder();
 
-	/// Initialize the island builder with the maximum amount of bodies that could be active
-	void					Init(uint32 inMaxActiveBodies);
+	/// Reserve links for bodies that can wake during this step, before island jobs start.
+	void					ReserveBodyLinks(uint32 inBodyCount);
 
 	/// Prepare for simulation step by allocating space for the contact constraints
 	void					PrepareContactConstraints(uint32 inMaxContactConstraints, TempAllocator *inTempAllocator);
@@ -121,7 +121,7 @@ private:
 #endif
 
 	// Counters
-	uint32					mMaxActiveBodies;								///< Maximum size of the active bodies list (see BodyManager::mActiveBodies)
+	uint32					mBodyLinkCapacity = 0;							///< High water mark for dense active-body indices
 	uint32					mNumActiveBodies = 0;							///< Number of active bodies passed to
 	uint32					mNumConstraints = 0;							///< Size of the constraint list (see ConstraintManager::mConstraints)
 	uint32					mMaxContacts = 0;								///< Maximum amount of contacts supported

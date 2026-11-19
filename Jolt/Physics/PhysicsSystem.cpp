@@ -105,9 +105,6 @@ void PhysicsSystem::Init(uint inMaxBodies, uint inNumBodyMutexes, uint inMaxBody
 	// Init contact constraint manager
 	mContactManager.Init(inMaxBodyPairs, inMaxContactConstraints);
 
-	// Init islands builder
-	mIslandBuilder.Init(max_bodies);
-
 	// Initialize body interface
 	mBodyInterfaceLocking.Init(mBodyLockInterfaceLocking, mBodyManager, *mBroadPhase);
 	mBodyInterfaceNoLock.Init(mBodyLockInterfaceNoLock, mBodyManager, *mBroadPhase);
@@ -916,6 +913,8 @@ bool PhysicsSystem::PrepareUpdate(float inDeltaTime, int inCollisionSteps, Physi
 	mStepListenersMutex.lock();
 	mBodyManager.LockAllBodies();
 	mBroadPhase->LockModifications();
+	// The body list stays locked through all step jobs, including contacts waking sleeping bodies.
+	mIslandBuilder.ReserveBodyLinks(uint32(mBodyManager.GetBodies().size()));
 
 	// Get max number of concurrent jobs
 	int max_concurrency = context.GetMaxConcurrency();
