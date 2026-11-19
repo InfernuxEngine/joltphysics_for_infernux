@@ -23,6 +23,22 @@ JPH_NAMESPACE_BEGIN
 
 using namespace literals;
 
+// Use one common point for all normal/friction rows and their impulse reports.
+// In a dynamic/non-dynamic pair, taking the dynamic surface witness avoids
+// turning rounding in the other shape's witness into a tangential lever arm.
+// Kinematic surfaces still evaluate their point velocity at this common point.
+template <EMotionType Type1, EMotionType Type2>
+static JPH_INLINE RVec3 sGetSolverContactPoint(RVec3Arg inPosition1, RVec3Arg inPosition2)
+{
+	if constexpr (Type1 != EMotionType::Dynamic && Type2 == EMotionType::Dynamic)
+		return inPosition2;
+	else if constexpr (Type2 != EMotionType::Dynamic && Type1 == EMotionType::Dynamic)
+		return inPosition1;
+	else
+		return 0.5_r * (inPosition1 + inPosition2);
+}
+
+
 #ifdef JPH_DEBUG_RENDERER
 bool ContactConstraintManager::sDrawContactPoint = false;
 bool ContactConstraintManager::sDrawSupportingFaces = false;
@@ -43,7 +59,7 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 		<< " normal: " << inWorldSpaceNormal << " restitution: " << inSettings.mCombinedRestitution << " minv: " << inMinVelocityForRestitution);
 
 	// Calculate collision points relative to body
-	RVec3 p = 0.5_r * (inWorldSpacePosition1 + inWorldSpacePosition2);
+	RVec3 p = sGetSolverContactPoint<Type1, Type2>(inWorldSpacePosition1, inWorldSpacePosition2);
 	Vec3(p).StoreFloat3(&mWorldSpacePosition);
 	Vec3 r1 = Vec3(p - inBody1.GetCenterOfMassPosition());
 	Vec3 r2 = Vec3(p - inBody2.GetCenterOfMassPosition());
@@ -987,7 +1003,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				RVec3 p2_ws = transform_body2 * Vec3::sLoadFloat3Unsafe(ccp.mPosition2);
 
 				// Remember where to apply friction
-				ws_contacts[i] = 0.5_r * (p1_ws + p2_ws);
+				ws_contacts[i] = sGetSolverContactPoint<Type1, Type2>(p1_ws, p2_ws);
 
 				wcp.mNonPenetrationConstraint.SetTotalLambda(ccp.mNonPenetrationLambda);
 				wcp.CalculateNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, settings, mPhysicsSettings.mMinVelocityForRestitution);
@@ -1079,6 +1095,42 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 		+ radius(*body1)*rotation_motion;
 	if (min(motion_in_1,motion_in_2) > allowed_motion)
 		return;
+
+	// Point/line contacts do not provide a two-dimensional support patch.
+	// Under relative motion their material witnesses and cached normal may
+	// follow a rolling surface instead of the current contact geometry.
+	// Broad patches retain the existing bounded-manifold approximation.
+	if (input_cbp.mFirstCachedManifold != ManifoldMap::cInvalidHandle
+		&& (delta_position != old_delta_position
+			|| delta_rotation.EnsureWPositive().GetXYZ() != old_delta_rotation.GetXYZ()))
+	{
+		for (uint32 handle = input_cbp.mFirstCachedManifold; handle != ManifoldMap::cInvalidHandle; )
+		{
+			const CachedManifold &manifold = mReadCache->FromHandle(handle)->GetValue();
+			if (manifold.mNumContactPoints < 3)
+				return;
+			const Vec3 normal2 = Vec3::sLoadFloat3Unsafe(manifold.mContactNormal);
+			const auto spans_patch = [&](bool inFirst, Vec3Arg inNormal) {
+				const auto point = [&](uint32 i) {
+					const CachedContactPoint &cp = manifold.mContactPoints[i];
+					return Vec3::sLoadFloat3Unsafe(inFirst? cp.mPosition1 : cp.mPosition2);
+				};
+				const Vec3 origin = point(0);
+				float extent_sq = 0.0f, area = 0.0f;
+				for (uint32 i = 1; i < manifold.mNumContactPoints; ++i)
+				{
+					const Vec3 edge = point(i) - origin;
+					extent_sq = max(extent_sq, edge.LengthSq());
+					for (uint32 j = i + 1; j < manifold.mNumContactPoints; ++j)
+						area = max(area, abs(edge.Cross(point(j) - origin).Dot(inNormal)));
+				}
+				return area > 16.0f * FLT_EPSILON * extent_sq;
+			};
+			if (!spans_patch(true, old_delta_rotation * normal2) || !spans_patch(false, normal2))
+				return;
+			handle = manifold.mNextWithSameBodyPair;
+		}
+	}
 
 	// The cache is valid, return that we've handled this body pair
 	outPairHandled = true;
@@ -1282,7 +1334,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			RVec3 p2_ws = inManifold.mBaseOffset + inManifold.mRelativeContactPointsOn2[i];
 
 			// Remember where to apply friction
-			ws_contacts[i] = 0.5_r * (p1_ws + p2_ws);
+			ws_contacts[i] = sGetSolverContactPoint<Type1, Type2>(p1_ws, p2_ws);
 
 			// Convert to local space to the body
 			Vec3 p1_ls = Vec3(inverse_transform_body1 * p1_ws);
@@ -1917,7 +1969,7 @@ void ContactConstraintManager::sAppendAppliedContactImpulses(const ContactConstr
 	{
 		const WorldContactPoint<Type1, Type2> &contact = constraint.mContactPoints[i];
 		Vec3 impulse = normal * contact.mNonPenetrationConstraint.GetTotalLambda();
-		// Tangential friction acts once, at the average midpoint. Uniform
+		// Tangential friction acts once, at the average solver point. Uniform
 		// shares preserve both its net impulse and its moment about any origin.
 		impulse += friction_share;
 

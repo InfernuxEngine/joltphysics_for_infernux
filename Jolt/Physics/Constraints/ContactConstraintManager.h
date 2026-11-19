@@ -482,7 +482,7 @@ private:
 		/// Distance between the friction center and this contact point
 		float					mDistanceToFrictionCenter;
 
-		/// Frozen velocity-solver midpoint, before integration / position correction.
+		/// Frozen common velocity-solver point, before integration / position correction.
 		Float3					mWorldSpacePosition;
 	};
 
