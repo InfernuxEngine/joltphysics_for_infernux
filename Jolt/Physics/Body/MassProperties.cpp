@@ -70,6 +70,24 @@ bool MassProperties::DecomposePrincipalMomentsOfInertia(Mat44 &outRotation, Vec3
 	return true;
 }
 
+bool MassProperties::GetPrincipalInertiaForMotion(Quat &outRotation, Vec3 &outDiagonal) const
+{
+	// These are the three independent off-diagonal entries of the symmetric tensor.
+	if (mInertia(0, 1) == 0.0f && mInertia(0, 2) == 0.0f && mInertia(1, 2) == 0.0f)
+	{
+		outRotation = Quat::sIdentity();
+		outDiagonal = mInertia.GetDiagonal3();
+	}
+	else
+	{
+		Mat44 axes;
+		if (!DecomposePrincipalMomentsOfInertia(axes, outDiagonal))
+			return false;
+		outRotation = axes.GetQuaternion();
+	}
+	return outDiagonal.ReduceMin() > 0.0f && isfinite(outDiagonal.ReduceMax());
+}
+
 void MassProperties::SetMassAndInertiaOfSolidBox(Vec3Arg inBoxSize, float inDensity)
 {
 	// Calculate mass

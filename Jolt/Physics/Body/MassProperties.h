@@ -35,6 +35,10 @@ public:
 	/// @return True if successful, false if failed
 	bool					DecomposePrincipalMomentsOfInertia(Mat44 &outRotation, Vec3 &outDiagonal) const;
 
+	/// Get the positive principal moments and their orientation for rigid body motion.
+	/// A tensor already diagonal in body space keeps those axes and their order.
+	bool					GetPrincipalInertiaForMotion(Quat &outRotation, Vec3 &outDiagonal) const;
+
 	/// Set the mass and inertia of a box with edge size inBoxSize and density inDensity
 	void					SetMassAndInertiaOfSolidBox(Vec3Arg inBoxSize, float inDensity);
 
