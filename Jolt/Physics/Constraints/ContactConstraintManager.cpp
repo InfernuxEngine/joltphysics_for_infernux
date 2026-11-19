@@ -293,6 +293,8 @@ void ContactConstraintManager::CachedBodyPair::RestoreState(StateRecorder &inStr
 // ContactConstraintManager::ManifoldCache
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static constexpr uint32 cMinContactCacheBuckets = 1024;
+
 void ContactConstraintManager::ManifoldCache::Init(uint inMaxBodyPairs, uint inMaxContactConstraints, uint inCachedManifoldsSize)
 {
 	JPH_ASSERT(inMaxContactConstraints <= cMaxContactConstraintsLimit); // Should have been enforced by caller
@@ -304,8 +306,8 @@ void ContactConstraintManager::ManifoldCache::Init(uint inMaxBodyPairs, uint inM
 	constexpr uint cMaxEntrySize = max(uint(sizeof(BPKeyValue)), uint(sizeof(MKeyValue) + CachedManifold::sGetRequiredExtraSize(MaxContactPoints)));
 	mAllocator.Init(uint(min(uint64(max_body_pairs) * sizeof(BPKeyValue) + inCachedManifoldsSize, uint64(~uint(0)))), cMaxEntrySize);
 
-	mCachedManifolds.Init(GetNextPowerOf2(inMaxContactConstraints));
-	mCachedBodyPairs.Init(GetNextPowerOf2(max_body_pairs));
+	mCachedManifolds.Init(GetNextPowerOf2(inMaxContactConstraints), cMinContactCacheBuckets);
+	mCachedBodyPairs.Init(GetNextPowerOf2(max_body_pairs), cMinContactCacheBuckets);
 }
 
 void ContactConstraintManager::ManifoldCache::Clear()
@@ -324,12 +326,9 @@ void ContactConstraintManager::ManifoldCache::Clear()
 
 void ContactConstraintManager::ManifoldCache::Prepare(uint inExpectedNumBodyPairs, uint inExpectedNumManifolds)
 {
-	// Minimum amount of buckets to use in the hash map
-	constexpr uint32 cMinBuckets = 1024;
-
 	// Use the next higher power of 2 of amount of objects in the cache from last frame to determine the amount of buckets in this frame
-	mCachedManifolds.SetNumBuckets(min(max(cMinBuckets, GetNextPowerOf2(inExpectedNumManifolds)), mCachedManifolds.GetMaxBuckets()));
-	mCachedBodyPairs.SetNumBuckets(min(max(cMinBuckets, GetNextPowerOf2(inExpectedNumBodyPairs)), mCachedBodyPairs.GetMaxBuckets()));
+	mCachedManifolds.SetNumBuckets(min(max(cMinContactCacheBuckets, GetNextPowerOf2(inExpectedNumManifolds)), mCachedManifolds.GetMaxBuckets()));
+	mCachedBodyPairs.SetNumBuckets(min(max(cMinContactCacheBuckets, GetNextPowerOf2(inExpectedNumBodyPairs)), mCachedBodyPairs.GetMaxBuckets()));
 }
 
 const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const

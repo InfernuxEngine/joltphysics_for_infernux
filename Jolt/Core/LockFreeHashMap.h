@@ -88,7 +88,8 @@ public:
 
 	/// Initialization
 	/// @param inMaxBuckets Max amount of buckets to use in the hashmap. Must be power of 2.
-	void					Init(uint32 inMaxBuckets);
+	/// @param inInitialBuckets Initial bucket count, limited to inMaxBuckets. Must be power of 2.
+	void					Init(uint32 inMaxBuckets, uint32 inInitialBuckets);
 
 	/// Remove all elements.
 	/// Note that this cannot happen simultaneously with adding new elements.
@@ -184,6 +185,7 @@ private:
 
 	atomic<uint32> *		mBuckets = nullptr;				///< This contains the logical offset of the first object with a particular hash
 	uint32					mNumBuckets = 0;				///< Current number of buckets
+	uint32					mAllocatedBuckets = 0;			///< Retained storage for the largest active table
 	uint32					mMaxBuckets = 0;				///< Maximum number of buckets
 };
 

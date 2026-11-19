@@ -144,31 +144,19 @@ inline bool LFHMAllocatorContext::Allocate(uint32 inSize, uint32 inAlignment, ui
 ///////////////////////////////////////////////////////////////////////////////////
 
 template <class Key, class Value>
-void LockFreeHashMap<Key, Value>::Init(uint32 inMaxBuckets)
+void LockFreeHashMap<Key, Value>::Init(uint32 inMaxBuckets, uint32 inInitialBuckets)
 {
 	JPH_ASSERT(inMaxBuckets >= 4 && IsPowerOf2(inMaxBuckets));
 	JPH_ASSERT(mBuckets == nullptr);
 
-	mNumBuckets = inMaxBuckets;
 	mMaxBuckets = inMaxBuckets;
-
-#if JPH_DEFAULT_ALLOCATE_ALIGNMENT < 16
-	mBuckets = reinterpret_cast<atomic<uint32> *>(AlignedAllocate(inMaxBuckets * sizeof(atomic<uint32>), 16));
-#else
-	mBuckets = reinterpret_cast<atomic<uint32> *>(Allocate(inMaxBuckets * sizeof(atomic<uint32>)));
-#endif
-
-	Clear();
+	SetNumBuckets(min(inInitialBuckets, inMaxBuckets));
 }
 
 template <class Key, class Value>
 LockFreeHashMap<Key, Value>::~LockFreeHashMap()
 {
-#if JPH_DEFAULT_ALLOCATE_ALIGNMENT < 16
 	AlignedFree(mBuckets);
-#else
-	Free(mBuckets);
-#endif
 }
 
 template <class Key, class Value>
@@ -200,6 +188,14 @@ void LockFreeHashMap<Key, Value>::SetNumBuckets(uint32 inNumBuckets)
 	JPH_ASSERT(inNumBuckets >= 4 && IsPowerOf2(inNumBuckets));
 
 	mNumBuckets = inNumBuckets;
+	if (inNumBuckets > mAllocatedBuckets)
+	{
+		// Resizing is exclusive and the table is empty. No entries need rehashing.
+		AlignedFree(mBuckets);
+		mBuckets = reinterpret_cast<atomic<uint32> *>(AlignedAllocate(inNumBuckets * sizeof(atomic<uint32>), 16));
+		mAllocatedBuckets = inNumBuckets;
+		Clear();
+	}
 }
 
 template <class Key, class Value>
