@@ -1753,12 +1753,13 @@ float4 jph_solve_normal_block(BodyModel ma, BodyState sa, BodyModel mb, BodyStat
     return best * inverse_scale;
 }
 
-void jph_solve_position(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
-                        Contact contact, float penetration_slop, float maximum_correction, float baumgarte)
+void jph_solve_position_points(BodyModel ma, inout BodyState sa, BodyModel mb, inout BodyState sb,
+                               float3 normal, float3 pa, float3 pb,
+                               float penetration_slop, float maximum_correction, float baumgarte)
 {
-    float3 normal = contact.normalDepth.xyz;
-    float3 pa, pb, ra, rb;
-    jph_contact_points(contact, sa, sb, pa, pb, ra, rb);
+    float3 midpoint = 0.5f * (pa + pb);
+    float3 ra = midpoint - sa.positionCOM.xyz;
+    float3 rb = midpoint - sb.positionCOM.xyz;
     float separation = max(dot(pb - pa, normal) + penetration_slop, -maximum_correction);
     if (separation >= 0.0f)
         return;

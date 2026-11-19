@@ -1306,10 +1306,10 @@ void integrate_swept(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// One original row, retaining raw models and per-row BodyState load/store.
-void jph_solve_contact_position(uint source_row)
+void jph_solve_patch_position(uint patch_index)
 {
-    Contact contact = contacts[source_row];
+    uint slot = patch_index * MaxContactPointsPerPair;
+    Contact contact = contacts[slot];
     if (contact.meta.z == 0u)
         return;
     uint a = contact.meta.x;
@@ -1320,8 +1320,23 @@ void jph_solve_contact_position(uint source_row)
     BodyModel mb = body_models[b];
     BodyState sa = body_states[a];
     BodyState sb = body_states[b];
-    jph_solve_position(ma, sa, mb, sb, contact,
-        step_params.contact.y, step_params.contact.z, step_params.contact.w);
+    // ContactConstraintManager::sSolvePositionConstraint captures both
+    // transforms once for the patch. Re-linearizing the next witness after
+    // each point correction gives a symmetric resting patch an artificial
+    // rocking correction. Arms and inverse inertia still use the updated
+    // bodies, as in the original Jolt position iteration.
+    float3 position_a = sa.positionCOM.xyz, position_b = sb.positionCOM.xyz;
+    float4 rotation_a = sa.rotation, rotation_b = sb.rotation;
+    for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
+    {
+        Contact current = contacts[slot + point];
+        if (current.meta.z == 0u)
+            continue;
+        float3 pa = position_a + jph_rotate(rotation_a, current.localAnchorA.xyz);
+        float3 pb = position_b + jph_rotate(rotation_b, current.localAnchorB.xyz);
+        jph_solve_position_points(ma, sa, mb, sb, current.normalDepth.xyz, pa, pb,
+            step_params.contact.y, step_params.contact.z, step_params.contact.w);
+    }
     if (jph_dynamic(ma))
         body_states[a] = sa;
     if (jph_dynamic(mb))
@@ -1348,8 +1363,7 @@ struct PositionContactSolver : ContactSolver
 {
     void solve(uint source)
     {
-        for (uint point = 0u; point < MaxContactPointsPerPair; ++point)
-            jph_solve_contact_position(source * MaxContactPointsPerPair + point);
+        jph_solve_patch_position(source);
     }
 }
 
