@@ -1128,6 +1128,18 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
     if (index >= query_params.counts.x)
         return;
     QueryInput request = query_load_input(index);
+    if (request.meta.x == QueryGatherShapes)
+    {
+        uint count = 0u, status = QuerySuccess;
+        uint first = request.source.z;
+        query_gather_shapes(request, first, count, status);
+        for (uint row = count; row < request.source.w; ++row)
+            query_clear_candidate(first + row);
+        QuerySpan span;
+        span.range = uint4(0u, count, status, first);
+        query_store_span(index, span);
+        return;
+    }
     uint begin = index * query_params.sizes.y;
     for (uint row = 0u; row < query_params.sizes.y; ++row)
         query_clear_candidate(begin + row);
@@ -1154,8 +1166,6 @@ void query_evaluate(uint3 tid : SV_DispatchThreadID)
         count = cast.cursor.z;
         status = cast.cursor.w;
     }
-    else if (request.meta.x == QueryGatherShapes)
-        query_gather_shapes(request, begin, count, status);
     else if (request.meta.x == QueryPenetration)
     {
         QueryPrimitive other = query_load_primitive(request.source.y);
@@ -1312,7 +1322,8 @@ void query_compact(uint3 tid : SV_DispatchThreadID)
                 high = middle;
         }
         QuerySpan source = query_load_span(low);
-        source_record = low * query_params.sizes.y + index - source.range.x;
+        uint begin = query_params.sizes.w == QueryOutputShape ? source.range.w : low * query_params.sizes.y;
+        source_record = begin + (index - source.range.x);
     }
     // One writer per final index, including the unused tail. A sparse scatter
     // plus concurrent clearing would race and would not prove initialization.

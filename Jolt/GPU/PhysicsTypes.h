@@ -633,7 +633,7 @@ struct JPH_GPU_ALIGN QueryParams
 {
     // Request count, selected global body base/count, selected leaf count.
     JPH_GPU_UINT4 counts;
-    // Explicit primitive count, per-request scratch record stride, record capacity, output format.
+    // Explicit primitive count, scratch record stride (zero for packed shape ranges), record capacity, output format.
     JPH_GPU_UINT4 sizes;
     // Same selected layout address as StepParams; model/shape indices remain global.
     // BodyState indices are globalSlot-selection.y in the compact completed output.
@@ -647,7 +647,8 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_UINT4 meta;
     // Layer mask, include sensors, exact Collider ID low/high when requested.
     JPH_GPU_UINT4 filter;
-    // Excluded body slot; second primitive / gather target slot; requested motion fields / Sweep moving GameObject low/high in zw.
+    // Excluded body slot; second primitive / gather target slot. zw carry motion fields,
+    // the sweeping GameObject, or the internally packed shape candidate base/count per request.
     JPH_GPU_UINT4 source;
     // Ray origin / point / query shape center / bounds center; w maximum travel.
     JPH_GPU_FLOAT4 positionMaximum;
@@ -777,7 +778,7 @@ struct JPH_GPU_ALIGN QueryExportParams
 
 struct JPH_GPU_ALIGN QuerySpan
 {
-    JPH_GPU_UINT4 range; // Compact offset, record count, status, zero padding.
+    JPH_GPU_UINT4 range; // Compact offset, record count, status, packed shape candidate offset.
 };
 
 struct JPH_GPU_ALIGN QuerySummary
