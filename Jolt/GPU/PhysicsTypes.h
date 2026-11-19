@@ -661,6 +661,13 @@ struct JPH_GPU_ALIGN QueryInput
     JPH_GPU_UINT4 geometryReference;
 };
 
+// Fixed-row motion reads carry the identity from the same publication as the slot.
+struct JPH_GPU_ALIGN QueryMotionInput
+{
+    JPH_GPU_UINT4 body; // Global slot, stable BodyID, padding.
+    JPH_GPU_FLOAT4 rootCenterOfMass;
+};
+
 struct JPH_GPU_ALIGN QueryCastParams
 {
     // Work quantum, body identity prefix count, pair suffix base in 16-byte words, pair count.
@@ -933,6 +940,7 @@ JPH_GPU_CHECK_TYPE(BodyCommandParams, 16);
 JPH_GPU_CHECK_TYPE(QueryParams, 64);
 static_assert(offsetof(QueryParams, selection) == 32 && offsetof(QueryParams, selectedCounts) == 48);
 JPH_GPU_CHECK_TYPE(QueryInput, 144);
+JPH_GPU_CHECK_TYPE(QueryMotionInput, 32);
 JPH_GPU_CHECK_TYPE(ColliderPairKey, 32);
 JPH_GPU_CHECK_TYPE(QueryCastParams, 16);
 JPH_GPU_CHECK_TYPE(QueryCastState, 64);

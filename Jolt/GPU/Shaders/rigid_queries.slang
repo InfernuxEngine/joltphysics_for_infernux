@@ -731,9 +731,12 @@ void query_gather_shapes(QueryInput request, uint begin, inout uint count, inout
     }
 }
 
-uint query_write_motion(QueryInput request, uint index)
+uint query_write_motion(uint index)
 {
-    uint slot = request.source.y;
+    QueryMotionInput request;
+    request.body = query_inputs[index * 2u].value;
+    request.rootCenterOfMass = asfloat(query_inputs[index * 2u + 1u].value);
+    uint slot = request.body.x;
     BodyModel model = body_models[slot];
     BodyState state = body_states[slot - query_params.selection.y];
     if (!query_valid_quaternion(state.rotation) || !all(isfinite(state.positionCOM)) ||
@@ -743,8 +746,8 @@ uint query_write_motion(QueryInput request, uint index)
     }
     state.rotation = normalize(state.rotation);
     QueryMotionState output;
-    output.meta = uint4(slot, 1u, query_body_ids[slot - query_params.selection.y].ids.x, uint(model.mass.y));
-    output.positionInverseMass = float4(state.positionCOM.xyz - jph_rotate(state.rotation, request.geometry.xyz), 0.0f);
+    output.meta = uint4(slot, 1u, request.body.y, uint(model.mass.y));
+    output.positionInverseMass = float4(state.positionCOM.xyz - jph_rotate(state.rotation, request.rootCenterOfMass.xyz), 0.0f);
     output.rotation = state.rotation;
     output.centerOfMass = float4(state.positionCOM.xyz, 0.0f);
     output.linearVelocity = float4(state.linearVelocity.xyz, 0.0f);
@@ -1105,7 +1108,7 @@ void query_read_motion(uint3 tid : SV_DispatchThreadID)
     uint index = tid.x;
     if (index >= query_params.counts.x)
         return;
-    uint status = query_write_motion(query_load_input(index), index);
+    uint status = query_write_motion(index);
     if (status != QuerySuccess)
     {
         QueryMotionState invalid = (QueryMotionState)0;
