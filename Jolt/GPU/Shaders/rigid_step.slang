@@ -1355,8 +1355,8 @@ struct PositionContactSolver : ContactSolver
 
 groupshared uint2 contact_tile;
 groupshared uint4 contact_rows[IslandPatchQuantum];
-groupshared uint2 contact_predecessors[IslandPatchQuantum];
-groupshared uint contact_levels[IslandPatchQuantum + 1u];
+groupshared uint2 contact_writer_scratch[IslandPatchQuantum];
+groupshared uint contact_levels[IslandPatchQuantum];
 groupshared uint contact_level_ends[IslandPatchQuantum];
 groupshared uint contact_order[IslandPatchQuantum];
 groupshared uint contact_level_count;
@@ -1376,6 +1376,16 @@ uint2 jph_contact_predecessors(uint row)
     return previous;
 }
 
+// Lane zero visits patches in stable order. A link points to the latest
+// preceding row writing the same body; after visiting that row its two links
+// hold the colors already used by each of its endpoints.
+uint jph_previous_colors(uint previous, uint writer)
+{
+    if (previous == 0u) return 0u;
+    uint row = previous - 1u;
+    return contact_rows[row].y == writer ? contact_writer_scratch[row].x : contact_writer_scratch[row].y;
+}
+
 uint jph_plan_contact_tile(uint2 tile, uint lane)
 {
     for (uint row = lane; row < tile.y; row += ContactSolverLanes)
@@ -1385,22 +1395,33 @@ uint jph_plan_contact_tile(uint2 tile, uint lane)
     }
     GroupMemoryBarrierWithGroupSync();
     for (uint row = lane; row < tile.y; row += ContactSolverLanes)
-        contact_predecessors[row] = jph_contact_predecessors(row);
+        contact_writer_scratch[row] = jph_contact_predecessors(row);
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0u)
     {
-        contact_levels[0] = 0u;
         uint level_count = 0u;
         for (uint row = 0u; row < tile.y; ++row)
         {
-            const uint2 previous = contact_predecessors[row];
-            const uint level = max(contact_levels[previous.x], contact_levels[previous.y]) + 1u;
-            contact_levels[row + 1u] = level;
-            ++contact_level_ends[level - 1u];
-            level_count = max(level_count, level);
+            const uint2 previous = contact_writer_scratch[row];
+            const uint2 writers = contact_rows[row].yz;
+            const uint2 used = uint2(jph_previous_colors(previous.x, writers.x),
+                                     jph_previous_colors(previous.y, writers.y));
+            const uint available = ~(used.x | used.y);
+            // A saturated writer gets an exclusive level after the 32 mask bits.
+            uint level = level_count;
+            uint bit = 0u;
+            if (available != 0u)
+            {
+                level = uint(firstbitlow(available));
+                bit = 1u << level;
+            }
+            contact_writer_scratch[row] = used | bit;
+            contact_levels[row] = level;
+            ++contact_level_ends[level];
+            level_count = max(level_count, level + 1u);
         }
         contact_level_count = 0u;
-        // A narrow dependency chain has little work to share between barriers.
+        // A patch group dominated by one writer has little work to share between barriers.
         if (level_count <= tile.y / 2u)
         {
             uint offset = 0u;
@@ -1412,7 +1433,7 @@ uint jph_plan_contact_tile(uint2 tile, uint lane)
             }
             for (uint row = 0u; row < tile.y; ++row)
             {
-                const uint index = contact_level_ends[contact_levels[row + 1u] - 1u]++;
+                const uint index = contact_level_ends[contact_levels[row]]++;
                 contact_order[index] = contact_rows[row].x;
             }
             contact_level_count = level_count;
@@ -1458,7 +1479,7 @@ void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, u
     const uint row_count = lane == 0u ? tile.y : 0u;
 
     // One solver body serves both contiguous rows and dependency-ordered rows.
-    // A level only contains disjoint writers and completes before their successors.
+    // A level contains disjoint writers; later levels see all its updates.
     uint level_begin = 0u;
     for (uint level = 0u; level < max(levels, 1u); ++level)
     {
