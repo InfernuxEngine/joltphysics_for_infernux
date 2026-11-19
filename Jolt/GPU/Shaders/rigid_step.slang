@@ -695,9 +695,11 @@ void jph_body_prepare_kinematics(uint index, StepParams parameters)
         float3 target_com = target.positionSpeed.xyz + jph_rotate(reachable_rotation, root_com);
         state.linearVelocity = float4(jph_project_linear(model, (target_com - state.positionCOM.xyz) / requested_dt), 0.0f);
         state.angularVelocity = float4(angular_velocity, 0.0f);
-        target.state.x = (target.state.x & TargetTemporaryStatic) | TargetActive;
+        // Preparation runs once per Fixed. A new target replaces this drive; otherwise
+        // the next preparation clears its velocity after all current substeps.
+        target.state.x = (target.state.x & TargetTemporaryStatic) | TargetDriven;
     }
-    else if ((target.state.x & TargetDrivenLastTick) != 0u)
+    else if ((target.state.x & TargetDriven) != 0u)
     {
         state.linearVelocity = float4(0.0f);
         state.angularVelocity = float4(0.0f);
@@ -747,22 +749,6 @@ void apply_forces(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint index = stage_work.range.x + tid.x;
     jph_body_apply_forces(index, step_params);
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void finish_tick(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= stage_work.range.y) return;
-    uint index = stage_work.range.x + tid.x;
-    if (!jph_selected_body(index))
-        return;
-    if (!jph_resident(body_models[index]))
-        return;
-    KinematicTarget target = kinematic_targets[index];
-    if ((target.state.x & TargetActive) != 0u)
-        target.state.x = (target.state.x & TargetTemporaryStatic) | TargetDrivenLastTick;
-    kinematic_targets[index] = target;
 }
 
 [shader("compute")]

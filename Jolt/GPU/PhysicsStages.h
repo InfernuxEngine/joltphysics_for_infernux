@@ -43,7 +43,6 @@ enum class Stage : std::uint32_t
     SolveVelocity,
     Integrate,
     SolvePosition,
-    FinishTick,
     PrepareKinematics,
     SetupJoints,
     FinishJoints,
@@ -119,9 +118,6 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
             | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
         Mask(Resource::BodyStates), "solve_position_direct"},
-    {Stage::FinishTick, "finish_tick", Domain::Bodies, 64, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
-            | Mask(Resource::KinematicTargets), Mask(Resource::KinematicTargets)},
     {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)},
@@ -172,9 +168,9 @@ inline constexpr StageDefinition Stages[] = {
 // SolvePosition for each solve.x iteration, FinishJoints, StoreContactHistory. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
-// owner retires final active-set forces before sleep Commit, then appends
-// FinishTick once to arm the target arrival stop without snapping pose. Control-only jobs use neither
-// PrepareKinematics nor FinishTick. Sleeping composes engine-owned bounded
+// owner retires final active-set forces before sleep Commit. Kinematic preparation
+// stops the existing drive when the next tick has no new target. Control-only jobs
+// leave the drive untouched. Sleeping composes engine-owned bounded
 // control producers around this numerical recipe; contact publication and pair
 // policy retain their existing producers. Bodies address zero or more cooked primitive/Hull
 // leaves in their COM frame, including explicit

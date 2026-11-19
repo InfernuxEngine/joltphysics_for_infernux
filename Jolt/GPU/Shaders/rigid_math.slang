@@ -118,7 +118,7 @@ bool jph_nonstatic(BodyModel model)
 
 bool jph_has_kinematic_move(KinematicTarget target)
 {
-    return (target.state.x & (TargetPending | TargetActive | TargetDrivenLastTick)) != 0u;
+    return (target.state.x & (TargetPending | TargetDriven)) != 0u;
 }
 
 BodyModel jph_effective_model(BodyModel author, KinematicTarget target)
@@ -127,7 +127,7 @@ BodyModel jph_effective_model(BodyModel author, KinematicTarget target)
     // Static while the explicit GPU drive state supplies temporary movement.
     if ((author.meta.z & ~MotionNotResident) == MotionStatic &&
         (target.state.x & TargetTemporaryStatic) != 0u &&
-        (target.state.x & (TargetActive | TargetDrivenLastTick)) != 0u)
+        (target.state.x & TargetDriven) != 0u)
         author.meta.z = (author.meta.z & MotionNotResident) | MotionKinematic;
     return author;
 }
