@@ -155,7 +155,7 @@ uint4 query_motion_block(QueryMotionState motion, uint block)
 
 void query_store_motion(uint record, QueryMotionState motion)
 {
-    uint blocks = query_params.selectedCounts.w;
+    uint blocks = query_params.selectedCounts.w & QueryMotionAllBlocks;
     if (blocks != 0u && blocks != QueryMotionAllBlocks)
     {
         uint cursor = record * countbits(blocks);
@@ -1224,9 +1224,9 @@ void query_scan(uint3 tid : SV_DispatchThreadID)
     for (uint index = 0u; index < query_params.counts.x; ++index)
     {
         QuerySpan span = query_load_span(index);
-        // A projected host motion batch has a fixed row for every request.
-        // Preserve the old host length/padding validation in its existing GPU
-        // summary rather than downloading a redundant 16-byte span per row.
+        // Projected host motion and fixed-row device batches retain their
+        // length/padding validation in the GPU summary, avoiding a redundant
+        // 16-byte span readback per row.
         if (query_params.selectedCounts.w != 0u && (span.range.y != 1u || span.range.w != 0u))
             status = max(status, QueryNumericalFailure);
         span.range.x = count;
@@ -1326,6 +1326,15 @@ void query_export(uint3 tid : SV_DispatchThreadID)
     else if (field == QueryExportShapeRotation) value = query_hits[base + 4u].value;
     else if (field == QueryExportShapeFriction) value.x = query_hits[base + 8u].value.x;
     else if (field == QueryExportShapeBounciness) value.x = query_hits[base + 8u].value.y;
+    else if (field >= QueryExportHitPoint && field <= QueryExportHitValid)
+    {
+        bool valid = query_hits[base].value.y != 0u;
+        if (field == QueryExportHitPoint && valid) value = query_hits[base + 1u].value;
+        else if (field == QueryExportHitNormal && valid) value = query_hits[base + 2u].value;
+        else if (field == QueryExportHitDistance)
+            value.x = valid ? query_hits[base + 1u].value.w : 0x7f800000u; // Positive infinity on miss.
+        else if (field == QueryExportHitValid) value.x = valid ? 1u : 0u;
+    }
     for (uint scalar = 0u; scalar < query_export_params.sizes.z; ++scalar)
         query_export_values[destination + scalar] = value[scalar];
 }

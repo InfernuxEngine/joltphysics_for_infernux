@@ -607,6 +607,10 @@ JPH_GPU_CONSTANT(QueryExportShapeHalfExtents, 9);
 JPH_GPU_CONSTANT(QueryExportShapeRotation, 10);
 JPH_GPU_CONSTANT(QueryExportShapeFriction, 11);
 JPH_GPU_CONSTANT(QueryExportShapeBounciness, 12);
+JPH_GPU_CONSTANT(QueryExportHitPoint, 13);
+JPH_GPU_CONSTANT(QueryExportHitNormal, 14);
+JPH_GPU_CONSTANT(QueryExportHitDistance, 15);
+JPH_GPU_CONSTANT(QueryExportHitValid, 16);
 JPH_GPU_CONSTANT(QueryClosest, 0);
 JPH_GPU_CONSTANT(QueryAll, 1);
 JPH_GPU_CONSTANT(QueryUniqueCollider, 2);
@@ -622,6 +626,9 @@ JPH_GPU_CONSTANT(QueryUnsupported, 1);
 JPH_GPU_CONSTANT(QueryNumericalFailure, 2);
 // Internal continuation only; never a completed public query status.
 JPH_GPU_CONSTANT(QueryPending, 3);
+// QueryParams.selectedCounts.w combines the optional motion projection mask
+// with this fixed input-row mapping proof for device-only exports.
+JPH_GPU_CONSTANT(QueryFixedRowMapping, 0x80000000u);
 
 struct JPH_GPU_ALIGN QueryParams
 {
