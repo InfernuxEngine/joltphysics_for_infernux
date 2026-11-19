@@ -644,6 +644,13 @@ void jph_body_prepare_kinematics(uint index, StepParams parameters)
         return;
     BodyModel model = body_models[index];
     BodySleepRuntime sleep = body_sleep[index].runtime;
+    // Seed a newly published row from the tick's original pose, before applying a drive.
+    if (sleep.state.y == 0u) {
+        float3 p0, p1, p2;
+        sleep_test_points(body_states[index], body_sleep[index].author.rootHalfExtent.xyz, p0, p1, p2);
+        sleep_reset(sleep, p0, p1, p2);
+        sleep.state.x = jph_nonstatic(model) ? 1u : 0u;
+    }
     // Overwrite the derived activity on every selected row, including early
     // exits for residency/motion/target stop. World endpoints have no slot.
     sleep.state.w = 0u;

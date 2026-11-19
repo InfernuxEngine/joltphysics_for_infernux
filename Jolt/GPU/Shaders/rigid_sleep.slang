@@ -336,13 +336,3 @@ void sleep_wake_prescribed_bounds(uint3 tid:SV_DispatchThreadID)
         || (!any(low>b) && !any(a>high));
     if(hit) sleep_activate(body,true);
 }
-[shader("compute")][numthreads(64,1,1)]
-void sleep_initialize_history(uint3 tid:SV_DispatchThreadID)
-{
-    uint body;if(!sleep_work_item(tid.x,body) || !sleep_body(body)) return;
-    BodySleepRuntime state=body_sleep[body].runtime;
-    if(state.state.y!=0u) return;
-    float3 p0,p1,p2;sleep_test_points(body_states[body],body_sleep[body].author.rootHalfExtent.xyz,p0,p1,p2);
-    sleep_reset(state,p0,p1,p2);state.state.x=jph_nonstatic(body_models[body])?1u:0u;
-    body_sleep[body].runtime=state;
-}
