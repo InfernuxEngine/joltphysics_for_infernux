@@ -249,6 +249,73 @@ void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
     cs_ref(ConstraintPatch, p, world, a, b, active, status);
 }
 
+// A complete bounded graph fits in one workgroup. It owns the parent forest
+// until every edge is linked, so joining, flattening and publishing the roots
+// need no device-wide barriers between them. Shared read-only bodies never link islands.
+groupshared Atomic<uint> cs_local_parents[ConstraintLocalBodies];
+groupshared Atomic<uint> cs_local_status;
+
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_build_local_topology(uint lane : SV_GroupIndex)
+{
+    const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
+    const uint refs = joints + constraint_params.counts.z;
+    for (uint body = lane; body < bodies; body += ConstraintBlockSize)
+        cs_local_parents[body].store(cs_initial_root(body));
+    if (lane == 0u) cs_local_status.store(0u);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint status = 0u;
+    for (uint i = lane; i < refs; i += ConstraintBlockSize)
+    {
+        const uint row = i < joints ? cs_ref_base(ConstraintJoint) + 2u * i
+                                    : cs_ref_base(ConstraintPatch) + 2u * (i - joints);
+        const uint4 flags = cs_load(row + 1u);
+        status |= flags.z;
+        if (flags.y == 0u) continue;
+        uint2 edge = cs_load(row).yz;
+        if (any(edge == uint2(ConstraintInvalid))) continue;
+        edge -= uint2(constraint_params.selection.y);
+        while (edge.x != edge.y)
+        {
+            const uint hi = max(edge.x, edge.y), lo = min(edge.x, edge.y);
+            const uint parent = cs_local_parents[hi].compareExchange(hi, lo);
+            if (parent == hi) break;
+            // A failed exchange observes a strictly smaller parent. No lane waits for a peer.
+            edge = uint2(parent, lo);
+        }
+    }
+    if (status != 0u) cs_local_status.or(status);
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint errors = cs_local_status.load();
+    for (uint body = lane; body < bodies; body += ConstraintBlockSize)
+    {
+        uint root = cs_local_parents[body].load();
+        if (root != ConstraintInvalid)
+        {
+            uint parent = cs_local_parents[root].load();
+            while (parent != root)
+            {
+                root = parent;
+                parent = cs_local_parents[root].load();
+            }
+        }
+        component_parents[body].store(root);
+        cs_store(constraint_params.limits.w + body, uint4(root, 0u, 0u, 0u));
+        root_votes[body].store(0u);
+    }
+    // The wake kernels consume these roots on the same queue. An invalid input
+    // dispatches no consumers and reaches the usual wake completion as an error.
+    if (lane < cs_blocks(max(bodies, max(joints, constraint_params.counts.z))))
+        topology_arguments[lane].value = uint4(errors == 0u ? lane + 1u : 0u, 1u, 1u, 0u);
+    if (lane == 0u)
+    {
+        root_votes[bodies].store(errors == 0u ? 0u : ConstraintNotReady | errors);
+        cs_store(constraint_params.layout.y, uint4(0u, 1u, errors, errors == 0u ? 1u : 0u));
+    }
+}
+
 // The one validated CC labels every resident Dynamic, including an isolated
 // vertex without a numeric island. Other slots have an explicit Invalid row.
 [shader("compute")][numthreads(64,1,1)]

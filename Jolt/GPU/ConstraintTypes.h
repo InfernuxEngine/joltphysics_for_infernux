@@ -21,6 +21,8 @@ CS_CONST(ConstraintBlockSize, 64u);
 CS_CONST(ConstraintItemLimit, 2048u);
 CS_CONST(ConstraintBlockLimit, 32u);
 CS_CONST(ConstraintConnectivityQuantum, 32u);
+CS_CONST(ConstraintLocalBodies, 4u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalRefs, 8u * ConstraintBlockSize);
 CS_CONST(ConstraintLinksPending, 1u);
 CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
@@ -100,7 +102,12 @@ struct CS_ALIGN ConstraintParams
 // Each pass joins bounded parent chains from persistent edge cursors, then
 // flattens parents once every edge is joined. The device enables the validation
 // tail through indirect argument records indexed by workgroup count (1..32).
-// The host reads the control after the tail; the numerical header is published later.
+// A multi-workgroup pass returns its control so the host can schedule another
+// pass when links remain. Graphs within the local body/reference limits finish
+// in one workgroup. It initializes all wake votes and writes indirect arguments
+// for the following wake kernels. On a bad reference, it sets ConstraintNotReady
+// and the source status in the wake status word and publishes zero group counts.
+// Wake completion observes this status before numerical setup can advance.
 // Both atomic banks have scalar uint32 layout, with dispatch dependencies
 // between reset, linking, flattening, and publication.
 // Reflected storage access remains read_write even in load-only label entries.
