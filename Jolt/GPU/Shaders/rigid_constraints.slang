@@ -19,6 +19,7 @@ StructuredBuffer<BodySleepRecord> body_sleep;
 // The parent forest and the vote/status bank have independent lifetimes.
 RWStructuredBuffer<Atomic<uint>> component_parents;
 RWStructuredBuffer<Atomic<uint>> root_votes;
+RWStructuredBuffer<Atomic<uint>> step_status;
 RWStructuredBuffer<ConstraintScheduleWord> constraint_schedule;
 RWStructuredBuffer<ConstraintScheduleWord> topology_arguments;
 
@@ -62,8 +63,6 @@ void constraint_initialize_isolated_topology(uint3 tid : SV_DispatchThreadID)
     if (!cs_item(tid.x, constraint_params.counts.x, body)) return;
     cs_store(constraint_params.limits.w + body, uint4(cs_initial_root(body), 0u, 0u, 0u));
     root_votes[body].store(0u);
-    if (body + 1u == constraint_params.counts.x)
-        root_votes[constraint_params.counts.x].store(0u);
     if (body == 0u)
     {
         uint first = constraint_params.layout.x, end = constraint_params.limits.x;
@@ -306,12 +305,12 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
         root_votes[body].store(0u);
     }
     // The wake kernels consume these roots on the same queue. An invalid input
-    // dispatches no consumers and reaches the usual wake completion as an error.
+    // dispatches no consumers and reports the error when the tick publishes.
     if (lane < cs_blocks(max(bodies, max(joints, constraint_params.counts.z))))
         topology_arguments[lane].value = uint4(errors == 0u ? lane + 1u : 0u, 1u, 1u, 0u);
     if (lane == 0u)
     {
-        root_votes[bodies].store(errors == 0u ? 0u : ConstraintNotReady | errors);
+        if (errors != 0u) step_status[StepTopologyStatus].or(errors);
         cs_store(constraint_params.layout.y, uint4(0u, 1u, errors, errors == 0u ? 1u : 0u));
     }
 }

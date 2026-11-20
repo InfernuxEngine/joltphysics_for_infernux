@@ -37,12 +37,25 @@ struct S_ALIGN BodySleepParameters {
     S_F4 timing; // elapsed simulated interval, configured quiet seconds,
                  // configured point velocity threshold, reserved0.
 };
+// One completion record for the fixed step. Its device words are atomic
+// because separate dispatches can contribute failures before publication.
+#ifdef __cplusplus
+struct PhysicsStepStatus {
+    std::uint32_t sleep;
+    std::uint32_t topology;
+};
+static_assert(sizeof(PhysicsStepStatus)==8);
+#else
+static const uint StepSleepStatus = 0u;
+static const uint StepTopologyStatus = 1u;
+#endif
+
 // Metadata for the existing source's bounded sleep control dispatches. All
 // addresses are body slots or uint4 words, never byte offsets.
 struct S_ALIGN SleepWorkParameters {
     S_F4 timing;    // substep simulated dt, configured quiet seconds/point velocity,0.
     S_U4 selected;  // world row, body base, body count, total body slots.
-    S_U4 layout;    // schedule local body-root word base, local root-vote status scalar index,
+    S_U4 layout;    // schedule local body-root word base, zero,
                    // source first, source count (joint/patch/query domain).
                    // For batched bounds wakes, zw locate/count sorted source–target exclusions.
     S_U4 operation; // source body slot or UINT_MAX, old/new AABB bits, finalFixed01, queryCount.

@@ -2,6 +2,7 @@
 // This is control work on the same source; no dispatch submits or restarts time.
 ConstantBuffer<SleepWorkParameters> sleep_params;
 RWStructuredBuffer<Atomic<uint>> body_sleep_roots;
+RWStructuredBuffer<Atomic<uint>> step_status;
 RWStructuredBuffer<float4> sleep_aabbs;
 RWStructuredBuffer<uint4> sleep_snapshot;
 StructuredBuffer<uint> sleep_requests;
@@ -11,7 +12,7 @@ static const uint SleepBadState=1u;
 static const uint SleepBadRoot=2u;
 static const uint SleepInvalid=0xffffffffu;
 
-void sleep_fail(uint code) { body_sleep_roots[sleep_params.layout.y].or(code); }
+void sleep_fail(uint code) { step_status[StepSleepStatus].or(code); }
 bool sleep_work_item(uint lane,out uint item)
 {
     item=0u;
@@ -67,7 +68,6 @@ void sleep_clear_votes(uint3 tid:SV_DispatchThreadID)
     uint body;if(!sleep_work_item(tid.x,body)) return;
     uint local=body-sleep_params.selected.y;
     body_sleep_roots[local].store(0u);
-    if(local==0u) body_sleep_roots[sleep_params.layout.y].store(0u);
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_seed_awake_bodies(uint3 tid:SV_DispatchThreadID)
@@ -147,7 +147,7 @@ void sleep_update_body(uint body)
 void sleep_commit_body(uint body)
 {
     if(!sleep_body(body) || sleep_params.operation.z==0u) return;
-    if(body_sleep_roots[sleep_params.layout.y].load()!=0u) return;
+    if(step_status[StepSleepStatus].load()!=0u) return;
     BodyModel model=body_models[body];BodySleepRuntime state=body_sleep[body].runtime;
     if(!jph_resident(model) || !jph_nonstatic(model) || state.state.x==0u) return;
     bool eligible=state.state.z!=0u;
@@ -183,7 +183,7 @@ void sleep_retire_hinge_momentum(uint3 tid:SV_DispatchThreadID)
 {
     uint index;if(!sleep_work_item(tid.x,index) || sleep_params.operation.z==0u) return;
     if(index<sleep_params.layout.z || index-sleep_params.layout.z>=sleep_params.layout.w) return;
-    if(body_sleep_roots[sleep_params.layout.y].load()!=0u) return;
+    if(step_status[StepSleepStatus].load()!=0u) return;
     JointDirectory directory=jph_joint_load_directory(index);
     if(directory.identity.z!=sleep_params.selected.x || directory.bodies.z!=JointHinge) return;
     uint a=directory.bodies.x,b=directory.bodies.y;

@@ -105,9 +105,8 @@ struct CS_ALIGN ConstraintParams
 // A multi-workgroup pass returns its control so the host can schedule another
 // pass when links remain. Graphs within the local body/reference limits finish
 // in one workgroup. It initializes all wake votes and writes indirect arguments
-// for the following wake kernels. On a bad reference, it sets ConstraintNotReady
-// and the source status in the wake status word and publishes zero group counts.
-// Wake completion observes this status before numerical setup can advance.
+// for the following wake kernels. A bad reference writes the fixed step's
+// topology status and publishes zero group counts.
 // Both atomic banks have scalar uint32 layout, with dispatch dependencies
 // between reset, linking, flattening, and publication.
 // Reflected storage access remains read_write even in load-only label entries.
