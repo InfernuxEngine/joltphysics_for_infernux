@@ -82,8 +82,8 @@ void cs_ref(uint kind, uint ordinal, uint world, uint a, uint b, bool active, ui
 }
 uint cs_blocks(uint n) { return n / ConstraintBlockSize + (n % ConstraintBlockSize != 0u ? 1u : 0u); }
 
-// Exact chunks only. Host seeds every subsequently read empty-total / unused
-// row with zero, including B range summaries, before writers populate prefixes.
+// Initialize the allocation before its first use. Reusable storage resets
+// control and reduction totals in constraint_seed and rewrites live ranges.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_init_words(uint3 tid : SV_DispatchThreadID)
 {
@@ -100,6 +100,15 @@ void constraint_seed(uint3 tid : SV_DispatchThreadID)
     cs_store(h + 2u, uint4(constraint_params.islands.x, constraint_params.sources.z,
         constraint_params.sources.w, constraint_params.sources.x));
     cs_store(h + 3u, uint4(constraint_params.sources.y, constraint_params.limits.x, constraint_params.limits.w, constraint_params.counts.x));
+    cs_store(constraint_params.layout.y, uint4(0u));
+    if (constraint_params.select.w != 0u)
+    {
+        // A reduction of an empty domain has no dispatch to write its total.
+        cs_store(constraint_params.summary.x, uint4(0u));
+        cs_store(constraint_params.summary.y, uint4(0u));
+        cs_store(constraint_params.summary.z, uint4(0u));
+        cs_store(constraint_params.summary.w, uint4(0u));
+    }
 }
 
 // Runs only after the complete SetupJoints dispatch sequence. It reads initialized

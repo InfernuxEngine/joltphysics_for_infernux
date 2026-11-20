@@ -28,11 +28,11 @@ RWStructuredBuffer<Atomic<uint>> step_status;
 static const uint BP_BAD_BOUNDS = 1u;
 static const uint BP_SUM_OVERFLOW = 2u;
 static const uint BP_BAD_MODEL = 4u;
-static const uint BP_BAD_CURSOR = 8u;
 static const uint BP_BAD_BANK = 16u;
 static const uint BP_INDEX_OVERFLOW = 32u;
-static const uint BP_BAD_QUANTUM = 64u;
 static const uint BP_CAPACITY_NEEDED = 128u;
+static const uint BP_SWEEP_PENDING = 256u;
+static const uint BP_LIMIT_FLAGS = BP_CAPACITY_NEEDED | BP_SWEEP_PENDING;
 
 uint4 bp_load(uint p) { return contact_patches[p].leaves; }
 void bp_store(uint p, uint4 v) { contact_patches[p].leaves = v; }
@@ -54,11 +54,21 @@ uint2 bp_add64(uint2 a, uint2 b, out bool overflow)
     return uint2(lo, hi);
 }
 
+bool bp_less64(uint2 a, uint2 b)
+{
+    return a.y < b.y || (a.y == b.y && a.x < b.x);
+}
+
+uint2 bp_subtract64(uint2 a, uint2 b)
+{
+    return uint2(a.x - b.x, a.y - b.y - (a.x < b.x ? 1u : 0u));
+}
+
 uint4 bp_combine(uint4 a, uint4 b)
 {
     bool overflow;
     uint2 s = bp_add64(a.xy, b.xy, overflow);
-    return uint4(s.x, s.y, a.z | b.z | (overflow ? BP_SUM_OVERFLOW : 0u), max(a.w, b.w));
+    return uint4(s.x, s.y, a.z | b.z | (overflow ? BP_SUM_OVERFLOW : 0u), 0u);
 }
 
 bool bp_finite3(float3 v)
@@ -148,41 +158,21 @@ uint bp_blocks(uint count)
     return count / BroadphaseBlockSize + (count % BroadphaseBlockSize != 0u ? 1u : 0u);
 }
 
-uint4 bp_dispatch_dimensions(uint length, uint first, uint limit, bool block_mode)
+uint4 bp_dispatch_dimensions(uint length, uint first, uint limit)
 {
     uint count = first < length ? min(limit, length - first) : 0u;
-    return uint4(block_mode ? count : bp_blocks(count), 1u, 1u, 0u);
-}
-
-uint bp_active_level_length()
-{
-    uint length = bp_load(broadphase.activeState.x).x;
-    // The host validates scan level <= 6. A positive length stays at one
-    // through higher levels, carrying the aggregate to a fixed root.
-    for (uint level = 0u; level < 6u; ++level)
-    {
-        if (level >= broadphase.activeState.z) break;
-        length = bp_blocks(length);
-    }
-    return length;
-}
-
-uint bp_scan_length()
-{
-    if (broadphase.activeState.w == 1u) return bp_active_level_length();
-    return broadphase.scan.w;
+    return uint4(bp_blocks(count), 1u, 1u, 0u);
 }
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void seed_active(uint3 tid : SV_DispatchThreadID)
+void seed_sweep(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint status = bp_load(bp_header()).z & ~BP_CAPACITY_NEEDED;
+    uint status = bp_load(bp_header()).z & ~BP_LIMIT_FLAGS;
     bp_store(bp_header(), uint4(0u, 0u, status, 0u));
     pair_count[0].store(0u);
-    bp_store(broadphase.activeState.x, uint4(broadphase.selectedCounts.y, 0u, status, 0u));
-    bp_store(broadphase.activeState.y, uint4(0u));
+    pair_count[1].store(0u);
 }
 
 [shader("compute")]
@@ -191,19 +181,28 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
 {
     uint record = tid.x;
     if (record >= stage_work.range.y) return;
-    bool candidates = stage_work.range.z == 1u;
-    uint length = candidates ? (bp_suffix_valid() ? bp_load(bp_header()).x : 0u) : bp_active_level_length();
-    uint limit = BroadphaseItemLimit;
-    bool block_mode = stage_work.range.w == 1u;
-    if (block_mode)
+    uint length = bp_suffix_valid() ? bp_load(bp_header()).x : 0u;
+    uint first = stage_work.range.x + record * BroadphaseItemLimit;
+    indirect_arguments[record].value = bp_dispatch_dimensions(length, first, BroadphaseItemLimit);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void prepare_sweep_arguments(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= stage_work.range.y) return;
+    uint4 projection = bp_load(broadphase.summary.x);
+    uint status = projection.z | (bp_load(bp_header()).z & ~BP_LIMIT_FLAGS) | pair_count[1].load();
+    bool overflow;
+    uint2 first = bp_add64(stage_work.range.xz, uint2(tid.x * BroadphaseSweepJobs, 0u), overflow);
+    uint limit = tid.x + 1u == stage_work.range.y ? stage_work.range.w : BroadphaseSweepJobs;
+    uint jobs = 0u;
+    if (!overflow && status == 0u && bp_less64(first, projection.xy))
     {
-        length = bp_blocks(length);
-        limit = BroadphaseBlockLimit;
+        uint2 remaining = bp_subtract64(projection.xy, first);
+        jobs = remaining.y == 0u ? min(remaining.x, limit) : limit;
     }
-    // Host admission checks recordCount <= 15, blockMode in [0,1], and
-    // consumerFirst + (recordCount - 1) * limit without uint32 overflow.
-    uint first = stage_work.range.x + record * limit;
-    indirect_arguments[record].value = bp_dispatch_dimensions(length, first, limit, block_mode);
+    indirect_arguments[tid.x].value = uint4(bp_blocks(jobs), 1u, 1u, 0u);
 }
 
 uint4 bp_sort_record(uint leaf, Aabb box)
@@ -353,20 +352,18 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
     if (key.x >= broadphase.counts.z || key.z >= broadphase.counts.x) status |= BP_BAD_MODEL;
     if (status == 0u)
     {
-        uint max_x = bp_ordered(bounds[key.z].maximum.x);
+        const float max_x = bounds[key.z].maximum.x;
         uint low = rank + 1u, high = broadphase.selectedCounts.y;
         for (uint step = 0u; step < 32u && low < high; ++step)
         {
             uint middle = low + (high - low) / 2u;
             uint4 other = bp_load(broadphase.workspace.z + middle);
-            if (other.x == key.x && other.y <= max_x) low = middle + 1u;
+            if (other.x == key.x && bounds[other.z].minimum.x <= max_x) low = middle + 1u;
             else high = middle;
         }
         end = low;
     }
-    bp_store(broadphase.rankRows.x + rank, uint4(end, rank + 1u, status, 0u));
-    // The initial active prefix includes empty spans within the selected World.
-    bp_store(broadphase.activeQueues.x + rank, uint4(rank, 0u, 0u, 0u));
+    bp_store(broadphase.scan.x + rank, uint4(end - (rank + 1u), 0u, status, 0u));
 }
 
 bool bp_suppressed(uint world, uint body_a, uint body_b)
@@ -532,47 +529,35 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void collect_round(uint3 tid : SV_DispatchThreadID)
+void collect_sap_pairs(uint3 tid : SV_DispatchThreadID)
 {
-    uint ordinal;
-    uint active_count = bp_load(broadphase.activeState.x).x;
-    if (!bp_item(tid.x, active_count, ordinal)) return;
-    uint rank = bp_load(broadphase.activeQueues.x + ordinal).x;
-    // Host proves active queue uniqueness and rank<N. Handle corrupt rank
-    // locally without following it into a storage access.
-    if (rank >= broadphase.selectedCounts.y)
+    if (tid.x >= stage_work.range.y) return;
+    bool overflow;
+    uint2 job = bp_add64(stage_work.range.xz, uint2(tid.x, 0u), overflow);
+    if (overflow || !bp_less64(job, bp_load(broadphase.summary.x).xy)) return;
+
+    // Find the last exclusive prefix <= job, including runs of empty spans.
+    // The next prefix (or the total for the final rank) is strictly larger.
+    uint rank = 0u, high = broadphase.selectedCounts.y;
+    while (high - rank > 1u)
     {
-        bp_store(broadphase.scan.x + ordinal, uint4(0u, 0u, BP_BAD_CURSOR, 0u));
-        return;
+        uint middle = rank + (high - rank) / 2u;
+        if (bp_less64(job, bp_load(broadphase.scan.y + middle).xy)) high = middle;
+        else rank = middle;
     }
-    uint4 row = bp_load(broadphase.rankRows.x + rank);
-    uint status = row.z;
-    uint quantum = broadphase.round.x;
-    if (quantum == 0u || quantum > BroadphaseNeighborLimit) status |= BP_BAD_QUANTUM;
-    if (row.y < rank + 1u || row.y > row.x || row.x > broadphase.selectedCounts.y) status |= BP_BAD_CURSOR;
-    uint end = row.y;
-    if (status == 0u) end += min(quantum, row.x - row.y);
+    // The rank's projected span is at most the number of leaves, so only
+    // the low word of the difference is needed across a 32-bit carry.
+    uint other = rank + 1u + (job.x - bp_load(broadphase.scan.y + rank).x);
     uint4 key_a = bp_load(broadphase.workspace.z + rank);
-    for (uint other = row.y; other < end; ++other)
-    {
-        uint4 key_b = bp_load(broadphase.workspace.z + other);
-        if (key_b.w != 0u || key_b.x != key_a.x) { status |= BP_BAD_MODEL; continue; }
-        if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, bounds[key_a.z], bounds[key_b.z], false)) continue;
-        // Reserve one slot while filtering, as in MuJoCo Warp's device append.
-        // The following sort restores canonical order before any contact solve.
-        uint pair = pair_count[0].add(1u);
-        if (pair >= 0xffffffffu / MaxContactPointsPerPair) status |= BP_INDEX_OVERFLOW;
-        if (pair < broadphase.candidates.z)
-            resident_patches[broadphase.candidates.x + pair].leaves =
-                uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x);
-    }
-    row.y = end;
-    row.z = status;
-    bp_store(broadphase.rankRows.x + rank, row);
-    // Failure makes this rank inactive, but its status is part of this exact
-    // round's scanned prefix and is accumulated before the host continues.
-    uint active = status == 0u && row.y < row.x ? 1u : 0u;
-    bp_store(broadphase.scan.x + ordinal, uint4(active, 0u, status, active != 0u ? row.x - row.y : 0u));
+    uint4 key_b = bp_load(broadphase.workspace.z + other);
+    if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, bounds[key_a.z], bounds[key_b.z], false)) return;
+    // Atomic append balances the filtered output. Canonical sorting orders
+    // the accepted candidate stream before any dependent physics stage.
+    uint pair = pair_count[0].add(1u);
+    if (pair >= 0xffffffffu / MaxContactPointsPerPair) pair_count[1].or(BP_INDEX_OVERFLOW);
+    if (pair < broadphase.candidates.z)
+        resident_patches[broadphase.candidates.x + pair].leaves =
+            uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x);
 }
 
 groupshared uint4 bp_shared[BroadphaseBlockSize];
@@ -583,11 +568,10 @@ groupshared uint4 bp_shared[BroadphaseBlockSize];
 [numthreads(64, 1, 1)]
 void scan_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 {
-    uint length = bp_scan_length();
+    uint length = broadphase.scan.w;
     uint block_count = bp_blocks(length);
     uint block;
-    // The active length can come from storage. Mask reads and writes without
-    // using that value to control whether a lane reaches a barrier.
+    // Mask tail lanes without changing workgroup barrier participation.
     bool active_block = bp_item(gid.x, block_count, block);
     uint first = block * BroadphaseBlockSize;
     bool valid = active_block && lane < length - first;
@@ -618,7 +602,7 @@ void scan_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 [numthreads(64, 1, 1)]
 void reduce_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 {
-    uint length = bp_scan_length();
+    uint length = broadphase.scan.w;
     uint block_count = bp_blocks(length);
     uint block;
     bool active_block = bp_item(gid.x, block_count, block);
@@ -641,25 +625,10 @@ void reduce_blocks(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 void add_scan_offsets(uint3 tid : SV_DispatchThreadID)
 {
     uint item;
-    uint length = bp_scan_length();
+    uint length = broadphase.scan.w;
     if (!bp_item(tid.x, length, item)) return;
     uint4 parent = bp_load(broadphase.scanParent.x + item / BroadphaseBlockSize);
     bp_store(broadphase.scan.y + item, bp_combine(parent, bp_load(broadphase.scan.y + item)));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void compact_active(uint3 tid : SV_DispatchThreadID)
-{
-    uint item;
-    uint active_count = bp_load(broadphase.activeState.x).x;
-    if (!bp_item(tid.x, active_count, item)) return;
-    uint4 flag = bp_load(broadphase.scan.x + item);
-    if (flag.x == 0u) return;
-    uint4 prefix = bp_load(broadphase.scan.y + item);
-    // Prefix high must be zero because each input is 0/1 and count<=N.
-    // No capacity tail or target queue suffix is read by this entry.
-    bp_store(broadphase.activeQueues.y + prefix.x, bp_load(broadphase.activeQueues.x + item));
 }
 
 // Dedicated fixed-one-record publication entries. Dispatch exactly one group;
@@ -677,44 +646,15 @@ void accumulate_status_summary(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void publish_active_summary(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x != 0u) return;
-    uint4 input = bp_load(broadphase.activeState.x);
-    uint4 header = bp_load(bp_header());
-    uint4 total = uint4(0u);
-    // Zero indirect groups have not produced a root for this window. Never
-    // load the stale root, even though its memory was initialized earlier.
-    if (input.x != 0u) total = bp_load(broadphase.summary.x);
-    uint status = input.z | header.z | total.z;
-    if (total.y != 0u) status |= BP_INDEX_OVERFLOW;
-    if (total.x > input.x)
-        status |= BP_BAD_CURSOR;
-    header.z = status;
-    bp_store(bp_header(), header);
-    bp_store(broadphase.activeState.y, uint4(total.x, total.w, status, 0u));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void finish_sap_ranks(uint3 tid : SV_DispatchThreadID)
-{
-    uint rank;
-    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
-    uint4 row = bp_load(broadphase.rankRows.x + rank);
-    uint status = row.z;
-    if (row.y != row.x) status |= BP_BAD_CURSOR;
-    bp_store(broadphase.scan.x + rank, uint4(0u, 0u, status, 0u));
-}
-
-[shader("compute")]
-[numthreads(1, 1, 1)]
 void publish_count_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     uint count = pair_count[0].load();
-    uint status = bp_load(bp_header()).z | bp_load(broadphase.summary.x).z;
+    uint4 projection = bp_load(broadphase.summary.x);
+    uint status = (bp_load(bp_header()).z & ~BP_LIMIT_FLAGS) | projection.z | pair_count[1].load();
+    if (bp_less64(stage_work.range.xz, projection.xy)) status |= BP_SWEEP_PENDING;
     bp_store(bp_header(), uint4(count, 0u, status, count));
+    bp_store(bp_header() + 1u, projection);
 }
 
 groupshared uint bp_published_count;
@@ -745,13 +685,13 @@ void publish_candidates(uint lane : SV_GroupIndex)
     const uint chunk = stage_work.range.x;
     for (uint record = lane; record < stage_work.range.y; record += BroadphaseBlockSize)
         indirect_arguments[record].value =
-            bp_dispatch_dimensions(bp_published_count, record * chunk, chunk, false);
+            bp_dispatch_dimensions(bp_published_count, record * chunk, chunk);
     if (lane == 0u && stage_work.range.z != 0u)
     {
         const uint setup = stage_work.range.y;
         indirect_arguments[setup].value =
             bp_dispatch_dimensions(bp_published_count * MaxContactPointsPerPair,
-                                   0u, chunk * MaxContactPointsPerPair, false);
+                                   0u, chunk * MaxContactPointsPerPair);
         // StoreContactHistory always replaces its header, including when this
         // substep generated no pairs.
         const uint groups = max(1u, (bp_published_count + BroadphaseBlockSize - 1u) / BroadphaseBlockSize);
