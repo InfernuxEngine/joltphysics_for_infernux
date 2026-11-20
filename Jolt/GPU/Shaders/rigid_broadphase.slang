@@ -363,7 +363,48 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
         }
         end = low;
     }
-    bp_store(broadphase.scan.x + rank, uint4(end - (rank + 1u), 0u, status, 0u));
+    if (broadphase.round.x != 0u)
+    {
+        bool active = false;
+        if (status == 0u)
+        {
+            ShapeModel shape = shape_models[key.z];
+            uint motion = body_models[shape.meta.y].meta.z;
+            active = (motion & MotionNotResident) == 0u &&
+                (motion == MotionDynamic || (shape.meta.w & ShapeSensor) != 0u);
+        }
+        bp_store(broadphase.summary.y + rank, uint4(end, uint(active), status, 0u));
+        bp_store(broadphase.scan.x + rank, uint4(uint(active), 0u, status, 0u));
+    }
+    else
+        bp_store(broadphase.scan.x + rank, uint4(end - (rank + 1u), 0u, status, 0u));
+}
+
+// A dynamic or sensor leaf owns the entire right interval. Other leaves
+// project only against active positions in that interval. The geometrical
+// filters and canonical candidate order stay shared by both domains.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void project_active_pairs(uint3 tid : SV_DispatchThreadID)
+{
+    uint rank;
+    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
+    uint4 row = bp_load(broadphase.summary.y + rank);
+    const uint active_before = bp_load(broadphase.scan.y + rank).x;
+    uint start = rank + 1u;
+    uint count = row.x - start;
+    if (row.y != 0u)
+        bp_store(broadphase.summary.z + active_before, uint4(rank, 0u, 0u, 0u));
+    else
+    {
+        const uint active_end = row.x < broadphase.selectedCounts.y
+            ? bp_load(broadphase.scan.y + row.x).x
+            : bp_load(broadphase.summary.x).x;
+        start = active_before;
+        count = active_end - active_before;
+    }
+    bp_store(broadphase.summary.y + rank, uint4(start, row.y, 0u, 0u));
+    bp_store(broadphase.scan.x + rank, uint4(count, 0u, row.z, 0u));
 }
 
 bool bp_suppressed(uint world, uint body_a, uint body_b)
@@ -547,7 +588,15 @@ void collect_sap_pairs(uint3 tid : SV_DispatchThreadID)
     }
     // The rank's projected span is at most the number of leaves, so only
     // the low word of the difference is needed across a 32-bit carry.
-    uint other = rank + 1u + (job.x - bp_load(broadphase.scan.y + rank).x);
+    const uint local_ordinal = job.x - bp_load(broadphase.scan.y + rank).x;
+    uint other = rank + 1u + local_ordinal;
+    if (broadphase.round.x != 0u)
+    {
+        const uint2 row = bp_load(broadphase.summary.y + rank).xy;
+        other = row.x + local_ordinal;
+        if (row.y == 0u)
+            other = bp_load(broadphase.summary.z + other).x;
+    }
     uint4 key_a = bp_load(broadphase.workspace.z + rank);
     uint4 key_b = bp_load(broadphase.workspace.z + other);
     if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, bounds[key_a.z], bounds[key_b.z], false)) return;
@@ -683,18 +732,20 @@ void publish_candidates(uint lane : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     const uint chunk = stage_work.range.x;
-    for (uint record = lane; record < stage_work.range.y; record += BroadphaseBlockSize)
-        indirect_arguments[record].value =
-            bp_dispatch_dimensions(bp_published_count, record * chunk, chunk);
-    if (lane == 0u && stage_work.range.z != 0u)
+    const uint stride = stage_work.range.z;
+    for (uint tile = lane; tile < stage_work.range.y; tile += BroadphaseBlockSize)
     {
-        const uint setup = stage_work.range.y;
-        indirect_arguments[setup].value =
-            bp_dispatch_dimensions(bp_published_count * MaxContactPointsPerPair,
-                                   0u, chunk * MaxContactPointsPerPair);
-        // StoreContactHistory always replaces its header, including when this
-        // substep generated no pairs.
-        const uint groups = max(1u, (bp_published_count + BroadphaseBlockSize - 1u) / BroadphaseBlockSize);
-        indirect_arguments[setup + 1u].value = uint4(groups, 1u, 1u, 0u);
+        const uint first = tile * chunk;
+        const uint record = tile * stride;
+        const uint4 pairs = bp_dispatch_dimensions(bp_published_count, first, chunk);
+        indirect_arguments[record].value = pairs;
+        if (stride != 1u)
+        {
+            indirect_arguments[record + 1u].value =
+                bp_dispatch_dimensions(bp_published_count * MaxContactPointsPerPair,
+                                       first * MaxContactPointsPerPair, chunk * MaxContactPointsPerPair);
+            // History always replaces its header in the first tile.
+            indirect_arguments[record + 2u].value = uint4(max(uint(tile == 0u), pairs.x), 1u, 1u, 0u);
+        }
     }
 }

@@ -37,7 +37,7 @@ struct BP_ALIGN BroadphaseParams
 {
     BP_U4 counts;       // accepted leaf N, joint J, world W, body B.
     BP_U4 workspace;    // arena word capacity, header address, final SAP bank, final suppression bank.
-    BP_U4 round;        // Zero, swept pairs, device-owned count, single-group pairs.
+    BP_U4 round;        // Project active pairs, swept pairs, device-owned count, single-group pairs.
     // candidates.xy address the separate resident_patches allocation;
     // all other arena addresses refer to the scratch contact_patches port.
     BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header.x.
@@ -45,7 +45,7 @@ struct BP_ALIGN BroadphaseParams
     BP_U4 mergeKey;     // 0=SAP(world,minX,leaf), 1=suppression(world,bodyA,bodyB,joint), 2=pair(world,leafA,leafB); yzw zero.
     BP_U4 scan;         // input base, exclusive-prefix base, block-total base, valid input length.
     BP_U4 scanParent;   // globally scanned parent prefix base for add_scan_offsets; yzw zero.
-    BP_U4 summary;      // final reduction record address, yzw zero.
+    BP_U4 summary;      // Reduction record, projection rows, active rank directory, zero.
     // One accepted layout address, never a stable RuntimeWorld identity.
     // selection=(world row, body base, leaf base, joint base).
     // selectedCounts=(body capacity, leaf count, joint count, Collider-pair ignore count).
@@ -65,8 +65,8 @@ struct BP_ALIGN BroadphaseParams
 // StageWork for collect_sap_pairs = (first job lo, maximum jobs, first job hi, 0).
 // Indirect records live in a separate allocation: (groupsX, 1, 1, 0), with
 // exactly the first 12 bytes consumed as indirect arguments.
-// StageWork for publish_candidates = (pair chunk width, pair argument count,
-// optional setup and history argument count, 0).
+// StageWork for publish_candidates = (pair chunk width, tiles, records per tile, 0).
+// A counted tile publishes consecutive pair, setup and history records.
 // All scan/reduce records = (sumLo,sumHi,statusBits,0). The associative
 // operator performs checked uint2 sum and bitwise OR. Sum overflow sets bit 1.
 // Pair words = (canonicalLeafA,canonicalLeafB,0,world) before narrowphase.
