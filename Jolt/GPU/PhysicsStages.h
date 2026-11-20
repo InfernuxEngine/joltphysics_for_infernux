@@ -150,7 +150,8 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::BodyStates) | Mask(Resource::Contacts), "warm_contacts_direct"},
     {Stage::StoreContactHistory, "store_contact_history", Domain::Patches, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::Contacts) | Mask(Resource::ContactPatches)
-            | Mask(Resource::SleepStates) | Mask(Resource::BodyModels), Mask(Resource::ContactHistory)},
+            | Mask(Resource::SleepStates) | Mask(Resource::BodyModels) | Mask(Resource::ConstraintSchedule),
+        Mask(Resource::ContactHistory)},
     {Stage::CaptureSweepMotion, "capture_sweep_motion", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::SweepBodies)},
@@ -172,7 +173,7 @@ inline constexpr StageDefinition Stages[] = {
 // SolveVelocity for each counts.w iteration, Integrate, SolveJointPosition then
 // SolvePosition for each solve.x iteration, FinishJoints, StoreContactHistory. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
-// SolveVelocityRounds owns entire small contact islands for all velocity rounds
+// SolveVelocityRounds owns the admitted contact islands for all velocity rounds
 // when there are no joint or participant updates between the rounds.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner retires final active-set forces before sleep Commit. Kinematic preparation

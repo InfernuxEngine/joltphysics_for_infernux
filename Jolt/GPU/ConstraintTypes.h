@@ -7,13 +7,20 @@
 #include "PhysicsTypes.h"
 
 #ifdef __cplusplus
+#include <algorithm>
 namespace JPH { namespace GPU {
 #define CS_ALIGN alignas(16)
 #define CS_U4 UInt4
+#define CS_UINT std::uint32_t
+#define CS_MIN std::min
+#define CS_INLINE inline constexpr
 #define CS_CONST(name, value) inline constexpr std::uint32_t name = value
 #else
 #define CS_ALIGN
 #define CS_U4 uint4
+#define CS_UINT uint
+#define CS_MIN min
+#define CS_INLINE
 #define CS_CONST(name, value) static const uint name = value
 #endif
 
@@ -23,6 +30,9 @@ CS_CONST(ConstraintBlockLimit, 32u);
 CS_CONST(ConstraintConnectivityQuantum, 32u);
 CS_CONST(ConstraintLocalBodies, 4u * ConstraintBlockSize);
 CS_CONST(ConstraintLocalRefs, 8u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalJointDispatch, ConstraintLocalRefs / ConstraintBlockSize);
+CS_CONST(ConstraintLocalPatchDispatch, ConstraintLocalJointDispatch + 1u);
+CS_CONST(ConstraintLocalArgumentWords, ConstraintLocalPatchDispatch + 1u);
 CS_CONST(ConstraintLinksPending, 1u);
 CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
@@ -31,6 +41,7 @@ CS_CONST(IslandPatchQuantum, 256u);
 CS_CONST(ContactSolverLanes, 64u);
 CS_CONST(ContactParallelMinimum, ContactSolverLanes / 2u);
 CS_CONST(ConstraintInvalid, 0xffffffffu);
+CS_CONST(ConstraintWholeIslandTable, 0xffffffffu);
 CS_CONST(ConstraintJoint, 0u);
 CS_CONST(ConstraintPatch, 1u);
 CS_CONST(ConstraintBadModel, 1u);
@@ -41,6 +52,13 @@ CS_CONST(ConstraintNotConverged, 16u);
 CS_CONST(ConstraintOverflow, 32u);
 CS_CONST(ConstraintBadSchedule, 64u);
 CS_CONST(ConstraintNotReady, 0x80000000u);
+
+CS_INLINE CS_UINT ConstraintIslandBatchWidth(CS_UINT remaining, CS_UINT maximum, CS_UINT quantum)
+{
+    const CS_UINT lanes = CS_MIN(CS_MIN(ConstraintBlockSize, quantum), remaining);
+    const CS_UINT slice = CS_MIN(quantum / lanes, maximum);
+    return CS_MIN(remaining, quantum / slice);
+}
 
 struct CS_ALIGN ConstraintScheduleWord { CS_U4 value; };
 
@@ -123,5 +141,8 @@ static_assert(alignof(ConstraintParams) == 16);
 #endif
 #undef CS_ALIGN
 #undef CS_U4
+#undef CS_UINT
+#undef CS_MIN
+#undef CS_INLINE
 #undef CS_CONST
 #endif

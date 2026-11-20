@@ -1065,7 +1065,10 @@ void store_contact_history(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= stage_work.range.y) return;
     uint ordinal = stage_work.range.x + tid.x;
     if (ordinal == 0u)
-        contact_history[0].value = uint4(step_params.solve.w, asuint(step_params.gravityDt.w), 0u, 0u);
+    {
+        uint count = constraint_schedule[1].value.y != 0u ? step_params.solve.w : 0u;
+        contact_history[0].value = uint4(count, asuint(step_params.gravityDt.w), 0u, 0u);
+    }
     uint4 patch = contact_patches[contact_patches[0].leaves.x + ordinal].leaves;
     uint slot = ordinal * MaxContactPointsPerPair;
     Contact contact = contacts[slot];
@@ -1360,7 +1363,7 @@ struct PositionContactSolver : ContactSolver
     }
 }
 
-groupshared uint2 contact_tile;
+groupshared uint4 contact_tile;
 groupshared uint4 contact_rows[IslandPatchQuantum];
 groupshared uint2 contact_writer_scratch[IslandPatchQuantum];
 groupshared uint contact_levels[IslandPatchQuantum];
@@ -1469,16 +1472,8 @@ void jph_solve_contact_range<Solver : ContactSolver>(Solver solver, uint island)
             solver.solve(jph_island_patch_record(begin + row).x);
 }
 
-void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, uint lane)
+void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint2 tile, uint lane)
 {
-    if (lane == 0u)
-    {
-        uint begin, first, end;
-        const bool valid = jph_island_patch_range(group, begin, first, end);
-        contact_tile = valid ? uint2(begin + first, end - first) : uint2(0u);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    const uint2 tile = workgroupUniformLoad(contact_tile);
     uint levels = 0u;
     if (tile.y >= ContactParallelMinimum)
         levels = jph_plan_contact_tile(tile, lane);
@@ -1514,12 +1509,68 @@ void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint group, u
     }
 }
 
+// Reproduce the rectangular planner's contact tile boundaries inside a
+// counted island. The same contiguous rows reach the same cooperative solver.
+uint jph_contact_slice_width(uint island, uint remaining, uint maximum)
+{
+    for (;;)
+    {
+        uint lanes = ConstraintIslandBatchWidth(remaining, maximum, IslandPatchQuantum);
+        if (island < lanes) return IslandPatchQuantum / lanes;
+        island -= lanes;
+        remaining -= lanes;
+    }
+}
+
+// (first source, row count, slice width, one island per invocation).
+uint4 jph_contact_group_tile(uint group, uint lane)
+{
+    if (lane == 0u)
+    {
+        bool whole_table = stage_work.range.z == ConstraintWholeIslandTable;
+        uint maximum = whole_table ? constraint_schedule[1].value.w : 0u;
+        if (whole_table && maximum < ContactParallelMinimum)
+            contact_tile = uint4(0u, 0u, 0u, 1u);
+        else
+        {
+            uint begin, first, end;
+            const bool valid = jph_island_patch_range(group, begin, first, end);
+            uint count = valid ? end - first : 0u;
+            uint width = whole_table && valid
+                ? jph_contact_slice_width(group, constraint_schedule[0].value.z, maximum)
+                : count;
+            contact_tile = uint4(begin + first, count, width, 0u);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    return workgroupUniformLoad(contact_tile);
+}
+
+void jph_solve_contact_tiles<Solver : ContactSolver>(Solver solver, uint4 work, uint lane)
+{
+    for (uint offset = 0u; offset < work.y; offset += work.z)
+    {
+        const uint size = min(work.z, work.y - offset);
+        jph_solve_contact_tile(solver, uint2(work.x + offset, size), lane);
+        if (offset + size < work.y) jph_finish_contact_level();
+    }
+}
+
+void jph_solve_contact_group<Solver : ContactSolver>(Solver solver, uint group, uint lane)
+{
+    const uint4 work = jph_contact_group_tile(group, lane);
+    if (work.w != 0u)
+        jph_solve_contact_range(solver, group * ContactSolverLanes + lane);
+    else
+        jph_solve_contact_tiles(solver, work, lane);
+}
+
 [shader("compute")]
 [numthreads(ContactSolverLanes, 1, 1)]
 void warm_contacts(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     WarmContactSolver solver = {contact_history[0].value};
-    jph_solve_contact_tile(solver, group.x, lane);
+    jph_solve_contact_group(solver, group.x, lane);
 }
 
 [shader("compute")]
@@ -1527,7 +1578,7 @@ void warm_contacts(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 void solve_velocity(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     VelocityContactSolver solver;
-    jph_solve_contact_tile(solver, group.x, lane);
+    jph_solve_contact_group(solver, group.x, lane);
 }
 
 [shader("compute")]
@@ -1535,7 +1586,7 @@ void solve_velocity(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 void solve_position(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     PositionContactSolver solver;
-    jph_solve_contact_tile(solver, group.x, lane);
+    jph_solve_contact_group(solver, group.x, lane);
 }
 
 [shader("compute")]
@@ -1556,15 +1607,30 @@ void solve_velocity_direct(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(ContactSolverLanes, 1, 1)]
-void solve_velocity_rounds(uint3 tid : SV_DispatchThreadID)
+void solve_velocity_rounds(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
+    VelocityContactSolver solver;
+    const bool whole_table = stage_work.range.z == ConstraintWholeIslandTable;
+    const uint rounds = whole_table ? stage_work.range.x : step_params.counts.w;
+    if (whole_table && stage_work.range.y >= ContactParallelMinimum)
+    {
+        const uint4 work = jph_contact_group_tile(group.x, lane);
+        if (work.w == 0u)
+        {
+            for (uint iteration = 0u; iteration < rounds; ++iteration)
+            {
+                jph_solve_contact_tiles(solver, work, lane);
+                if (iteration + 1u < rounds) jph_finish_contact_level();
+            }
+            return;
+        }
+    }
     uint begin, first, end;
-    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
+    if (!jph_island_patch_range(group.x * ContactSolverLanes + lane, begin, first, end)) return;
 
     // This lane has all the dynamic writers of its island. Each round sees
     // the prior round's impulses in the same canonical patch order.
-    VelocityContactSolver solver;
-    for (uint iteration = 0u; iteration < step_params.counts.w; ++iteration)
+    for (uint iteration = 0u; iteration < rounds; ++iteration)
         for (uint row = first; row < end; ++row)
             solver.solve(jph_island_patch_record(begin + row).x);
 }

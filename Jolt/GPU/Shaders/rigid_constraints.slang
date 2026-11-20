@@ -617,8 +617,19 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
     if (lane == ConstraintBlockSize - 1u)
     {
         uint header = constraint_params.layout.x;
-        cs_store(header, cs_shared[lane]);
-        cs_store(header + 1u, uint4(joint_count, patch_count, cs_local_maxima[lane]));
+        uint4 totals = cs_shared[lane];
+        uint2 maxima = cs_local_maxima[lane];
+        cs_store(header, totals);
+        cs_store(header + 1u, uint4(joint_count, patch_count, maxima));
+        uint joint_groups = cs_blocks(totals.y);
+        uint patch_groups = maxima.y < ContactParallelMinimum ? cs_blocks(totals.z) : totals.z;
+        if (totals.w != 0u)
+        {
+            step_status[StepTopologyStatus].or(totals.w);
+            joint_groups = patch_groups = 0u;
+        }
+        topology_arguments[ConstraintLocalJointDispatch].value = uint4(joint_groups, 1u, 1u, 0u);
+        topology_arguments[ConstraintLocalPatchDispatch].value = uint4(patch_groups, 1u, 1u, 0u);
     }
 }
 
