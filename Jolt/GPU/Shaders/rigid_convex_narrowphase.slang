@@ -16,6 +16,9 @@ RWStructuredBuffer<SweepBody> sweep_bodies;
 RWStructuredBuffer<Atomic<uint>> sweep_choice;
 RWStructuredBuffer<Atomic<uint>> convex_jobs;
 RWStructuredBuffer<uint4> convex_dispatch_args;
+// One record per world's substep. Remaining seconds and advance fraction
+// are FP32 bits, followed by consecutive impacts at the current time.
+RWStructuredBuffer<uint4> sweep_clock;
 
 uint cvx_step_slots()
 {
@@ -220,13 +223,6 @@ void narrowphase_job_progress(uint3 tid:SV_DispatchThreadID)
     cvx_dispatch_jobs(failed ? 0u : pending_lanes);
 }
 
-[shader("compute")]
-[numthreads(64,1,1)]
-void sweep_event_contact_progress(uint3 tid:SV_DispatchThreadID)
-{
-    if (tid.x == 0u) cvx_step_progress();
-}
-
 void sweep_record_linear_hit(uint base, float fraction, float3 normal, float3 ra, float3 rb, float normalTravel)
 {
     if (normalTravel <= 0.0f) return;
@@ -239,7 +235,7 @@ void sweep_record_linear_hit(uint base, float fraction, float3 normal, float3 ra
     if (approachSpeed <= 0.0f) return;
     // Repeating an impulse below the cast's spatial resolution cannot change
     // the accepted linear motion in this interval.
-    if (stage_work.range.z == SweepContinuation && approachSpeed * asfloat(stage_work.range.w) <= CvxCastTolerance)
+    if (stage_work.range.z == SweepContinuation && approachSpeed * asfloat(sweep_clock[0].x) <= CvxCastTolerance)
         return;
     sweep_choice[3u * step_params.selectedCounts.x + 1u].min(asuint(fraction));
 }
@@ -391,7 +387,35 @@ void sweep_initialize_jobs(uint3 tid : SV_DispatchThreadID)
         sweep_choice[3u * count].store(0u);
         sweep_choice[3u * count + 1u].store(0xffffffffu);
         sweep_choice[5u * count + 2u].store(0u);
+        if (stage_work.range.z == SweepInitial)
+            sweep_clock[0] = uint4(asuint(step_params.gravityDt.w), 0u, 0u, 0u);
     }
+}
+
+uint4 sweep_groups(uint count)
+{
+    return uint4((min(SweepMotionChunk, count) + 63u) / 64u, 1u, 1u, 0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_event_contact_progress(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    cvx_step_progress();
+    bool ready = convex_scratch[0].x == QuerySuccess;
+    uint bodies = ready ? step_params.selectedCounts.x : 0u;
+    convex_dispatch_args[SweepLinkDispatch] = uint4(ready ? 1u : 0u, 1u, 1u, 0u);
+    convex_dispatch_args[SweepFlattenDispatch] = sweep_groups(bodies);
+    convex_dispatch_args[SweepSolveDispatch] = uint4(bodies / 64u + uint(bodies % 64u != 0u), 1u, 1u, 0u);
+}
+
+void sweep_publish_arguments(bool move, bool report, bool integrate)
+{
+    uint bodies = step_params.selectedCounts.x;
+    convex_dispatch_args[SweepMotionDispatch] = sweep_groups(move ? bodies : 0u);
+    convex_dispatch_args[SweepReportDispatch] = sweep_groups(report ? step_params.solve.w : 0u);
+    convex_dispatch_args[SweepIntegrateDispatch] = sweep_groups(integrate ? bodies : 0u);
 }
 
 [shader("compute")]
@@ -400,12 +424,38 @@ void sweep_job_progress(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
     cvx_step_progress();
-    if (convex_scratch[0].x == QuerySuccess)
+    uint4 result = convex_scratch[0];
+    if (result.x != QuerySuccess)
     {
-        uint tail = 3u * step_params.selectedCounts.x;
-        convex_scratch[0].z = sweep_choice[tail + 1u].load();
-        convex_scratch[0].w = sweep_choice[tail].load();
+        sweep_publish_arguments(false, false, false);
+        return;
     }
+
+    uint body_count = step_params.selectedCounts.x;
+    uint impact = sweep_choice[3u * body_count + 1u].load();
+    if (impact == 0xffffffffu)
+    {
+        convex_scratch[0].z = SweepNoImpact;
+        sweep_publish_arguments(false, false, true);
+        return;
+    }
+
+    uint4 clock = sweep_clock[0];
+    float previous = asfloat(clock.x);
+    float remaining = previous * (1.0f - asfloat(impact));
+    uint repeats = remaining < previous ? 0u : clock.z + 1u;
+    // Repeated zero-time impacts must settle within the same physical limit
+    // as before. The division avoids a wrapped limit for a large body domain.
+    if (repeats > 64u && (repeats - 65u) / 4u >= body_count)
+    {
+        convex_scratch[0] = uint4(QueryNumericalFailure, result.y, 0u, SweepUnsettled);
+        sweep_publish_arguments(false, false, false);
+        return;
+    }
+
+    sweep_clock[0] = uint4(asuint(remaining), impact, repeats, 0u);
+    convex_scratch[0].z = remaining > 0.0f ? SweepMoreMotion : SweepLastImpact;
+    sweep_publish_arguments(true, false, false);
 }
 
 // A root may have received an external impulse before its first local row is linked.
@@ -440,7 +490,7 @@ void sweep_move_to_event(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint local = stage_work.range.x + tid.x;
-    sweep_bodies[local].positionCOM.xyz += asfloat(stage_work.range.z) * sweep_bodies[local].displacement.xyz;
+    sweep_bodies[local].positionCOM.xyz += asfloat(sweep_clock[0].y) * sweep_bodies[local].displacement.xyz;
 }
 
 BodyModel sweep_event_model(uint body)
@@ -814,19 +864,40 @@ void sweep_solve_event_joint_islands(uint3 tid : SV_DispatchThreadID)
     sweep_solve_event_island(solver, tid.x);
 }
 
+void sweep_complete_event()
+{
+    uint count = step_params.selectedCounts.x;
+    uint failed = sweep_choice[3u * count + 1u].load();
+    uint pending = sweep_choice[3u * count].load();
+    uint rows = sweep_choice[5u * count + 2u].load();
+    if (failed != 0xffffffffu)
+        convex_scratch[0] = uint4(QueryNumericalFailure, pending, failed, 66u);
+    else if (pending != 0u)
+        convex_scratch[0] = uint4(QueryPending, pending, rows, SweepSolverReceipt);
+    else if (rows == 0u)
+        convex_scratch[0] = uint4(QueryNumericalFailure, 0u, 0u, SweepMissingContact);
+    else
+        convex_scratch[0] = uint4(QuerySuccess, 0u, rows, SweepSolverReceipt);
+    bool ready = convex_scratch[0].x == QuerySuccess;
+    sweep_publish_arguments(ready, ready, ready && asfloat(sweep_clock[0].x) == 0.0f);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void sweep_event_progress(uint3 tid : SV_DispatchThreadID)
 {
+    if (tid.x == 0u) sweep_complete_event();
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sweep_linked_event_progress(uint3 tid : SV_DispatchThreadID)
+{
     if (tid.x != 0u) return;
-    uint count = step_params.selectedCounts.x;
-    uint failed = sweep_choice[3u * count + 1u].load();
-    uint pending = sweep_choice[3u * count].load();
-    if (failed != 0xffffffffu)
-        convex_scratch[0] = uint4(QueryNumericalFailure, pending, failed, 66u);
+    if (convex_scratch[0].x == QuerySuccess)
+        sweep_complete_event();
     else
-        convex_scratch[0] = uint4(pending == 0u ? QuerySuccess : QueryPending, pending,
-                                  sweep_choice[5u * count + 2u].load(), 0u);
+        sweep_publish_arguments(false, false, false);
 }
 
 [shader("compute")]
@@ -857,9 +928,8 @@ void sweep_resume_motion(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= stage_work.range.y) return;
     uint local = stage_work.range.x + tid.x;
-    float remaining = asfloat(stage_work.range.w);
+    float remaining = asfloat(sweep_clock[0].x);
     SweepBody motion = sweep_bodies[local];
-    motion.positionCOM.xyz += asfloat(stage_work.range.z) * motion.displacement.xyz;
     BodyModel model = body_models[step_params.selection.y + local];
     motion.positionCOM.w = max(motion.positionCOM.w, motion.angularResponse.w);
     motion.linearVelocity.xyz += motion.linearResponse.xyz;

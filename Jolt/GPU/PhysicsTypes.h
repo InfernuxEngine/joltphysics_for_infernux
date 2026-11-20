@@ -394,6 +394,21 @@ struct JPH_GPU_ALIGN SweepBody
 JPH_GPU_CONSTANT(SweepInitial, 1);
 JPH_GPU_CONSTANT(SweepContinuation, 2);
 JPH_GPU_CONSTANT(SweepEventContacts, 3);
+JPH_GPU_CONSTANT(SweepNoImpact, 0);
+JPH_GPU_CONSTANT(SweepLastImpact, 1);
+JPH_GPU_CONSTANT(SweepMoreMotion, 2);
+JPH_GPU_CONSTANT(SweepMissingContact, 67);
+JPH_GPU_CONSTANT(SweepUnsettled, 68);
+JPH_GPU_CONSTANT(SweepMotionChunk, 2048);
+JPH_GPU_CONSTANT(SweepMotionDispatch, 0);
+JPH_GPU_CONSTANT(SweepReportDispatch, 1);
+JPH_GPU_CONSTANT(SweepIntegrateDispatch, 2);
+JPH_GPU_CONSTANT(SweepArgumentWords, 3);
+// The same directory supplies the link/solve phase before it supplies motion.
+JPH_GPU_CONSTANT(SweepLinkDispatch, 0);
+JPH_GPU_CONSTANT(SweepFlattenDispatch, 1);
+JPH_GPU_CONSTANT(SweepSolveDispatch, 2);
+JPH_GPU_CONSTANT(SweepSolverReceipt, 1);
 
 struct JPH_GPU_ALIGN ContactPatch
 {
