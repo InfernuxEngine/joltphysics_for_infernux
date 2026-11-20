@@ -73,7 +73,7 @@ void cs_ref(uint kind, uint ordinal, uint world, uint a, uint b, bool active, ui
     active = active && status == 0u;
     cs_store(p, uint4(world, a, b, source));
     cs_store(p + 1u, uint4(kind, active ? 1u : 0u, status, 0u));
-    if (constraint_params.select.z == 0u)
+    if (constraint_params.select.z == 0u && constraint_params.select.w != 0u)
     {
         bool links = active && a != ConstraintInvalid && b != ConstraintInvalid;
         uint2 cursors = links ? uint2(cs_local_body(a), cs_local_body(b)) : uint2(0u);

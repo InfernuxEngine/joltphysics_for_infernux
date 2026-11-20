@@ -62,7 +62,7 @@ struct CS_ALIGN ConstraintParams
     CS_U4 scan;         // input base, exclusive-prefix base, block-total base, input length.
     CS_U4 scanParent;   // scanned parent-prefix base, combine mode (0 or 1), 0, 0.
     CS_U4 merge;        // source bank, target bank, length (J or P), run width power-of-two<=2^31.
-    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, zero.
+    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, write wide edge cursors.
     CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, body-check total word.
     CS_U4 selection;    // accepted packed world row and body, leaf, joint bases.
 };
@@ -92,8 +92,8 @@ struct CS_ALIGN ConstraintParams
 // Root flag scalar (reuses the sleep vote bank after wake):
 // bit0=has Joint, bit1=has patch. Only active refs mark roots.
 // Labels and body-root rows are local to the selected world.
-// Parents use B scalars. The separate vote bank has B+1: connectivity uses
-// its last scalar for pending work; sleep uses [0,B) for votes and B for status.
+// Parents and sleep votes each use B scalars. Wide connectivity reserves
+// one extra word in the vote bank to track pending work.
 // References and island ranges retain packed body slots.
 // Scan mode0 record=(sum0,sum1,sum2,ORstatus), checked u32 sums.
 // Scan mode1 record=(sumJ,sumP,maxJ,maxP); sums bounded by checked J/P.
