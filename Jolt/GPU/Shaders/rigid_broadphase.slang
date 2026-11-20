@@ -413,8 +413,13 @@ bool bp_collider_suppressed(uint4 a, uint4 b)
 
 // Count and fill call this exact function against the same frozen buffers.
 groupshared uint bp_small_leaf_status[BroadphaseSmallSetLimit];
-groupshared uint4 bp_small_joint_keys[BroadphaseSmallSetLimit];
-groupshared uint bp_small_pair_masks[BroadphaseSmallSetLimit];
+groupshared uint4 bp_small_joint_keys[BroadphaseSmallJointLimit];
+groupshared uint2 bp_small_pair_masks[BroadphaseSmallSetLimit];
+
+uint bp_small_pair_count(uint2 mask)
+{
+    return countbits(mask.x) + countbits(mask.y);
+}
 
 bool bp_small_suppressed(uint world, uint a, uint b)
 {
@@ -460,8 +465,8 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
     return !bp_collider_suppressed(a.source, b.source);
 }
 
-// A finite leaf set fits one group and one pair mask per row. Lane-order
-// prefix placement yields the same (leafA, leafB) order as the global sort.
+// A finite leaf set fits one group and two 32-bit mask words per row.
+// Lane-order placement yields the same (leafA, leafB) order as the global sort.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void build_small_pairs(uint3 local : SV_GroupThreadID)
@@ -484,14 +489,14 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
 
     if (lane < leaves)
     {
-        uint mask = 0u;
+        uint2 mask = uint2(0u);
         if (bp_small_leaf_status[lane] == 0u)
         {
             for (uint other = lane + 1u; other < leaves; ++other)
             {
                 if (bp_small_leaf_status[other] != 0u) continue;
                 if (bp_eligible_leaves(first + lane, first + other, world, true))
-                    mask |= 1u << other;
+                    mask[other >> 5u] |= 1u << (other & 31u);
             }
         }
         bp_small_pair_masks[lane] = mask;
@@ -500,26 +505,31 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
 
     if (lane < leaves)
     {
-        uint offset = broadphase.candidates.x;
+        uint offset = 0u;
         for (uint earlier = 0u; earlier < lane; ++earlier)
-            offset += countbits(bp_small_pair_masks[earlier]);
-        uint mask = bp_small_pair_masks[lane];
+            offset += bp_small_pair_count(bp_small_pair_masks[earlier]);
+        uint2 mask = bp_small_pair_masks[lane];
         for (uint other = lane + 1u; other < leaves; ++other)
-            if ((mask & (1u << other)) != 0u)
-                resident_patches[offset++].leaves = uint4(first + lane, first + other, 0u, world);
+        {
+            if ((mask[other >> 5u] & (1u << (other & 31u))) == 0u) continue;
+            if (offset < broadphase.candidates.z)
+                resident_patches[broadphase.candidates.x + offset].leaves = uint4(first + lane, first + other, 0u, world);
+            ++offset;
+        }
     }
     if (lane == 0u)
     {
         uint count = 0u, status = 0u;
         for (uint i = 0u; i < leaves; ++i)
         {
-            count += countbits(bp_small_pair_masks[i]);
+            count += bp_small_pair_count(bp_small_pair_masks[i]);
             status |= bp_small_leaf_status[i];
         }
         for (uint i = 0u; i < joints; ++i)
             status |= bp_small_joint_keys[i].w;
         bp_store(bp_header(), uint4(count, 0u, status, count));
-        resident_patches[0u].leaves = uint4(broadphase.candidates.x, status == 0u ? count : 0u, 0u, 0u);
+        const bool fits = status == 0u && count <= broadphase.candidates.z;
+        resident_patches[0u].leaves = uint4(broadphase.candidates.x, fits ? count : 0u, 0u, 0u);
     }
 }
 

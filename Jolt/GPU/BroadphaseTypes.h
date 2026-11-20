@@ -20,13 +20,15 @@ inline constexpr std::uint32_t BroadphaseBlockSize = 64u;
 inline constexpr std::uint32_t BroadphaseItemLimit = 2048u;
 inline constexpr std::uint32_t BroadphaseBlockLimit = BroadphaseItemLimit / BroadphaseBlockSize;
 inline constexpr std::uint32_t BroadphaseNeighborLimit = 2048u;
-inline constexpr std::uint32_t BroadphaseSmallSetLimit = 16u;
+inline constexpr std::uint32_t BroadphaseSmallSetLimit = BroadphaseBlockSize;
+inline constexpr std::uint32_t BroadphaseSmallJointLimit = 16u;
 #else
 static const uint BroadphaseBlockSize = 64u;
 static const uint BroadphaseItemLimit = 2048u;
 static const uint BroadphaseBlockLimit = BroadphaseItemLimit / BroadphaseBlockSize;
 static const uint BroadphaseNeighborLimit = 2048u;
-static const uint BroadphaseSmallSetLimit = 16u;
+static const uint BroadphaseSmallSetLimit = BroadphaseBlockSize;
+static const uint BroadphaseSmallJointLimit = 16u;
 #endif
 
 // All addresses below are ContactPatch / uint4 WORD addresses, not bytes,
