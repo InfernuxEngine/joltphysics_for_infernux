@@ -116,20 +116,20 @@ void sleep_wake_force_input(uint3 tid:SV_DispatchThreadID)
     BodyForces force=body_forces[body];
     if(any(force.force.xyz!=float3(0)) || any(force.torque.xyz!=float3(0))) sleep_activate(body,true);
 }
-void sleep_update_body(uint body)
+uint sleep_update_body(uint body)
 {
-    if(!sleep_body(body)) return;
+    if(!sleep_body(body)) return SleepInvalid;
     BodyModel model=body_models[body];
-    if(!jph_resident(model) || !jph_nonstatic(model)) return;
+    if(!jph_resident(model) || !jph_nonstatic(model)) return SleepInvalid;
     BodySleepRecord record=body_sleep[body];BodyState pose=body_states[body];
     if(!all(isfinite(pose.positionCOM)) || !all(isfinite(pose.rotation))
        || !all(isfinite(pose.linearVelocity)) || !all(isfinite(pose.angularVelocity))
        || dot(pose.rotation,pose.rotation)<=0 || any(record.runtime.state>uint4(1u))) {
-        sleep_fail(SleepBadState);return;
+        sleep_fail(SleepBadState);return SleepInvalid;
     }
     if(record.runtime.state.x==0u) {
         if(any(pose.linearVelocity.xyz!=float3(0)) || any(pose.angularVelocity.xyz!=float3(0))) sleep_fail(SleepBadState);
-        return;
+        return SleepInvalid;
     }
     // Retire forces for the final active set before Commit may put it to sleep.
     if(sleep_params.operation.z!=0u) {
@@ -138,11 +138,14 @@ void sleep_update_body(uint body)
     }
     BodySleepParameters parameters;parameters.timing=sleep_params.timing;
     uint vote=sleep_update_vote(record.author,record.runtime,pose,parameters);
-    if(vote==2u) {sleep_fail(SleepBadState);return;}
+    if(vote==2u) {sleep_fail(SleepBadState);return SleepInvalid;}
     body_sleep[body].runtime=record.runtime;
-    if(jph_dynamic(model) && vote==0u) {
-        uint root=sleep_root(body);if(root!=SleepInvalid) body_sleep_roots[root].or(2u);
-    }
+    return vote;
+}
+void sleep_put_to_sleep(uint body,BodySleepRuntime state)
+{
+    BodyState pose=body_states[body];pose.linearVelocity=pose.angularVelocity=float4(0);
+    body_states[body]=pose;state.state.x=0u;body_sleep[body].runtime=state;
 }
 void sleep_commit_body(uint body)
 {
@@ -152,16 +155,16 @@ void sleep_commit_body(uint body)
     if(!jph_resident(model) || !jph_nonstatic(model) || state.state.x==0u) return;
     bool eligible=state.state.z!=0u;
     if(jph_dynamic(model)) {uint root=sleep_root(body);eligible=root!=SleepInvalid && (body_sleep_roots[root].load()&2u)==0u;}
-    if(eligible) {
-        BodyState pose=body_states[body];pose.linearVelocity=pose.angularVelocity=float4(0);
-        body_states[body]=pose;state.state.x=0u;body_sleep[body].runtime=state;
-    }
+    if(eligible) sleep_put_to_sleep(body,state);
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_update_history(uint3 tid:SV_DispatchThreadID)
 {
     uint body;if(!sleep_work_item(tid.x,body)) return;
-    sleep_update_body(body);
+    uint vote=sleep_update_body(body);
+    if(vote==0u && jph_dynamic(body_models[body])) {
+        uint root=sleep_root(body);if(root!=SleepInvalid) body_sleep_roots[root].or(2u);
+    }
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
@@ -170,13 +173,14 @@ void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
     sleep_commit_body(body);
 }
 // Admitted only for an accepted graph with no joints and no actual patches.
-// A Dynamic body owns its root/vote, so no peer or workgroup barrier is needed.
+// A body's own vote decides whether it can sleep.
 [shader("compute")][numthreads(64,1,1)]
 void sleep_update_commit_isolated(uint3 tid:SV_DispatchThreadID)
 {
     uint body;if(!sleep_work_item(tid.x,body)) return;
-    sleep_update_body(body);
-    sleep_commit_body(body);
+    uint vote=sleep_update_body(body);
+    if(vote==1u && sleep_params.operation.z!=0u && step_status[StepSleepStatus].load()==0u)
+        sleep_put_to_sleep(body,body_sleep[body].runtime);
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_retire_hinge_momentum(uint3 tid:SV_DispatchThreadID)

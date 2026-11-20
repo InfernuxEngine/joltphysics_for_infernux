@@ -54,25 +54,6 @@ uint cs_initial_root(uint local)
     return cs_writer(model) && model.meta.w == constraint_params.selection.x ? local : ConstraintInvalid;
 }
 
-// With no candidate pairs or selected joints, each resident dynamic is its
-// own component. Write its sleep row directly, including the shared header.
-[shader("compute")][numthreads(64, 1, 1)]
-void constraint_initialize_isolated_topology(uint3 tid : SV_DispatchThreadID)
-{
-    uint body;
-    if (!cs_item(tid.x, constraint_params.counts.x, body)) return;
-    cs_store(constraint_params.limits.w + body, uint4(cs_initial_root(body), 0u, 0u, 0u));
-    root_votes[body].store(0u);
-    if (body == 0u)
-    {
-        uint first = constraint_params.layout.x, end = constraint_params.limits.x;
-        cs_store(first, uint4(0u));
-        cs_store(first + 1u, uint4(0u));
-        cs_store(first + 2u, uint4(end));
-        cs_store(first + 3u, uint4(end, end, constraint_params.limits.w, constraint_params.counts.x));
-    }
-}
-
 uint cs_ref_base(uint kind)
 {
     return kind == ConstraintJoint ? constraint_params.references.x : constraint_params.references.y;
