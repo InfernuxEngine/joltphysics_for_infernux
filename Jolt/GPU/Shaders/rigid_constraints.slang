@@ -24,29 +24,31 @@ RWStructuredBuffer<ConstraintScheduleWord> constraint_schedule;
 RWStructuredBuffer<ConstraintScheduleWord> topology_arguments;
 StructuredBuffer<ConstraintScheduleWord> convex_completion;
 StructuredBuffer<ConstraintScheduleWord> topology_gate_spans;
+StructuredBuffer<ConstraintScheduleWord> topology_gate_source_arguments;
+RWStructuredBuffer<ConstraintScheduleWord> topology_gate_default_arguments;
 
 // The collision producer publishes completion before this pass on the same
-// queue. Until then, contact consumers see zero workgroups. A patch span still
-// takes its exact live count from the collision bank, including spare capacity.
+// queue. A guarded consumer can keep its direct dimensions or read the exact
+// indirect dimensions produced by collision. Following producers replace
+// the default zero arguments for wake and solve only when they execute.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_gate_topology(uint3 tid : SV_DispatchThreadID)
 {
     uint records, stride;
     topology_gate_spans.GetDimensions(records, stride);
+    const uint4 skip = uint4(0u, 1u, 1u, 0u);
+    if (tid.x < ConstraintLocalArgumentWords)
+        topology_gate_default_arguments[tid.x].value = skip;
     if (tid.x >= records) return;
     const uint4 span = topology_gate_spans[tid.x].value;
-    uint groups = 0u;
+    uint4 groups = skip;
     if (convex_completion[0].value.x == QuerySuccess)
     {
-        groups = span.x;
+        groups = uint4(span.xyz, 0u);
         if (span.w != 0u)
-        {
-            const uint live = contact_patches[0].leaves.y;
-            const uint rows = min(span.z, live - min(live, span.y));
-            groups = rows / ConstraintBlockSize + uint(rows % ConstraintBlockSize != 0u);
-        }
+            groups = topology_gate_source_arguments[span.x].value;
     }
-    topology_arguments[tid.x].value = uint4(groups, 1u, 1u, 0u);
+    topology_arguments[tid.x].value = groups;
 }
 
 uint4 cs_load(uint p) { return constraint_schedule[p].value; }
@@ -111,6 +113,10 @@ void cs_publish_solver_summary(uint4 totals, uint4 rows)
     if (!accepted) step_status[StepTopologyStatus].or(totals.w);
     const uint joint_groups = accepted ? cs_blocks(totals.y) : 0u;
     const uint contact_groups = !accepted ? 0u : rows.w < ContactParallelMinimum ? cs_blocks(totals.z) : totals.z;
+    // Wake is finished. Reuse its group directory for body and joint stages
+    // after assembly, keyed to the accepted numerical schedule.
+    for (uint i = 0u; i < ConstraintBlockLimit; ++i)
+        topology_arguments[i].value = uint4(accepted ? i + 1u : 0u, 1u, 1u, 0u);
     topology_arguments[ConstraintLocalJointDispatch].value = uint4(joint_groups, 1u, 1u, 0u);
     topology_arguments[ConstraintLocalPatchDispatch].value = uint4(contact_groups, 1u, 1u, 0u);
 }
