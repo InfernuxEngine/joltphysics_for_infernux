@@ -15,6 +15,14 @@ uint2 jph_join_components(RWStructuredBuffer<Atomic<uint>> parents, uint2 edge, 
             uint prior = parents[hi].compareExchange(hi, lo);
             parent = prior == hi ? lo : prior;
         }
+        else
+        {
+            // Shortcuts follow established links. A concurrent shortcut can
+            // only lower the parent further and cannot undo a completed link.
+            const uint ancestor = parents[parent].load();
+            if (ancestor < parent) parents[hi].min(ancestor);
+            parent = ancestor;
+        }
         edge = uint2(parent, lo);
     }
     return edge;

@@ -27,7 +27,6 @@ namespace JPH { namespace GPU {
 CS_CONST(ConstraintBlockSize, 64u);
 CS_CONST(ConstraintItemLimit, 2048u);
 CS_CONST(ConstraintBlockLimit, 32u);
-CS_CONST(ConstraintConnectivityQuantum, 32u);
 CS_CONST(ConstraintLocalBodies, 8u * ConstraintBlockSize);
 CS_CONST(ConstraintLocalSortItems, 16u * ConstraintBlockSize);
 CS_CONST(ConstraintLocalRefs, 3u * ConstraintLocalSortItems);
@@ -35,8 +34,6 @@ CS_CONST(ConstraintLocalJointDispatch, ConstraintLocalRefs / ConstraintBlockSize
 CS_CONST(ConstraintLocalPatchDispatch, ConstraintLocalJointDispatch + 1u);
 CS_CONST(ConstraintLocalWakePatchDispatch, ConstraintLocalPatchDispatch + 1u);
 CS_CONST(ConstraintLocalArgumentWords, ConstraintLocalWakePatchDispatch + 1u);
-CS_CONST(ConstraintLinksPending, 1u);
-CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
 CS_CONST(IslandJointQuantum, 64u);
 CS_CONST(IslandPatchQuantum, 256u);
@@ -79,14 +76,14 @@ struct CS_ALIGN ConstraintParams
 {
     CS_U4 counts;       // B local slots, J local joints, P candidate slots, packed JointStream directory size.
     CS_U4 limits;       // total schedule words, local shape count, contact rows=4P, body-root word base.
-    CS_U4 layout;       // header base=0, connectivity control, body-check base, edge cursors/ref-check base.
+    CS_U4 layout;       // header base=0, connectivity control, body-check base, ref-check base.
     CS_U4 references;   // joint ref base, patch ref base (each 2 words/item), final joint sort bank, final patch sort bank.
     CS_U4 sources;      // joint source word base, patch source word base, joint ID-table base, patch ID-table base.
     CS_U4 islands;      // 2B-word range base, B root-row base, B exclusive-prefix base, B range-summary-row base.
     CS_U4 scan;         // input base, exclusive-prefix base, block-total base, input length.
     CS_U4 scanParent;   // scanned parent-prefix base, combine mode (0 or 1), 0, 0.
     CS_U4 merge;        // source bank, target bank, length (J or P), run width power-of-two<=2^31.
-    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, write wide edge cursors.
+    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, wide reduction workspace.
     CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, body-check total word.
     CS_U4 selection;    // accepted packed world row and body, leaf, joint bases.
 };
@@ -116,21 +113,16 @@ struct CS_ALIGN ConstraintParams
 // Root flag scalar (reuses the sleep vote bank after wake):
 // bit0=has Joint, bit1=has patch. Only active refs mark roots.
 // Labels and body-root rows are local to the selected world.
-// Parents and sleep votes each use B scalars. Wide connectivity reserves
-// one extra word in the vote bank to track pending work.
+// Parents and sleep votes each use B scalars.
 // References and island ranges retain packed body slots.
 // Scan mode0 record=(sum0,sum1,sum2,ORstatus), checked u32 sums.
 // Scan mode1 record=(sumJ,sumP,maxJ,maxP); sums bounded by checked J/P.
 // Ref validation total (mode0)=(activeJ,activeP,0,status).
-// Connectivity control=(pending flags,completed passes,status,validated01).
-// Each pass joins bounded parent chains from persistent edge cursors, then
-// flattens parents once every edge is joined. The device enables the validation
-// tail through indirect argument records indexed by workgroup count (1..32).
-// A multi-workgroup pass returns its control so the host can schedule another
-// pass when links remain. Graphs within the local body/reference limits finish
-// in one workgroup. It initializes all wake votes and writes indirect arguments
-// for the following wake kernels. A bad reference writes the fixed step's
-// topology status and publishes zero group counts.
+// Connectivity control=(0,0,status,validated01). Edges join by descending to
+// lower labels. Root compression then produces a stable minimum-slot root
+// for every writer. Validation writes the fixed step's topology status and
+// gates subsequent wake dispatches with argument records indexed by their
+// workgroup count. The local path also emits the counted wake patch command.
 // Both atomic banks have scalar uint32 layout, with dispatch dependencies
 // between reset, linking, flattening, and publication.
 // Reflected storage access remains read_write even in load-only label entries.

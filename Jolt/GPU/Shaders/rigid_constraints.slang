@@ -62,7 +62,7 @@ uint cs_ref_count(uint kind)
 {
     return kind == ConstraintJoint ? constraint_params.counts.y : constraint_params.counts.z;
 }
-uint cs_ref_scratch(uint kind, uint ordinal)
+uint cs_ref_check_address(uint kind, uint ordinal)
 {
     return constraint_params.layout.w + (kind == ConstraintJoint ? 0u : constraint_params.counts.y) + ordinal;
 }
@@ -73,12 +73,6 @@ void cs_ref(uint kind, uint ordinal, uint world, uint a, uint b, bool active, ui
     active = active && status == 0u;
     cs_store(p, uint4(world, a, b, source));
     cs_store(p + 1u, uint4(kind, active ? 1u : 0u, status, 0u));
-    if (constraint_params.select.z == 0u && constraint_params.select.w != 0u)
-    {
-        bool links = active && a != ConstraintInvalid && b != ConstraintInvalid;
-        uint2 cursors = links ? uint2(cs_local_body(a), cs_local_body(b)) : uint2(0u);
-        cs_store(cs_ref_scratch(kind, ordinal), uint4(cursors, 0u, 0u));
-    }
 }
 uint cs_blocks(uint n) { return n / ConstraintBlockSize + (n % ConstraintBlockSize != 0u ? 1u : 0u); }
 
@@ -305,18 +299,10 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
         if (errors != 0u) step_status[StepTopologyStatus].or(errors);
         const uint patches = errors == 0u ? refs - joints : 0u;
         topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(cs_blocks(patches), 1u, 1u, 0u);
-        cs_store(constraint_params.layout.y, uint4(0u, 1u, errors, errors == 0u ? 1u : 0u));
+        cs_store(constraint_params.layout.y, uint4(0u, 0u, errors, errors == 0u ? 1u : 0u));
     }
 }
 
-// The one validated CC labels every resident Dynamic, including an isolated
-// vertex without a numeric island. Other slots have an explicit Invalid row.
-[shader("compute")][numthreads(64,1,1)]
-void constraint_write_body_roots(uint3 tid:SV_DispatchThreadID)
-{
-    uint body;if(!cs_item(tid.x,constraint_params.counts.x,body)) return;
-    cs_store(constraint_params.limits.w+body,uint4(component_parents[body].load(),0u,0u,0u));
-}
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_init_parents(uint3 tid : SV_DispatchThreadID)
 {
@@ -324,16 +310,11 @@ void constraint_init_parents(uint3 tid : SV_DispatchThreadID)
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
     component_parents[v].store(cs_initial_root(v));
 }
+
 bool cs_label(uint vertex, uint label)
 {
     if (vertex >= constraint_params.counts.x || label > vertex) return false;
     return cs_initial_root(vertex) != ConstraintInvalid && cs_initial_root(label) != ConstraintInvalid;
-}
-
-[shader("compute")][numthreads(1, 1, 1)]
-void constraint_reset_connectivity(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x == 0u) root_votes[constraint_params.counts.x].store(0u);
 }
 
 [shader("compute")][numthreads(64, 1, 1)]
@@ -341,55 +322,36 @@ void constraint_join_edges(uint3 tid : SV_DispatchThreadID)
 {
     uint r, kind = constraint_params.select.x;
     if (!cs_item(tid.x, cs_ref_count(kind), r)) return;
-    uint p = cs_ref_scratch(kind, r);
-    uint2 edge = cs_load(p).xy;
-    if (edge.x == edge.y) return;
-    edge = jph_join_components(component_parents, edge, ConstraintConnectivityQuantum);
-    cs_store(p, uint4(edge, 0u, 0u));
-    if (edge.x != edge.y) root_votes[constraint_params.counts.x].or(ConstraintLinksPending);
+    const uint p = cs_ref_base(kind) + 2u * r;
+    if (cs_load(p + 1u).y == 0u) return;
+    const uint2 edge = cs_load(p).yz;
+    if (any(edge == uint2(ConstraintInvalid))) return;
+    // Each iteration links the two components or reduces max(edge).
+    // The selected body count bounds the union within this dispatch.
+    jph_join_components(component_parents, edge - uint2(constraint_params.selection.y), constraint_params.counts.x);
 }
 
-// With the links settled, each invocation shortens only its own parent.
-// Concurrent shortcuts are safe to observe and can only reduce the work.
+// All edge dispatches precede compression. Each atomic shortcut follows
+// the settled forest and leaves the same minimum-slot representative.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_flatten_parents(uint3 tid : SV_DispatchThreadID)
 {
     uint v;
     if (!cs_item(tid.x, constraint_params.counts.x, v)) return;
-    uint status = constraint_params.counts.x;
-    if ((root_votes[status].load() & ConstraintLinksPending) != 0u) return;
-    uint ancestor = component_parents[v].load();
-    if (ancestor == v || ancestor == ConstraintInvalid) return;
-    for (uint n = 0u; n < ConstraintConnectivityQuantum; ++n)
+    uint cursor = v, parent = component_parents[v].load();
+    while (parent < cursor)
     {
-        uint parent = component_parents[ancestor].load();
-        if (parent == ancestor)
-        {
-            component_parents[v].store(ancestor);
-            return;
-        }
-        ancestor = parent;
+        const uint ancestor = component_parents[parent].load();
+        if (ancestor < parent) component_parents[cursor].min(ancestor);
+        cursor = parent;
+        parent = ancestor;
     }
-    component_parents[v].store(ancestor);
-    root_votes[status].or(ConstraintRootsPending);
+    component_parents[v].store(parent);
+    root_votes[v].store(0u);
 }
 
-[shader("compute")][numthreads(64, 1, 1)]
-void constraint_gate_validation(uint3 tid : SV_DispatchThreadID)
-{
-    uint i = tid.x;
-    if (i >= ConstraintBlockLimit) return;
-    uint pending = root_votes[constraint_params.counts.x].load();
-    topology_arguments[i].value = uint4(pending == 0u ? i + 1u : 0u, 1u, 1u, 0u);
-    if (i == 0u)
-    {
-        uint address = constraint_params.layout.y;
-        uint pass = cs_load(address).y + 1u;
-        cs_store(address, uint4(pending, pass, 0u, 0u));
-    }
-}
-
-// Verification consumes the settled forest in separate dispatches.
+// Publish every resident dynamic root, including isolated writers. Wake
+// consumes these roots after the separate whole-graph validation.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_validate_labels(uint3 tid : SV_DispatchThreadID)
 {
@@ -403,6 +365,7 @@ void constraint_validate_labels(uint3 tid : SV_DispatchThreadID)
     }
     else if (l != ConstraintInvalid) status |= ConstraintBadLabel;
     cs_store(constraint_params.layout.z + v, uint4(0u, 0u, 0u, status));
+    cs_store(constraint_params.limits.w + v, uint4(status == 0u ? l : ConstraintInvalid, 0u, 0u, 0u));
 }
 uint cs_validated_ref_root(uint4 e, inout uint status)
 {
@@ -433,19 +396,19 @@ void constraint_validate_edges(uint3 tid : SV_DispatchThreadID)
     uint4 flags = cs_load(p + 1u);
     uint status = flags.z;
     if (flags.y != 0u) cs_validated_ref_root(cs_load(p), status);
-    cs_store(cs_ref_scratch(kind, r), uint4(
+    cs_store(cs_ref_check_address(kind, r), uint4(
         kind == ConstraintJoint ? flags.y : 0u, kind == ConstraintPatch ? flags.y : 0u, 0u, status));
 }
 [shader("compute")][numthreads(1, 1, 1)]
 void constraint_accept_components(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint4 control = cs_load(constraint_params.layout.y);
-    uint status = control.z | cs_load(constraint_params.summary.z).w | cs_load(constraint_params.summary.w).w;
-    if (control.x != 0u) status |= ConstraintNotConverged;
-    control.z = status;
-    control.w = status == 0u ? 1u : 0u;
-    cs_store(constraint_params.layout.y, control);
+    const uint status = cs_load(constraint_params.layout.y).z
+                        | cs_load(constraint_params.summary.z).w | cs_load(constraint_params.summary.w).w;
+    cs_store(constraint_params.layout.y, uint4(0u, 0u, status, status == 0u ? 1u : 0u));
+    if (status != 0u) step_status[StepTopologyStatus].or(status);
+    for (uint i = 0u; i < ConstraintBlockLimit; ++i)
+        topology_arguments[i].value = uint4(status == 0u ? i + 1u : 0u, 1u, 1u, 0u);
 }
 
 // Mode0: three checked sums + status OR. Mode1: two sums + two maxima.
