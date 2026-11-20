@@ -107,7 +107,7 @@ void articulation_classify_refs(uint3 id:SV_DispatchThreadID) {
     if(id.x>=articulation_params.range.y)return;
     bool patch=articulation_params.range.w!=0u;
     uint ordinal=articulation_params.range.x+id.x;
-    uint count=patch?articulation_params.references.w:articulation_params.references.y;
+    uint count=patch?constraint_schedule[3u].value.w:articulation_params.references.y;
     if(ordinal>=count)return;
     uint base=patch?articulation_params.references.z:articulation_params.references.x;
     uint4 endpoints=constraint_schedule[base+2u*ordinal].value;

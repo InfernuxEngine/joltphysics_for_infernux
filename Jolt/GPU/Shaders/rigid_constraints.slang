@@ -60,7 +60,7 @@ uint cs_ref_base(uint kind)
 }
 uint cs_ref_count(uint kind)
 {
-    return kind == ConstraintJoint ? constraint_params.counts.y : constraint_params.counts.z;
+    return kind == ConstraintJoint ? constraint_params.counts.y : cs_load(constraint_params.layout.x + 3u).w;
 }
 uint cs_ref_check_address(uint kind, uint ordinal)
 {
@@ -106,7 +106,8 @@ void constraint_seed(uint3 tid : SV_DispatchThreadID)
     cs_store(h + 1u, uint4(0u));
     cs_store(h + 2u, uint4(constraint_params.islands.x, constraint_params.sources.z,
         constraint_params.sources.w, constraint_params.sources.x));
-    cs_store(h + 3u, uint4(constraint_params.sources.y, constraint_params.limits.x, constraint_params.limits.w, constraint_params.counts.x));
+    cs_store(h + 3u, uint4(constraint_params.sources.y, constraint_params.limits.x, constraint_params.limits.w,
+                          contact_patches[0].leaves.y));
     cs_store(constraint_params.layout.y, uint4(0u));
     if (constraint_params.select.w != 0u)
     {
@@ -191,9 +192,8 @@ void constraint_build_joint_refs(uint3 tid : SV_DispatchThreadID)
 void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
 {
     uint p;
-    if (!cs_item(tid.x, constraint_params.counts.z, p)) return;
+    if (!cs_item(tid.x, cs_ref_count(ConstraintPatch), p)) return;
     uint4 header = contact_patches[0].leaves;
-    if (p >= header.y) return;
     uint4 patch = contact_patches[header.x + p].leaves;
     uint status = 0u, world = ConstraintInvalid;
     uint a = ConstraintInvalid, b = ConstraintInvalid;
@@ -404,7 +404,13 @@ uint cs_validated_ref_root(uint4 e, inout uint status)
 void constraint_validate_edges(uint3 tid : SV_DispatchThreadID)
 {
     uint r, kind = constraint_params.select.x;
-    if (!cs_item(tid.x, cs_ref_count(kind), r)) return;
+    uint capacity = kind == ConstraintJoint ? constraint_params.counts.y : constraint_params.counts.z;
+    if (!cs_item(tid.x, capacity, r)) return;
+    if (r >= cs_ref_count(kind))
+    {
+        cs_store(cs_ref_check_address(kind, r), uint4(0u));
+        return;
+    }
     uint p = cs_ref_base(kind) + 2u * r;
     uint4 flags = cs_load(p + 1u);
     uint status = flags.z;
@@ -716,13 +722,14 @@ void constraint_seed_sort(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupI
 void constraint_merge_items(uint3 tid : SV_DispatchThreadID)
 {
     uint i;
-    if (!cs_item(tid.x, constraint_params.merge.z, i)) return;
+    uint count = constraint_params.merge.z == ConstraintInvalid ? cs_ref_count(ConstraintPatch) : constraint_params.merge.z;
+    if (!cs_item(tid.x, count, i)) return;
     uint width = constraint_params.merge.w;
     uint run = i / width, begin = run * width;
-    uint end = begin + min(width, constraint_params.merge.z - begin);
+    uint end = begin + min(width, count - begin);
     bool right = (run & 1u) != 0u;
     uint other_begin = right ? begin - width : end;
-    uint other_end = right ? begin : other_begin + min(width, constraint_params.merge.z - other_begin);
+    uint other_end = right ? begin : other_begin + min(width, count - other_begin);
     uint4 key = cs_load(constraint_params.merge.x + i);
     uint lo = other_begin, hi = other_end;
     for (uint step = 0u; step < 32u; ++step)
@@ -814,8 +821,9 @@ void constraint_write_islands(uint3 tid : SV_DispatchThreadID)
         uint id = prefix.x, world = constraint_params.selection.x;
         uint jb = cs_bound(constraint_params.references.z, constraint_params.counts.y, world, root, false);
         uint je = cs_bound(constraint_params.references.z, constraint_params.counts.y, world, root, true);
-        uint pb = cs_bound(constraint_params.references.w, constraint_params.counts.z, world, root, false);
-        uint pe = cs_bound(constraint_params.references.w, constraint_params.counts.z, world, root, true);
+        uint patches = cs_ref_count(ConstraintPatch);
+        uint pb = cs_bound(constraint_params.references.w, patches, world, root, false);
+        uint pe = cs_bound(constraint_params.references.w, patches, world, root, true);
         uint jc = je - jb, pc = pe - pb;
         cs_store(constraint_params.islands.x + 2u * id, uint4(world, cs_packed_body(root), jb, jc));
         cs_store(constraint_params.islands.x + 2u * id + 1u, uint4(pb, pc, 0u, 0u));

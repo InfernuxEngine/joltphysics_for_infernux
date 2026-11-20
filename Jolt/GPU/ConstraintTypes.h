@@ -86,8 +86,8 @@ struct CS_ALIGN ConstraintParams
     CS_U4 islands;      // 2B-word range base, B root-row base, B exclusive-prefix base, B range-summary-row base.
     CS_U4 scan;         // input base, exclusive-prefix base, block-total base, input length.
     CS_U4 scanParent;   // scanned parent-prefix base, combine mode (0 or 1), 0, 0.
-    CS_U4 merge;        // source bank, target bank, length (J or P), run width power-of-two<=2^31.
-    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, numeric refs, wide reduction workspace.
+    CS_U4 merge;        // source bank, target bank, length (or Invalid for live patches), run width power-of-two<=2^31.
+    CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, awake refs, wide reduction workspace.
     CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, body-check total word.
     CS_U4 selection;    // accepted packed world row and body, leaf, joint bases.
 };
@@ -96,7 +96,7 @@ struct CS_ALIGN ConstraintParams
 // h0=(islandCount,jointIslandCount,contactIslandCount,status)
 // h1=(activeJ,activeP,maxJointItems,maxPatchItems)
 // h2=(rangeWordBase,jointTableWordBase,contactTableWordBase,jointSourceWordBase)
-// h3=(patchSourceWordBase,wordCount,bodyRootWordBase,worldBodySlots)
+// h3=(patchSourceWordBase,wordCount,bodyRootWordBase,liveCandidateCount)
 // status==0 is the ONLY installable state. Initialization sets NotReady.
 // range[i].word0=(world,root,jointBegin,jointCount)
 // range[i].word1=(patchBegin,patchCount,0,0)
