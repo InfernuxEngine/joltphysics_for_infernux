@@ -218,7 +218,7 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
     indirect_arguments[record].value = uint4(groups, 1u, 1u, 0u);
 }
 
-uint4 bp_sort_record(uint leaf)
+uint4 bp_sort_record(uint leaf, Aabb box)
 {
     ShapeModel shape = shape_models[leaf];
     uint status = 0u;
@@ -238,7 +238,6 @@ uint4 bp_sort_record(uint leaf)
                 || !bp_in_range(leaf, body.meta.x, body.meta.y)) status |= BP_BAD_MODEL;
         }
     }
-    Aabb box = bounds[leaf];
     if (!bp_valid_bounds(box)) status |= BP_BAD_BOUNDS;
     // Invalid records still get an initialized, unique key and an explicit
     // failure. They never silently become a successful zero-candidate result.
@@ -253,7 +252,11 @@ void build_sort_records(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupInd
     uint item;
     bool valid = bp_item(tid.x, broadphase.selectedCounts.y, item);
     uint4 record = uint4(0xffffffffu);
-    if (valid) record = bp_sort_record(broadphase.selection.z + item);
+    if (valid)
+    {
+        uint leaf = broadphase.selection.z + item;
+        record = bp_sort_record(leaf, bounds[leaf]);
+    }
     record = jph_sort_tile(lane, record);
     if (valid) bp_store(broadphase.merge.x + item, record);
 }
@@ -412,14 +415,11 @@ bool bp_collider_suppressed(uint4 a, uint4 b)
 }
 
 // Count and fill call this exact function against the same frozen buffers.
+groupshared Aabb bp_small_bounds[BroadphaseSmallSetLimit];
 groupshared uint bp_small_leaf_status[BroadphaseSmallSetLimit];
 groupshared uint4 bp_small_joint_keys[BroadphaseSmallJointLimit];
-groupshared uint2 bp_small_pair_masks[BroadphaseSmallSetLimit];
-
-uint bp_small_pair_count(uint2 mask)
-{
-    return countbits(mask.x) + countbits(mask.y);
-}
+groupshared uint4 bp_small_pair_masks[BroadphaseSmallSetLimit];
+groupshared uint bp_small_pair_offsets[BroadphaseSmallSetLimit];
 
 bool bp_small_suppressed(uint world, uint a, uint b)
 {
@@ -433,9 +433,8 @@ bool bp_small_suppressed(uint world, uint a, uint b)
 }
 
 // AABBs already include the existing half speculative-band expansion.
-bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
+bool bp_eligible_leaves(uint first, uint second, uint world, Aabb ba, Aabb bb, bool small)
 {
-    Aabb ba = bounds[first], bb = bounds[second];
     if (any(ba.minimum.xyz > bb.maximum.xyz) || any(bb.minimum.xyz > ba.maximum.xyz)) return false;
     ShapeModel a = shape_models[first], b = shape_models[second];
     if (a.meta.y == b.meta.y) return false;
@@ -465,8 +464,8 @@ bool bp_eligible_leaves(uint first, uint second, uint world, bool small)
     return !bp_collider_suppressed(a.source, b.source);
 }
 
-// A finite leaf set fits one group and two 32-bit mask words per row.
-// Lane-order placement yields the same (leafA, leafB) order as the global sort.
+// Cache the leaf bounds for the group and compact by source leaf ordinal.
+// The resulting (leafA, leafB) sequence matches the global sort.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void build_small_pairs(uint3 local : SV_GroupThreadID)
@@ -474,10 +473,15 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
     uint lane = local.x;
     uint first = broadphase.selection.z;
     uint leaves = broadphase.selectedCounts.y;
+    uint words = (leaves + 31u) >> 5u;
     uint joints = broadphase.selectedCounts.z;
     uint world = broadphase.selection.x;
-    if (lane < leaves)
-        bp_small_leaf_status[lane] = bp_sort_record(first + lane).w;
+    for (uint row = lane; row < leaves; row += BroadphaseBlockSize)
+    {
+        Aabb box = bounds[first + row];
+        bp_small_bounds[row] = box;
+        bp_small_leaf_status[row] = bp_sort_record(first + row, box).w;
+    }
     if (lane < joints)
     {
         uint status;
@@ -487,42 +491,33 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (lane < leaves)
+    for (uint row = lane; row < leaves; row += BroadphaseBlockSize)
     {
-        uint2 mask = uint2(0u);
-        if (bp_small_leaf_status[lane] == 0u)
+        uint4 mask = uint4(0u);
+        if (bp_small_leaf_status[row] == 0u)
         {
-            for (uint other = lane + 1u; other < leaves; ++other)
+            Aabb box = bp_small_bounds[row];
+            for (uint other = row + 1u; other < leaves; ++other)
             {
                 if (bp_small_leaf_status[other] != 0u) continue;
-                if (bp_eligible_leaves(first + lane, first + other, world, true))
+                if (bp_eligible_leaves(first + row, first + other, world, box, bp_small_bounds[other], true))
                     mask[other >> 5u] |= 1u << (other & 31u);
             }
         }
-        bp_small_pair_masks[lane] = mask;
+        bp_small_pair_masks[row] = mask;
+        uint4 bits = countbits(mask);
+        bp_small_pair_offsets[row] = bits.x + bits.y + bits.z + bits.w;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (lane < leaves)
-    {
-        uint offset = 0u;
-        for (uint earlier = 0u; earlier < lane; ++earlier)
-            offset += bp_small_pair_count(bp_small_pair_masks[earlier]);
-        uint2 mask = bp_small_pair_masks[lane];
-        for (uint other = lane + 1u; other < leaves; ++other)
-        {
-            if ((mask[other >> 5u] & (1u << (other & 31u))) == 0u) continue;
-            if (offset < broadphase.candidates.z)
-                resident_patches[broadphase.candidates.x + offset].leaves = uint4(first + lane, first + other, 0u, world);
-            ++offset;
-        }
-    }
     if (lane == 0u)
     {
         uint count = 0u, status = 0u;
         for (uint i = 0u; i < leaves; ++i)
         {
-            count += bp_small_pair_count(bp_small_pair_masks[i]);
+            uint row_count = bp_small_pair_offsets[i];
+            bp_small_pair_offsets[i] = count;
+            count += row_count;
             status |= bp_small_leaf_status[i];
         }
         for (uint i = 0u; i < joints; ++i)
@@ -530,6 +525,24 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
         bp_store(bp_header(), uint4(count, 0u, status, count));
         const bool fits = status == 0u && count <= broadphase.candidates.z;
         resident_patches[0u].leaves = uint4(broadphase.candidates.x, fits ? count : 0u, 0u, 0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint row = lane; row < leaves; row += BroadphaseBlockSize)
+    {
+        uint offset = bp_small_pair_offsets[row];
+        uint4 mask = bp_small_pair_masks[row];
+        for (uint word = row >> 5u; word < words; ++word)
+        {
+            uint bits = mask[word];
+            while (bits != 0u && offset < broadphase.candidates.z)
+            {
+                uint other = word * 32u + uint(firstbitlow(bits));
+                resident_patches[broadphase.candidates.x + offset].leaves = uint4(first + row, first + other, 0u, world);
+                ++offset;
+                bits &= bits - 1u;
+            }
+        }
     }
 }
 
@@ -559,7 +572,7 @@ void bp_round(uint lane, bool fill)
     {
         uint4 key_b = bp_load(broadphase.workspace.z + other);
         if (key_b.w != 0u || key_b.x != key_a.x) { status |= BP_BAD_MODEL; continue; }
-        if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, false)) continue;
+        if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, bounds[key_a.z], bounds[key_b.z], false)) continue;
         if (fill)
         {
             bool overflow;
