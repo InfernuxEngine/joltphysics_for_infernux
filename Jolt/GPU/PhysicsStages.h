@@ -55,12 +55,18 @@ enum class Stage : std::uint32_t
     BuildSweptBounds,
     IntegrateSwept,
     SolveVelocityRounds,
+    SolvePositionRounds,
 };
 
 enum class Domain : std::uint32_t
 {
     Bodies, Shapes, Patches, Contacts, IslandPatches, IslandJoints, Joints
 };
+
+constexpr bool IsContactRoundStage(Stage inStage)
+{
+    return inStage == Stage::SolveVelocityRounds || inStage == Stage::SolvePositionRounds;
+}
 
 // Total rectangular items per dispatch, independent of island/world capacity.
 // A unit must satisfy laneCount * localCount <= this quantum, including padding.
@@ -93,6 +99,9 @@ inline constexpr auto ContactVelocityReads =
     | Mask(Resource::BodyModels) | Mask(Resource::BodyStates) | Mask(Resource::Contacts)
     | Mask(Resource::KinematicTargets) | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates);
 inline constexpr auto ContactVelocityWrites = Mask(Resource::BodyStates) | Mask(Resource::Contacts);
+inline constexpr auto ContactPositionReads =
+    Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
+    | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates);
 
 inline constexpr StageDefinition Stages[] = {
     {Stage::ApplyForces, "apply_forces", Domain::Bodies, 64, 1, 1,
@@ -118,9 +127,7 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
     {Stage::SolvePosition, "solve_position", Domain::IslandPatches, ContactSolverLanes, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
-            | Mask(Resource::BodyModels) | Mask(Resource::Contacts) | Mask(Resource::BodyStates) | Mask(Resource::SleepStates),
-        Mask(Resource::BodyStates), "solve_position_direct"},
+        ContactPositionReads, Mask(Resource::BodyStates), "solve_position_direct"},
     {Stage::PrepareKinematics, "prepare_kinematics", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)},
@@ -164,6 +171,8 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::SweepBodies), Mask(Resource::BodyStates) | Mask(Resource::SleepStates)},
     {Stage::SolveVelocityRounds, "solve_velocity_rounds", Domain::IslandPatches, ContactSolverLanes, 1, 1,
         ContactVelocityReads, ContactVelocityWrites},
+    {Stage::SolvePositionRounds, "solve_position_rounds", Domain::IslandPatches, ContactSolverLanes, 1, 1,
+        ContactPositionReads, Mask(Resource::BodyStates)},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of
@@ -173,8 +182,8 @@ inline constexpr StageDefinition Stages[] = {
 // SolveVelocity for each counts.w iteration, Integrate, SolveJointPosition then
 // SolvePosition for each solve.x iteration, FinishJoints, StoreContactHistory. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
-// SolveVelocityRounds owns the admitted contact islands for all velocity rounds
-// when there are no joint or participant updates between the rounds.
+// Contact rounds can share the same admitted islands and row ordering when
+// there are no joint or participant updates between their iterations.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner retires final active-set forces before sleep Commit. Kinematic preparation
 // stops the existing drive when the next tick has no new target. Control-only jobs
