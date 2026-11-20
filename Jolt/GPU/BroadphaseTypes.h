@@ -68,6 +68,8 @@ struct BP_ALIGN BroadphaseParams
 // The host checks every generated consumerFirst in uint64 before admission.
 // Indirect records live in a separate allocation: (groupsX, 1, 1, 0), with
 // exactly the first 12 bytes consumed as indirect arguments.
+// StageWork for publish_candidates = (pair chunk width, pair argument count,
+// optional setup and history argument count, 0).
 // Selected-world sweep cursor = (exclusiveSapEnd, cursor, status, 0).
 // All scan/reduce records = (sumLo,sumHi,statusBits,maxValue). The associative
 // operator performs checked uint2 sum, bitwise OR, max. Sum overflow sets bit 1.

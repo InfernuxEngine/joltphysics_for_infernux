@@ -742,11 +742,19 @@ void publish_candidates(uint lane : SV_GroupIndex)
     }
     GroupMemoryBarrierWithGroupSync();
 
+    const uint chunk = stage_work.range.x;
     for (uint record = lane; record < stage_work.range.y; record += BroadphaseBlockSize)
         indirect_arguments[record].value =
-            bp_dispatch_dimensions(bp_published_count, record * BroadphaseItemLimit, BroadphaseItemLimit, false);
-    for (uint record = lane; record < stage_work.range.z; record += BroadphaseBlockSize)
-        indirect_arguments[stage_work.range.y + record].value =
+            bp_dispatch_dimensions(bp_published_count, record * chunk, chunk, false);
+    if (lane == 0u && stage_work.range.z != 0u)
+    {
+        const uint setup = stage_work.range.y;
+        indirect_arguments[setup].value =
             bp_dispatch_dimensions(bp_published_count * MaxContactPointsPerPair,
-                                   record * BroadphaseItemLimit, BroadphaseItemLimit, false);
+                                   0u, chunk * MaxContactPointsPerPair, false);
+        // StoreContactHistory always replaces its header, including when this
+        // substep generated no pairs.
+        const uint groups = max(1u, (bp_published_count + BroadphaseBlockSize - 1u) / BroadphaseBlockSize);
+        indirect_arguments[setup + 1u].value = uint4(groups, 1u, 1u, 0u);
+    }
 }

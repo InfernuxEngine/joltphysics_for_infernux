@@ -294,8 +294,8 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
     if (lane == 0u)
     {
         if (errors != 0u) step_status[StepTopologyStatus].or(errors);
-        const uint patch_groups = errors == 0u ? cs_blocks(refs - joints) : 0u;
-        topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(patch_groups, 1u, 1u, 0u);
+        const uint patches = errors == 0u ? refs - joints : 0u;
+        topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(cs_blocks(patches), 1u, 1u, 0u);
         cs_store(constraint_params.layout.y, uint4(0u, 1u, errors, errors == 0u ? 1u : 0u));
     }
 }
@@ -452,16 +452,19 @@ uint4 cs_combine(uint4 a, uint4 b)
 }
 groupshared uint4 cs_shared[64];
 
+// Three sort tiles and a packed boundary per root fit the portable 16 KiB
+// workgroup memory limit. Tile size sets the sort stride, not the graph size.
 groupshared uint cs_local_keys[ConstraintLocalRefs];
-groupshared uint2 cs_local_joint_ranges[ConstraintLocalBodies];
-groupshared uint2 cs_local_patch_ranges[ConstraintLocalBodies];
+groupshared uint cs_local_root_starts[ConstraintLocalBodies + 1u];
 groupshared uint2 cs_local_maxima[ConstraintBlockSize];
+
+static const uint CS_LOCAL_KEY_STRIDE = 4u * ConstraintLocalSortItems;
 
 uint cs_local_key(uint kind, uint root, uint ordinal)
 {
-    return (kind * ConstraintLocalBodies + root) * ConstraintLocalRefs + ordinal;
+    return (kind * ConstraintLocalBodies + root) * CS_LOCAL_KEY_STRIDE + ordinal;
 }
-void cs_sort_local_refs(uint lane, uint extent)
+void cs_sort_local_refs(uint lane, uint first, uint extent)
 {
     for (uint size = 2u; size <= extent; size *= 2u)
     {
@@ -471,10 +474,10 @@ void cs_sort_local_refs(uint lane, uint extent)
             {
                 uint low = (pair / stride) * (2u * stride) + pair % stride;
                 uint high = low + stride;
-                uint a = cs_local_keys[low], b = cs_local_keys[high];
+                uint a = cs_local_keys[first + low], b = cs_local_keys[first + high];
                 bool ascending = (low & size) == 0u;
-                cs_local_keys[low] = ascending ? min(a, b) : max(a, b);
-                cs_local_keys[high] = ascending ? max(a, b) : min(a, b);
+                cs_local_keys[first + low] = ascending ? min(a, b) : max(a, b);
+                cs_local_keys[first + high] = ascending ? max(a, b) : min(a, b);
             }
             GroupMemoryBarrierWithGroupSync();
         }
@@ -490,6 +493,27 @@ uint cs_find_local_key(uint key, uint first, uint end)
     }
     return first;
 }
+
+// The deterministic merge rank is the sum of the lower bounds in the
+// sorted tiles. Active keys are unique by kind, root and source ordinal.
+uint cs_local_rank(uint key, uint refs)
+{
+    uint rank = 0u;
+    for (uint first = 0u; first < refs; first += ConstraintLocalSortItems)
+    {
+        uint end = min(refs, first + ConstraintLocalSortItems);
+        if (key > cs_local_keys[end - 1u]) rank += end - first;
+        else if (key > cs_local_keys[first]) rank += cs_find_local_key(key, first, end) - first;
+    }
+    return rank;
+}
+
+uint2 cs_local_start(uint root)
+{
+    uint packed = cs_local_root_starts[root];
+    return uint2(packed & 0xffffu, packed >> 16u);
+}
+
 void cs_prefix_local_roots(uint lane, uint4 counts, uint2 maxima)
 {
     cs_shared[lane] = counts;
@@ -513,8 +537,8 @@ void cs_prefix_local_roots(uint lane, uint4 counts, uint2 maxima)
     }
 }
 
-// Build the same source-ordered rows as the wide assembly. The accepted
-// local topology bounds all references and roots to one workgroup.
+// Use the device-written prefix. Padding each sort tile never promotes
+// unoccupied candidate capacity into a numerical constraint.
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_build_local_schedule(uint lane : SV_GroupIndex)
 {
@@ -522,61 +546,61 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
     const uint patches = contact_patches[0].leaves.y, refs = joints + patches;
     const uint4 control = cs_load(constraint_params.layout.y);
     uint status = control.z | (control.w != 1u ? ConstraintNotConverged : 0u);
-    uint extent = 1u;
-    while (extent < refs) extent *= 2u;
-    for (uint i = lane; i < extent; i += ConstraintBlockSize)
+    for (uint first = 0u; first < refs; first += ConstraintLocalSortItems)
     {
-        uint key = ConstraintInvalid;
-        if (i < refs)
+        uint count = min(ConstraintLocalSortItems, refs - first);
+        uint extent = 1u;
+        while (extent < count) extent *= 2u;
+        for (uint local = lane; local < extent; local += ConstraintBlockSize)
         {
-            uint kind = i < joints ? ConstraintJoint : ConstraintPatch;
-            uint ordinal = kind == ConstraintJoint ? i : i - joints;
-            uint p = cs_ref_base(kind) + 2u * ordinal;
-            uint4 flags = cs_load(p + 1u);
-            uint errors = flags.z;
-            if (flags.y != 0u)
+            uint key = ConstraintInvalid;
+            if (local < count)
             {
-                uint root = cs_validated_ref_root(cs_load(p), errors);
-                if (control.w == 1u && errors == 0u) key = cs_local_key(kind, root, ordinal);
+                uint i = first + local;
+                uint kind = i < joints ? ConstraintJoint : ConstraintPatch;
+                uint ordinal = kind == ConstraintJoint ? i : i - joints;
+                uint p = cs_ref_base(kind) + 2u * ordinal;
+                uint4 flags = cs_load(p + 1u);
+                uint errors = flags.z;
+                if (flags.y != 0u)
+                {
+                    uint root = cs_validated_ref_root(cs_load(p), errors);
+                    if (control.w == 1u && errors == 0u) key = cs_local_key(kind, root, ordinal);
+                }
+                status |= errors;
             }
-            status |= errors;
+            cs_local_keys[first + local] = key;
         }
-        cs_local_keys[i] = key;
+        GroupMemoryBarrierWithGroupSync();
+        cs_sort_local_refs(lane, first, extent);
     }
+
+    uint joint_count = cs_local_rank(cs_local_key(ConstraintPatch, 0u, 0u), refs);
+    uint active = cs_local_rank(ConstraintInvalid, refs);
+    uint patch_count = active - joint_count;
     uint roots_per_lane = cs_blocks(bodies);
     uint root_first = lane * roots_per_lane, root_end = min(root_first + roots_per_lane, bodies);
     for (uint root = root_first; root < root_end; ++root)
     {
-        cs_local_joint_ranges[root] = uint2(0u);
-        cs_local_patch_ranges[root] = uint2(0u);
+        uint joint_first = joint_count == 0u ? 0u : cs_local_rank(cs_local_key(ConstraintJoint, root, 0u), refs);
+        uint patch_first = patch_count == 0u ? 0u : cs_local_rank(cs_local_key(ConstraintPatch, root, 0u), refs) - joint_count;
+        cs_local_root_starts[root] = joint_first | (patch_first << 16u);
     }
-    GroupMemoryBarrierWithGroupSync();
-    cs_sort_local_refs(lane, extent);
-    uint joint_count = cs_find_local_key(cs_local_key(ConstraintPatch, 0u, 0u), 0u, extent);
-    uint active = cs_find_local_key(ConstraintInvalid, joint_count, extent);
+    if (lane == 0u) cs_local_root_starts[bodies] = joint_count | (patch_count << 16u);
 
-    for (uint i = lane; i < active; i += ConstraintBlockSize)
+    for (uint i = lane; i < refs; i += ConstraintBlockSize)
     {
         uint key = cs_local_keys[i];
-        uint bucket = key / ConstraintLocalRefs;
-        uint kind = bucket / ConstraintLocalBodies, root = bucket % ConstraintLocalBodies;
-        uint ordinal = key % ConstraintLocalRefs;
+        if (key == ConstraintInvalid) continue;
+        uint kind = key / (CS_LOCAL_KEY_STRIDE * ConstraintLocalBodies);
+        uint ordinal = key % CS_LOCAL_KEY_STRIDE;
         uint4 edge = cs_load(cs_ref_base(kind) + 2u * ordinal);
-        uint source_index = kind == ConstraintJoint ? i : i - joint_count;
+        uint rank = refs <= ConstraintLocalSortItems ? i : cs_local_rank(key, refs);
+        uint source_index = kind == ConstraintJoint ? rank : rank - joint_count;
         uint source_first = kind == ConstraintJoint ? constraint_params.sources.x : constraint_params.sources.y;
         uint2 writers = kind == ConstraintPatch ? edge.yz : uint2(0u);
         cs_store(source_first + source_index, uint4(edge.w, writers, 0u));
-        bool first = i == 0u;
-        if (!first) first = cs_local_keys[i - 1u] / ConstraintLocalRefs != bucket;
-        if (first)
-        {
-            uint end = cs_find_local_key((bucket + 1u) * ConstraintLocalRefs, i + 1u, active);
-            uint2 range = uint2(source_index, end - i);
-            if (kind == ConstraintJoint) cs_local_joint_ranges[root] = range;
-            else cs_local_patch_ranges[root] = range;
-        }
     }
-    uint patch_count = active - joint_count;
     for (uint j = joint_count + lane; j < joints; j += ConstraintBlockSize)
         cs_store(constraint_params.sources.x + j, uint4(ConstraintInvalid, 0u, 0u, 0u));
     for (uint p = patch_count + lane; p < patches; p += ConstraintBlockSize)
@@ -587,7 +611,7 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
     uint2 maxima = uint2(0u);
     for (uint root = root_first; root < root_end; ++root)
     {
-        uint2 lengths = uint2(cs_local_joint_ranges[root].y, cs_local_patch_ranges[root].y);
+        uint2 lengths = cs_local_start(root + 1u) - cs_local_start(root);
         bool has_joints = lengths.x != 0u, has_patches = lengths.y != 0u;
         counts += uint3(uint(has_joints || has_patches), uint(has_joints), uint(has_patches));
         maxima = max(maxima, lengths);
@@ -596,13 +620,10 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
     uint3 output = lane == 0u ? uint3(0u) : cs_shared[lane - 1u].xyz;
     for (uint root = root_first; root < root_end; ++root)
     {
-        uint2 j = cs_local_joint_ranges[root], p = cs_local_patch_ranges[root];
-        if (j.y == 0u && p.y == 0u) continue;
-        // Empty kinds retain their insertion position in the sorted stream.
-        if (j.y == 0u)
-            j.x = cs_find_local_key(cs_local_key(ConstraintJoint, root, 0u), 0u, joint_count);
-        if (p.y == 0u)
-            p.x = cs_find_local_key(cs_local_key(ConstraintPatch, root, 0u), joint_count, active) - joint_count;
+        uint2 starts = cs_local_start(root);
+        uint2 lengths = cs_local_start(root + 1u) - starts;
+        if (all(lengths == uint2(0u))) continue;
+        uint2 j = uint2(starts.x, lengths.x), p = uint2(starts.y, lengths.y);
         uint address = constraint_params.islands.x + 2u * output.x;
         cs_store(address, uint4(constraint_params.selection.x, cs_packed_body(root), j));
         cs_store(address + 1u, uint4(p, 0u, 0u));

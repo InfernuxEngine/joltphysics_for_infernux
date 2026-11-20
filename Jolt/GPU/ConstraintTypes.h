@@ -29,7 +29,8 @@ CS_CONST(ConstraintItemLimit, 2048u);
 CS_CONST(ConstraintBlockLimit, 32u);
 CS_CONST(ConstraintConnectivityQuantum, 32u);
 CS_CONST(ConstraintLocalBodies, 8u * ConstraintBlockSize);
-CS_CONST(ConstraintLocalRefs, 16u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalSortItems, 16u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalRefs, 3u * ConstraintLocalSortItems);
 CS_CONST(ConstraintLocalJointDispatch, ConstraintLocalRefs / ConstraintBlockSize);
 CS_CONST(ConstraintLocalPatchDispatch, ConstraintLocalJointDispatch + 1u);
 CS_CONST(ConstraintLocalWakePatchDispatch, ConstraintLocalPatchDispatch + 1u);
@@ -39,6 +40,9 @@ CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
 CS_CONST(IslandJointQuantum, 64u);
 CS_CONST(IslandPatchQuantum, 256u);
+// Count visits across rounds separately from the shared tile size. A counted
+// dispatch processes independent islands with at most this many visits per group.
+CS_CONST(IslandPatchRoundVisits, 32u * IslandPatchQuantum);
 CS_CONST(ContactSolverLanes, 64u);
 CS_CONST(ContactParallelMinimum, ContactSolverLanes / 2u);
 CS_CONST(ConstraintInvalid, 0xffffffffu);
