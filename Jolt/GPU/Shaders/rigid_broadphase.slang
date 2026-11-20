@@ -14,7 +14,6 @@ StructuredBuffer<WorldRange> author_worlds;
 StructuredBuffer<Aabb> bounds;
 StructuredBuffer<QueryRecordWord> joint_stream;
 StructuredBuffer<ColliderPairKey> collider_pair_ignores;
-RWStructuredBuffer<WorldRange> runtime_worlds;
 RWStructuredBuffer<ContactPatch> contact_patches;
 // Separate from the writable arena: indirect consumers never bind this as
 // writable storage. Each direct producer completely writes its used records.
@@ -760,17 +759,6 @@ void publish_count_summary(uint3 tid : SV_DispatchThreadID)
     uint status = header.z | total.z;
     if (total.y != 0u || total.x > 0xffffffffu / MaxContactPointsPerPair) status |= BP_INDEX_OVERFLOW;
     bp_store(bp_header(), uint4(total.x, total.y, status, total.x));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void build_world_ranges(uint3 tid : SV_DispatchThreadID)
-{
-    uint world;
-    if (!bp_item(tid.x, broadphase.counts.z, world)) return;
-    WorldRange runtime = author_worlds[world];
-    runtime.bodies.zw = uint2(0u, bp_world_selected(world) ? bp_load(bp_header()).x : 0u);
-    runtime_worlds[world] = runtime;
 }
 
 // Preserve the count and offset for each rank and reset its cursor for fill.
