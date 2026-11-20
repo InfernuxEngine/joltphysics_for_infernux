@@ -54,6 +54,7 @@ enum class Stage : std::uint32_t
     CaptureSweepMotion,
     BuildSweptBounds,
     IntegrateSwept,
+    SolveVelocityRounds,
 };
 
 enum class Domain : std::uint32_t
@@ -87,6 +88,12 @@ struct StageDefinition
 inline constexpr const char *StepModuleName = "jph_gpu_rigid_step";
 inline constexpr const char *StepSourcePath = "Jolt/GPU/Shaders/rigid_step.slang";
 
+inline constexpr auto ContactVelocityReads =
+    Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
+    | Mask(Resource::BodyModels) | Mask(Resource::BodyStates) | Mask(Resource::Contacts)
+    | Mask(Resource::KinematicTargets) | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates);
+inline constexpr auto ContactVelocityWrites = Mask(Resource::BodyStates) | Mask(Resource::Contacts);
+
 inline constexpr StageDefinition Stages[] = {
     {Stage::ApplyForces, "apply_forces", Domain::Bodies, 64, 1, 1,
         Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
@@ -106,11 +113,7 @@ inline constexpr StageDefinition Stages[] = {
             | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets) | Mask(Resource::ShapeModels)
             | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates), Mask(Resource::Contacts)},
     {Stage::SolveVelocity, "solve_velocity", Domain::IslandPatches, ContactSolverLanes, 1, 1,
-        Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::ConstraintSchedule)
-            | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
-            | Mask(Resource::Contacts) | Mask(Resource::KinematicTargets)
-            | Mask(Resource::ContactPatches) | Mask(Resource::SleepStates),
-        Mask(Resource::BodyStates) | Mask(Resource::Contacts), "solve_velocity_direct"},
+        ContactVelocityReads, ContactVelocityWrites, "solve_velocity_direct"},
     {Stage::Integrate, "integrate", Domain::Bodies, 64, 1, 1,
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels) | Mask(Resource::BodyStates)
             | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates), Mask(Resource::BodyStates)},
@@ -158,6 +161,8 @@ inline constexpr StageDefinition Stages[] = {
         Mask(Resource::ArticulationControl) | Mask(Resource::StageWork) | Mask(Resource::StepParams) | Mask(Resource::BodyModels)
             | Mask(Resource::BodyStates) | Mask(Resource::KinematicTargets) | Mask(Resource::SleepStates)
             | Mask(Resource::SweepBodies), Mask(Resource::BodyStates) | Mask(Resource::SleepStates)},
+    {Stage::SolveVelocityRounds, "solve_velocity_rounds", Domain::IslandPatches, ContactSolverLanes, 1, 1,
+        ContactVelocityReads, ContactVelocityWrites},
 };
 
 // PrepareKinematics runs once before all substeps. One substep consists of
@@ -167,6 +172,8 @@ inline constexpr StageDefinition Stages[] = {
 // SolveVelocity for each counts.w iteration, Integrate, SolveJointPosition then
 // SolvePosition for each solve.x iteration, FinishJoints, StoreContactHistory. StageWork bounds each
 // dispatch's items/island lanes; all units of an iteration precede its successor.
+// SolveVelocityRounds owns entire small contact islands for all velocity rounds
+// when there are no joint or participant updates between the rounds.
 // Joint-only worlds use joint stages without contact stages. The logical-tick
 // owner retires final active-set forces before sleep Commit. Kinematic preparation
 // stops the existing drive when the next tick has no new target. Control-only jobs

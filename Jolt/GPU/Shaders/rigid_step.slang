@@ -1556,6 +1556,21 @@ void solve_velocity_direct(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(ContactSolverLanes, 1, 1)]
+void solve_velocity_rounds(uint3 tid : SV_DispatchThreadID)
+{
+    uint begin, first, end;
+    if (!jph_island_patch_range(tid.x, begin, first, end)) return;
+
+    // This lane has all the dynamic writers of its island. Each round sees
+    // the prior round's impulses in the same canonical patch order.
+    VelocityContactSolver solver;
+    for (uint iteration = 0u; iteration < step_params.counts.w; ++iteration)
+        for (uint row = first; row < end; ++row)
+            solver.solve(jph_island_patch_record(begin + row).x);
+}
+
+[shader("compute")]
+[numthreads(ContactSolverLanes, 1, 1)]
 void solve_position_direct(uint3 tid : SV_DispatchThreadID)
 {
     PositionContactSolver solver;
