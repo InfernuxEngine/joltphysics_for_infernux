@@ -278,18 +278,79 @@ void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
 // need no device-wide barriers between them. Shared read-only bodies never link islands.
 groupshared Atomic<uint> cs_local_parents[ConstraintLocalBodies];
 groupshared Atomic<uint> cs_local_status;
+groupshared uint cs_writer_offsets[ConstraintBlockSize];
+
+uint cs_local_slot_count()
+{
+    return constraint_params.summary.x == 0u ? constraint_params.counts.x : constraint_params.summary.y;
+}
+
+uint cs_local_writer_body(uint ordinal)
+{
+    return constraint_params.summary.x == 0u ? ordinal : cs_load(constraint_params.summary.x + ordinal).x;
+}
+
+// Each lane owns a contiguous interval, so its writer offset preserves
+// packed body order. During linking, component_parents holds the inverse
+// map. The publication below replaces it with canonical packed roots.
+void cs_compact_local_writers(uint lane)
+{
+    const uint bodies = constraint_params.counts.x, width = cs_blocks(bodies);
+    const uint first = lane * width, end = min(first + width, bodies);
+    uint count = 0u;
+    for (uint body = first; body < end; ++body)
+        count += uint(cs_initial_root(body) != ConstraintInvalid);
+    cs_writer_offsets[lane] = count;
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint writers = cs_local_slot_count();
+    if (lane == 0u)
+    {
+        uint prefix = 0u;
+        for (uint i = 0u; i < ConstraintBlockSize; ++i)
+        {
+            uint size = cs_writer_offsets[i];
+            cs_writer_offsets[i] = prefix;
+            prefix += size;
+        }
+        cs_local_status.store(prefix == writers ? 0u : ConstraintBadModel);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint next = cs_writer_offsets[lane];
+    for (uint body = first; body < end; ++body)
+    {
+        uint slot = ConstraintInvalid;
+        if (cs_initial_root(body) != ConstraintInvalid && next < writers)
+        {
+            slot = next++;
+            cs_store(constraint_params.summary.x + slot, uint4(body, 0u, 0u, 0u));
+            cs_local_parents[slot].store(slot);
+        }
+        component_parents[body].store(slot);
+    }
+    AllMemoryBarrierWithGroupSync();
+}
 
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_build_local_topology(uint lane : SV_GroupIndex)
 {
     const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
-    const uint refs = joints + contact_patches[0].leaves.y;
-    for (uint body = lane; body < bodies; body += ConstraintBlockSize)
-        cs_local_parents[body].store(cs_initial_root(body));
-    if (lane == 0u) cs_local_status.store(0u);
-    GroupMemoryBarrierWithGroupSync();
+    const bool compact = constraint_params.summary.x != 0u;
+    const uint live = contact_patches[0].leaves.y;
+    const uint patches = min(live, constraint_params.counts.z);
+    const uint refs = joints + patches;
+    if (compact)
+        cs_compact_local_writers(lane);
+    else
+    {
+        for (uint body = lane; body < bodies; body += ConstraintBlockSize)
+            cs_local_parents[body].store(cs_initial_root(body));
+        if (lane == 0u) cs_local_status.store(0u);
+        GroupMemoryBarrierWithGroupSync();
+    }
 
-    uint status = 0u;
+    uint status = live == patches ? 0u : ConstraintOverflow;
     for (uint i = lane; i < refs; i += ConstraintBlockSize)
     {
         const uint row = i < joints ? cs_ref_base(ConstraintJoint) + 2u * i
@@ -300,6 +361,15 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
         uint2 edge = cs_load(row).yz;
         if (any(edge == uint2(ConstraintInvalid))) continue;
         edge -= uint2(constraint_params.selection.y);
+        if (compact)
+        {
+            edge = uint2(component_parents[edge.x].load(), component_parents[edge.y].load());
+            if (any(edge >= uint2(cs_local_slot_count())))
+            {
+                status |= ConstraintBadLabel;
+                continue;
+            }
+        }
         while (edge.x != edge.y)
         {
             const uint hi = max(edge.x, edge.y), lo = min(edge.x, edge.y);
@@ -310,12 +380,15 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
         }
     }
     if (status != 0u) cs_local_status.or(status);
-    GroupMemoryBarrierWithGroupSync();
+    if (compact) AllMemoryBarrierWithGroupSync();
+    else GroupMemoryBarrierWithGroupSync();
 
     const uint errors = cs_local_status.load();
     for (uint body = lane; body < bodies; body += ConstraintBlockSize)
     {
-        uint root = cs_local_parents[body].load();
+        const uint slot = compact ? component_parents[body].load() : body;
+        uint root = ConstraintInvalid;
+        if (slot != ConstraintInvalid) root = cs_local_parents[slot].load();
         if (root != ConstraintInvalid)
         {
             uint parent = cs_local_parents[root].load();
@@ -324,6 +397,7 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
                 root = parent;
                 parent = cs_local_parents[root].load();
             }
+            root = cs_local_writer_body(root);
         }
         component_parents[body].store(root);
         cs_store(constraint_params.limits.w + body, uint4(root, 0u, 0u, 0u));
@@ -331,13 +405,13 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
     }
     // The wake kernels consume these roots on the same queue. An invalid input
     // dispatches no consumers and reports the error when the tick publishes.
-    if (lane < cs_blocks(max(bodies, max(joints, constraint_params.counts.z))))
+    if (lane < ConstraintBlockLimit)
         topology_arguments[lane].value = uint4(errors == 0u ? lane + 1u : 0u, 1u, 1u, 0u);
     if (lane == 0u)
     {
         if (errors != 0u) step_status[StepTopologyStatus].or(errors);
-        const uint patches = errors == 0u ? refs - joints : 0u;
-        topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(cs_blocks(patches), 1u, 1u, 0u);
+        const uint wake_patches = errors == 0u ? patches : 0u;
+        topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(cs_blocks(wake_patches), 1u, 1u, 0u);
         cs_store(constraint_params.layout.y, uint4(0u, 0u, errors, errors == 0u ? 1u : 0u));
     }
 }
@@ -481,6 +555,18 @@ uint cs_local_key(uint kind, uint root, uint ordinal)
 {
     return (kind * ConstraintLocalBodies + root) * CS_LOCAL_KEY_STRIDE + ordinal;
 }
+uint cs_local_writer_ordinal(uint body)
+{
+    if (constraint_params.summary.x == 0u) return body;
+    uint first = 0u, end = cs_local_slot_count();
+    while (first < end)
+    {
+        const uint mid = first + (end - first) / 2u;
+        if (cs_local_writer_body(mid) < body) first = mid + 1u;
+        else end = mid;
+    }
+    return first;
+}
 void cs_sort_local_refs(uint lane, uint first, uint extent)
 {
     for (uint size = 2u; size <= extent; size *= 2u)
@@ -559,8 +645,8 @@ void cs_prefix_local_roots(uint lane, uint4 counts, uint2 maxima)
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_build_local_schedule(uint lane : SV_GroupIndex)
 {
-    const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
-    const uint patches = contact_patches[0].leaves.y, refs = joints + patches;
+    const uint bodies = cs_local_slot_count(), joints = constraint_params.counts.y;
+    const uint patches = min(contact_patches[0].leaves.y, constraint_params.counts.z), refs = joints + patches;
     const uint4 control = cs_load(constraint_params.layout.y);
     uint status = control.z | (control.w != 1u ? ConstraintNotConverged : 0u);
     for (uint first = 0u; first < refs; first += ConstraintLocalSortItems)
@@ -582,7 +668,8 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
                 if (flags.y != 0u)
                 {
                     uint root = cs_validated_ref_root(cs_load(p), errors);
-                    if (control.w == 1u && errors == 0u) key = cs_local_key(kind, root, ordinal);
+                    if (control.w == 1u && errors == 0u)
+                        key = cs_local_key(kind, cs_local_writer_ordinal(root), ordinal);
                 }
                 status |= errors;
             }
@@ -642,7 +729,7 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
         if (all(lengths == uint2(0u))) continue;
         uint2 j = uint2(starts.x, lengths.x), p = uint2(starts.y, lengths.y);
         uint address = constraint_params.islands.x + 2u * output.x;
-        cs_store(address, uint4(constraint_params.selection.x, cs_packed_body(root), j));
+        cs_store(address, uint4(constraint_params.selection.x, cs_packed_body(cs_local_writer_body(root)), j));
         cs_store(address + 1u, uint4(p, 0u, 0u));
         if (j.y != 0u)
         {

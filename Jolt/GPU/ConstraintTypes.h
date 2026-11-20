@@ -28,6 +28,8 @@ CS_CONST(ConstraintBlockSize, 64u);
 CS_CONST(ConstraintItemLimit, 2048u);
 CS_CONST(ConstraintBlockLimit, 32u);
 CS_CONST(ConstraintLocalBodies, 8u * ConstraintBlockSize);
+// The compact directory scans at most one workgroup-width of slots per lane.
+CS_CONST(ConstraintLocalBodyScanLimit, ConstraintBlockSize * ConstraintBlockSize);
 CS_CONST(ConstraintLocalSortItems, 16u * ConstraintBlockSize);
 CS_CONST(ConstraintLocalRefs, 3u * ConstraintLocalSortItems);
 CS_CONST(ConstraintLocalJointDispatch, ConstraintLocalRefs / ConstraintBlockSize);
@@ -88,7 +90,8 @@ struct CS_ALIGN ConstraintParams
     CS_U4 scanParent;   // scanned parent-prefix base, combine mode (0 or 1), 0, 0.
     CS_U4 merge;        // source bank, target bank, length (or Invalid for live patches), run width power-of-two<=2^31.
     CS_U4 select;       // kind (Joint=0/Patch=1), sort seed bank, awake refs, wide reduction workspace.
-    CS_U4 summary;      // root-scan total word, range-reduction total word, ref-validation total word, body-check total word.
+    CS_U4 summary;      // Wide: root scan, range reduction, reference and body checks.
+                        // Compact local: writer directory base, writer count, 0, 0. Direct local: zero.
     CS_U4 selection;    // accepted packed world row and body, leaf, joint bases.
 };
 
