@@ -121,23 +121,6 @@ void init_contacts(uint3 tid : SV_DispatchThreadID)
     resident_contacts[item] = empty;
 }
 
-// The CPU uploaded the other StepParams words. This producer modifies only
-// solve.zw; the uniform consumer follows the real storage-write dependency.
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void publish_resident_count(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x != 0u) return;
-    uint4 header = bp_load(bp_header());
-    header.z &= ~BP_CAPACITY_NEEDED;
-    if (header.y == 0u && header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
-    bp_store(bp_header(), header);
-    uint4 solve = resident_step[1u].value;
-    uint points = broadphase.round.y != 0u ? 1u : MaxContactPointsPerPair;
-    solve.zw = header.z == 0u ? uint2(header.x * points, header.x) : uint2(0u);
-    resident_step[1u].value = solve;
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void init_candidates(uint3 tid : SV_DispatchThreadID)
@@ -161,6 +144,12 @@ void bp_merge_store(uint word, uint4 value)
 uint bp_blocks(uint count)
 {
     return count / BroadphaseBlockSize + (count % BroadphaseBlockSize != 0u ? 1u : 0u);
+}
+
+uint4 bp_dispatch_dimensions(uint length, uint first, uint limit, bool block_mode)
+{
+    uint count = first < length ? min(limit, length - first) : 0u;
+    return uint4(block_mode ? count : bp_blocks(count), 1u, 1u, 0u);
 }
 
 uint bp_active_level_length()
@@ -212,11 +201,7 @@ void prepare_indirect_arguments(uint3 tid : SV_DispatchThreadID)
     // Host admission checks recordCount <= 15, blockMode in [0,1], and
     // consumerFirst + (recordCount - 1) * limit without uint32 overflow.
     uint first = stage_work.range.x + record * limit;
-    uint count = 0u;
-    if (first < length) count = min(limit, length - first);
-    uint groups = count;
-    if (!block_mode) groups = bp_blocks(count);
-    indirect_arguments[record].value = uint4(groups, 1u, 1u, 0u);
+    indirect_arguments[record].value = bp_dispatch_dimensions(length, first, limit, block_mode);
 }
 
 uint4 bp_sort_record(uint leaf, Aabb box)
@@ -522,8 +507,6 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
         for (uint i = 0u; i < joints; ++i)
             status |= bp_small_joint_keys[i].w;
         bp_store(bp_header(), uint4(count, 0u, status, count));
-        const bool fits = status == 0u && count <= broadphase.candidates.z;
-        resident_patches[0u].leaves = uint4(broadphase.candidates.x, fits ? count : 0u, 0u, 0u);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -732,16 +715,30 @@ void publish_count_summary(uint3 tid : SV_DispatchThreadID)
     bp_store(bp_header(), uint4(count, 0u, status, count));
 }
 
+groupshared uint bp_published_count;
+
+// The canonical bank, logical length and narrowphase dispatch arguments all
+// come from the same counted candidate stream.
 [shader("compute")]
-[numthreads(1, 1, 1)]
-void set_candidate_bank(uint3 tid : SV_DispatchThreadID)
+[numthreads(64, 1, 1)]
+void publish_candidates(uint lane : SV_GroupIndex)
 {
-    if (tid.x != 0u) return;
-    uint4 header = bp_load(bp_header());
-    uint status = header.z;
-    if ((status & BP_CAPACITY_NEEDED) == 0u && (header.y != 0u || header.x > broadphase.candidates.z)) status |= BP_BAD_BANK;
-    header.z = status;
-    bp_store(bp_header(), header);
-    // Host calls only after every canonical-sort chunk has completed.
-    resident_patches[0u].leaves = uint4(broadphase.merge.x, status == 0u ? header.x : 0u, 0u, 0u);
+    if (lane == 0u)
+    {
+        uint4 header = bp_load(bp_header());
+        if (header.y != 0u) header.z |= BP_BAD_BANK;
+        if (header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
+        bp_store(bp_header(), header);
+        bp_published_count = header.z == 0u ? header.x : 0u;
+        resident_patches[0u].leaves = uint4(broadphase.merge.x, bp_published_count, 0u, 0u);
+        uint4 solve = resident_step[1u].value;
+        uint points = broadphase.round.y != 0u ? 1u : MaxContactPointsPerPair;
+        solve.zw = uint2(bp_published_count * points, bp_published_count);
+        resident_step[1u].value = solve;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint record = lane; record < stage_work.range.y; record += BroadphaseBlockSize)
+        indirect_arguments[record].value =
+            bp_dispatch_dimensions(bp_published_count, record * BroadphaseItemLimit, BroadphaseItemLimit, false);
 }
