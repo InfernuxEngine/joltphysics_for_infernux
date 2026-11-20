@@ -22,6 +22,32 @@ RWStructuredBuffer<Atomic<uint>> root_votes;
 RWStructuredBuffer<Atomic<uint>> step_status;
 RWStructuredBuffer<ConstraintScheduleWord> constraint_schedule;
 RWStructuredBuffer<ConstraintScheduleWord> topology_arguments;
+StructuredBuffer<ConstraintScheduleWord> convex_completion;
+StructuredBuffer<ConstraintScheduleWord> topology_gate_spans;
+
+// The collision producer publishes completion before this pass on the same
+// queue. Until then, contact consumers see zero workgroups. A patch span still
+// takes its exact live count from the collision bank, including spare capacity.
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_gate_topology(uint3 tid : SV_DispatchThreadID)
+{
+    uint records, stride;
+    topology_gate_spans.GetDimensions(records, stride);
+    if (tid.x >= records) return;
+    const uint4 span = topology_gate_spans[tid.x].value;
+    uint groups = 0u;
+    if (convex_completion[0].value.x == QuerySuccess)
+    {
+        groups = span.x;
+        if (span.w != 0u)
+        {
+            const uint live = contact_patches[0].leaves.y;
+            const uint rows = min(span.z, live - min(live, span.y));
+            groups = rows / ConstraintBlockSize + uint(rows % ConstraintBlockSize != 0u);
+        }
+    }
+    topology_arguments[tid.x].value = uint4(groups, 1u, 1u, 0u);
+}
 
 uint4 cs_load(uint p) { return constraint_schedule[p].value; }
 void cs_store(uint p, uint4 v) { constraint_schedule[p].value = v; }
