@@ -1,5 +1,5 @@
-// Same numerical writer/substep as ordinary narrowphase. Host must hold the
-// CollidePairs producer barrier until narrowphase_job_progress reports Success.
+// Discrete convex contacts share the analytic pass's candidate ordinals and
+// contact output. Only candidates that require support mapping enter the job queue.
 #include "rigid_convex_manifold.slang"
 #include "rigid_joints.slang"
 #include "component_union.slang"
@@ -14,6 +14,8 @@ RWStructuredBuffer<uint4> convex_scratch;
 StructuredBuffer<BodyModel> body_models;
 RWStructuredBuffer<SweepBody> sweep_bodies;
 RWStructuredBuffer<Atomic<uint>> sweep_choice;
+RWStructuredBuffer<Atomic<uint>> convex_jobs;
+RWStructuredBuffer<uint4> convex_dispatch_args;
 
 uint cvx_step_slots()
 {
@@ -33,20 +35,68 @@ void cvx_initialize_jobs(uint index)
 
 [shader("compute")]
 [numthreads(64,1,1)]
-void narrowphase_init_jobs(uint3 tid:SV_DispatchThreadID) { cvx_initialize_jobs(tid.x); }
+void narrowphase_init_jobs(uint3 tid:SV_DispatchThreadID)
+{
+    if (tid.x < stage_work.range.x) convex_scratch[tid.x] = uint4(0u);
+    if (tid.x < stage_work.range.y) convex_jobs[tid.x].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64,1,1)]
+void narrowphase_queue_jobs(uint3 tid:SV_DispatchThreadID)
+{
+    const uint ordinal = stage_work.range.x + tid.x;
+    const uint2 header = contact_patches[0].leaves.xy;
+    if (tid.x >= stage_work.range.y || ordinal >= header.y) return;
+    const uint2 leaves = contact_patches[header.x + ordinal].leaves.xy;
+    if (all(leaves < step_params.counts.zz) &&
+        shape_models[leaves.x].meta.x <= ShapeCapsule && shape_models[leaves.y].meta.x <= ShapeCapsule) return;
+    // Execution order does not affect the solver's canonical order: each lane
+    // writes the contact records belonging to the original candidate ordinal.
+    const uint index = convex_jobs[0u].add(1u);
+    convex_jobs[1u + index].store(ordinal);
+}
+
+void cvx_dispatch_jobs(uint lanes)
+{
+    convex_dispatch_args[0u] = uint4((lanes + ConvexJobGroupSize - 1u) / ConvexJobGroupSize, 1u, 1u, 0u);
+}
+
+[shader("compute")]
+[numthreads(64,1,1)]
+void narrowphase_publish_jobs(uint lane:SV_GroupIndex)
+{
+    const uint count = convex_jobs[0u].load();
+    const uint slots = min(cvx_step_slots(), count);
+    if (lane < slots) convex_scratch[4u + lane * CvxSlotWords + 48u] = uint4(lane, 0u, 0u, 0u);
+    if (lane == 0u)
+    {
+        convex_scratch[1u] = uint4(0u, count, slots, 0u);
+        cvx_dispatch_jobs(slots);
+    }
+}
+
+uint cvx_job_ordinal(uint b)
+{
+    return convex_jobs[1u + convex_scratch[b + 48u].x].load();
+}
+
 void cvx_step_next(uint b,uint slots)
 {
-    uint4 owner=convex_scratch[b+48u]; owner.x+=slots; owner.yz=uint2(0); convex_scratch[b+48u]=owner;
+    uint4 owner=convex_scratch[b+48u];
+    owner.x += slots;
+    owner.yz = uint2(0u);
+    owner.w = uint(owner.x >= convex_scratch[1u].y);
+    convex_scratch[b+48u] = owner;
 }
 void cvx_step_start(uint b,uint slots)
 {
     uint4 owner=convex_scratch[b+48u],job=convex_scratch[1];
     if(owner.x-job.x>=job.y) { convex_scratch[b+48u].w=1u; return; }
-    uint patchIndex=contact_patches[0].leaves.x+owner.x;
+    uint patchIndex=contact_patches[0].leaves.x+cvx_job_ordinal(b);
     ContactPatch patch=contact_patches[patchIndex];
     if(patch.leaves.x>=step_params.counts.z || patch.leaves.y>=step_params.counts.z) { cvx_fail(convex_scratch,b,40); convex_scratch[b+48u].w=2; return; }
     ShapeModel a=shape_models[patch.leaves.x],p=shape_models[patch.leaves.y];
-    if(a.meta.x<=ShapeCapsule && p.meta.x<=ShapeCapsule) { cvx_step_next(b,slots); return; }
     CvxOperand oa=cvx_leaf_operand(a,body_states[a.meta.y]),op=cvx_leaf_operand(p,body_states[p.meta.y]);
     if(cvx_triangle_backfacing(oa,op.center.xyz) || cvx_triangle_backfacing(op,oa.center.xyz)) {
         cvx_step_next(b,slots); return;
@@ -58,7 +108,7 @@ void cvx_step_start(uint b,uint slots)
 }
 void cvx_step_metric_complete(uint b,uint slots)
 {
-    uint ordinal=convex_scratch[b+48u].x;
+    uint ordinal=cvx_job_ordinal(b);
     ContactPatch patch=contact_patches[contact_patches[0].leaves.x+ordinal];
     ShapeModel a=shape_models[patch.leaves.x],p=shape_models[patch.leaves.y];
     bool sensor=jph_sensor(a)||jph_sensor(p);
@@ -80,7 +130,7 @@ void cvx_step_metric_complete(uint b,uint slots)
 }
 void cvx_step_contact(uint b,uint slots)
 {
-    uint ordinal=convex_scratch[b+48u].x,point=convex_scratch[b+49u].x;
+    uint ordinal=cvx_job_ordinal(b),point=convex_scratch[b+49u].x;
     uint patchIndex=contact_patches[0].leaves.x+ordinal;
     ContactPatch patch=contact_patches[patchIndex];
     ShapeModel a=shape_models[patch.leaves.x],p=shape_models[patch.leaves.y];
@@ -108,12 +158,15 @@ void cvx_step_contact(uint b,uint slots)
     }
 }
 [shader("compute")]
-[numthreads(64,1,1)]
+[numthreads(ConvexJobGroupSize,1,1)]
 void narrowphase_advance_jobs(uint3 tid:SV_DispatchThreadID)
 {
-    uint slots=cvx_step_slots(); if(tid.x>=slots) return;
+    uint slots=convex_scratch[1u].z; if(tid.x>=slots) return;
     uint b=4u+tid.x*CvxSlotWords;
-    for(uint unit=0u;unit<32u && convex_scratch[b+48u].w==0u;++unit) {
+    // Independent lanes keep their cursors in the shared arena. A packet can
+    // grant multiple 32-operation quanta without additional dispatches.
+    const uint work_units = stage_work.range.x * ConvexJobAdvanceQuantum;
+    for(uint unit=0u;unit<work_units && convex_scratch[b+48u].w==0u;++unit) {
         uint phase=convex_scratch[b+48u].y;
         if(phase==0u) cvx_step_start(b,slots);
         else if(phase==1u) {
@@ -142,6 +195,34 @@ void cvx_step_progress()
 [shader("compute")]
 [numthreads(64,1,1)]
 void narrowphase_job_progress(uint3 tid:SV_DispatchThreadID)
+{
+    if (tid.x != 0u) return;
+    const uint slots = convex_scratch[1u].z;
+    uint pending_lanes = 0u, failed_ordinal = 0xffffffffu, reason = 0u;
+    for (uint i = 0u; i < slots; ++i)
+    {
+        const uint b = 4u + i * CvxSlotWords;
+        const uint state = convex_scratch[b + 48u].w;
+        if (state == 0u) pending_lanes = i + 1u;
+        if (state == 2u)
+        {
+            const uint ordinal = cvx_job_ordinal(b);
+            if (ordinal < failed_ordinal)
+            {
+                failed_ordinal = ordinal;
+                reason = convex_scratch[b].w;
+            }
+        }
+    }
+    const bool failed = failed_ordinal != 0xffffffffu;
+    convex_scratch[0u] = uint4(failed ? QueryNumericalFailure : pending_lanes != 0u ? QueryPending : QuerySuccess,
+                              convex_scratch[1u].y, failed_ordinal, reason);
+    cvx_dispatch_jobs(failed ? 0u : pending_lanes);
+}
+
+[shader("compute")]
+[numthreads(64,1,1)]
+void sweep_event_contact_progress(uint3 tid:SV_DispatchThreadID)
 {
     if (tid.x == 0u) cvx_step_progress();
 }

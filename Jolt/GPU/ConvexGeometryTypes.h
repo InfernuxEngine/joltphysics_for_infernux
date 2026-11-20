@@ -27,6 +27,8 @@ JPH_CONVEX_CONSTANT(ConvexGeometryHeaderWords, 5);
 // Zero-margin hull aliases its core vertex words to its full vertex words.
 
 JPH_CONVEX_CONSTANT(ConvexJobSlotWords, 2048);
+JPH_CONVEX_CONSTANT(ConvexJobGroupSize, 8);
+JPH_CONVEX_CONSTANT(ConvexJobAdvanceQuantum, 32);
 JPH_CONVEX_CONSTANT(ConvexJobHeaderWords, 64);
 JPH_CONVEX_CONSTANT(ConvexJobSimplexFirst, 64);
 JPH_CONVEX_CONSTANT(ConvexJobPointsFirst, 76);
