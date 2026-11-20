@@ -294,6 +294,8 @@ void constraint_build_local_topology(uint lane : SV_GroupIndex)
     if (lane == 0u)
     {
         if (errors != 0u) step_status[StepTopologyStatus].or(errors);
+        const uint patch_groups = errors == 0u ? cs_blocks(refs - joints) : 0u;
+        topology_arguments[ConstraintLocalWakePatchDispatch].value = uint4(patch_groups, 1u, 1u, 0u);
         cs_store(constraint_params.layout.y, uint4(0u, 1u, errors, errors == 0u ? 1u : 0u));
     }
 }

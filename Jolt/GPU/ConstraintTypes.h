@@ -28,11 +28,12 @@ CS_CONST(ConstraintBlockSize, 64u);
 CS_CONST(ConstraintItemLimit, 2048u);
 CS_CONST(ConstraintBlockLimit, 32u);
 CS_CONST(ConstraintConnectivityQuantum, 32u);
-CS_CONST(ConstraintLocalBodies, 4u * ConstraintBlockSize);
-CS_CONST(ConstraintLocalRefs, 8u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalBodies, 8u * ConstraintBlockSize);
+CS_CONST(ConstraintLocalRefs, 16u * ConstraintBlockSize);
 CS_CONST(ConstraintLocalJointDispatch, ConstraintLocalRefs / ConstraintBlockSize);
 CS_CONST(ConstraintLocalPatchDispatch, ConstraintLocalJointDispatch + 1u);
-CS_CONST(ConstraintLocalArgumentWords, ConstraintLocalPatchDispatch + 1u);
+CS_CONST(ConstraintLocalWakePatchDispatch, ConstraintLocalPatchDispatch + 1u);
+CS_CONST(ConstraintLocalArgumentWords, ConstraintLocalWakePatchDispatch + 1u);
 CS_CONST(ConstraintLinksPending, 1u);
 CS_CONST(ConstraintRootsPending, 2u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
@@ -133,6 +134,17 @@ struct CS_ALIGN ConstraintParams
 // field as its backing storage. CPU POD remains scalar uint32, not a C++ atomic.
 
 #ifdef __cplusplus
+inline constexpr bool ConstraintLocalTopologyFits(std::uint32_t bodies, std::uint32_t joints, std::uint32_t patches)
+{
+    return bodies <= ConstraintLocalBodies && joints <= ConstraintLocalRefs &&
+        patches <= ConstraintLocalRefs - joints;
+}
+
+inline constexpr bool ConstraintDeviceScheduleFits(std::uint32_t bodies, std::uint32_t joints, std::uint32_t patches)
+{
+    return joints <= IslandJointQuantum && ConstraintLocalTopologyFits(bodies, joints, patches);
+}
+
 static_assert(sizeof(ConstraintScheduleWord) == 16);
 static_assert(alignof(ConstraintScheduleWord) == 16);
 static_assert(std::is_trivially_copyable_v<ConstraintScheduleWord>);

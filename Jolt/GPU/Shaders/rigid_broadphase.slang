@@ -745,4 +745,8 @@ void publish_candidates(uint lane : SV_GroupIndex)
     for (uint record = lane; record < stage_work.range.y; record += BroadphaseBlockSize)
         indirect_arguments[record].value =
             bp_dispatch_dimensions(bp_published_count, record * BroadphaseItemLimit, BroadphaseItemLimit, false);
+    for (uint record = lane; record < stage_work.range.z; record += BroadphaseBlockSize)
+        indirect_arguments[stage_work.range.y + record].value =
+            bp_dispatch_dimensions(bp_published_count * MaxContactPointsPerPair,
+                                   record * BroadphaseItemLimit, BroadphaseItemLimit, false);
 }

@@ -6,9 +6,9 @@
 StructuredBuffer<ConstraintScheduleWord> constraint_schedule;
 
 // A rectangular unit addresses an accepted table span. A whole-table unit
-// uses the header's device count and admits the entire source list in one
-// quantum. Both use the same canonical island and source rows. In the
-// whole-table form range.x specifies the round count for batched velocity.
+// uses the header's device count. A workgroup walks the same bounded contact
+// tiles as rectangular units, in source order for its island. Whole-table
+// range.x specifies the round count for batched contact solving.
 bool jph_island_unit(uint lane, bool joints, out uint4 joint_range, out uint4 patch_range)
 {
     joint_range = uint4(0u);
