@@ -21,12 +21,13 @@ RWStructuredBuffer<QueryRecordWord> indirect_arguments;
 RWStructuredBuffer<QueryRecordWord> resident_step;
 RWStructuredBuffer<Contact> resident_contacts;
 RWStructuredBuffer<ContactPatch> resident_patches;
+RWStructuredBuffer<Atomic<uint>> pair_count;
 
 static const uint BP_BAD_BOUNDS = 1u;
 static const uint BP_SUM_OVERFLOW = 2u;
 static const uint BP_BAD_MODEL = 4u;
 static const uint BP_BAD_CURSOR = 8u;
-static const uint BP_FILL_MISMATCH = 16u;
+static const uint BP_BAD_BANK = 16u;
 static const uint BP_INDEX_OVERFLOW = 32u;
 static const uint BP_BAD_QUANTUM = 64u;
 static const uint BP_CAPACITY_NEEDED = 128u;
@@ -186,9 +187,10 @@ uint bp_scan_length()
 void seed_active(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint status = bp_load(bp_header()).z;
-    uint count = broadphase.round.z == 1u && !bp_suffix_valid() ? 0u : broadphase.selectedCounts.y;
-    bp_store(broadphase.activeState.x, uint4(count, 0u, status, 0u));
+    uint status = bp_load(bp_header()).z & ~BP_CAPACITY_NEEDED;
+    bp_store(bp_header(), uint4(0u, 0u, status, 0u));
+    pair_count[0].store(0u);
+    bp_store(broadphase.activeState.x, uint4(broadphase.selectedCounts.y, 0u, status, 0u));
     bp_store(broadphase.activeState.y, uint4(0u));
 }
 
@@ -375,8 +377,7 @@ void find_sap_ends(uint3 tid : SV_DispatchThreadID)
         }
         end = low;
     }
-    bp_store(broadphase.rankRows.x + rank, uint4(end, rank + 1u, 0u, 0u));
-    bp_store(broadphase.rankRows.y + rank, uint4(0u, 0u, status, 0u));
+    bp_store(broadphase.rankRows.x + rank, uint4(end, rank + 1u, status, 0u));
     // The initial active prefix includes empty spans within the selected World.
     bp_store(broadphase.activeQueues.x + rank, uint4(rank, 0u, 0u, 0u));
 }
@@ -413,7 +414,6 @@ bool bp_collider_suppressed(uint4 a, uint4 b)
     return jph_collider_pair_equal(collider_pair_ignores[low], key);
 }
 
-// Count and fill call this exact function against the same frozen buffers.
 groupshared Aabb bp_small_bounds[BroadphaseSmallSetLimit];
 groupshared uint bp_small_leaf_status[BroadphaseSmallSetLimit];
 groupshared uint4 bp_small_joint_keys[BroadphaseSmallJointLimit];
@@ -545,11 +545,13 @@ void build_small_pairs(uint3 local : SV_GroupThreadID)
     }
 }
 
-void bp_round(uint lane, bool fill)
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void collect_round(uint3 tid : SV_DispatchThreadID)
 {
     uint ordinal;
     uint active_count = bp_load(broadphase.activeState.x).x;
-    if (!bp_item(lane, active_count, ordinal)) return;
+    if (!bp_item(tid.x, active_count, ordinal)) return;
     uint rank = bp_load(broadphase.activeQueues.x + ordinal).x;
     // Host proves active queue uniqueness and rank<N. Handle corrupt rank
     // locally without following it into a storage access.
@@ -559,8 +561,7 @@ void bp_round(uint lane, bool fill)
         return;
     }
     uint4 row = bp_load(broadphase.rankRows.x + rank);
-    uint4 offset_status = bp_load(broadphase.rankRows.y + rank);
-    uint status = offset_status.z;
+    uint status = row.z;
     uint quantum = broadphase.round.x;
     if (quantum == 0u || quantum > BroadphaseNeighborLimit) status |= BP_BAD_QUANTUM;
     if (row.y < rank + 1u || row.y > row.x || row.x > broadphase.selectedCounts.y) status |= BP_BAD_CURSOR;
@@ -572,38 +573,22 @@ void bp_round(uint lane, bool fill)
         uint4 key_b = bp_load(broadphase.workspace.z + other);
         if (key_b.w != 0u || key_b.x != key_a.x) { status |= BP_BAD_MODEL; continue; }
         if (!bp_eligible_leaves(key_a.z, key_b.z, key_a.x, bounds[key_a.z], bounds[key_b.z], false)) continue;
-        if (fill)
-        {
-            bool overflow;
-            uint2 destination = bp_add64(offset_status.xy, uint2(row.w, 0u), overflow);
-            if (overflow || destination.y != 0u || destination.x >= broadphase.candidates.z || row.w >= row.z)
-                status |= BP_FILL_MISMATCH;
-            else
-                resident_patches[broadphase.candidates.x + destination.x].leaves =
-                    uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x);
-            if (row.w == 0xffffffffu) status |= BP_SUM_OVERFLOW; else ++row.w;
-        }
-        else
-        {
-            if (row.z == 0xffffffffu) status |= BP_SUM_OVERFLOW; else ++row.z;
-        }
+        // Reserve one slot while filtering, as in MuJoCo Warp's device append.
+        // The following sort restores canonical order before any contact solve.
+        uint pair = pair_count[0].add(1u);
+        if (pair >= 0xffffffffu / MaxContactPointsPerPair) status |= BP_INDEX_OVERFLOW;
+        if (pair < broadphase.candidates.z)
+            resident_patches[broadphase.candidates.x + pair].leaves =
+                uint4(min(key_a.z, key_b.z), max(key_a.z, key_b.z), 0u, key_a.x);
     }
     row.y = end;
-    offset_status.z = status;
+    row.z = status;
     bp_store(broadphase.rankRows.x + rank, row);
-    bp_store(broadphase.rankRows.y + rank, offset_status);
     // Failure makes this rank inactive, but its status is part of this exact
     // round's scanned prefix and is accumulated before the host continues.
     uint active = status == 0u && row.y < row.x ? 1u : 0u;
     bp_store(broadphase.scan.x + ordinal, uint4(active, 0u, status, active != 0u ? row.x - row.y : 0u));
 }
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void count_round(uint3 tid : SV_DispatchThreadID) { bp_round(tid.x, false); }
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void fill_round(uint3 tid : SV_DispatchThreadID) { bp_round(tid.x, true); }
 
 groupshared uint4 bp_shared[BroadphaseBlockSize];
 
@@ -727,25 +712,14 @@ void publish_active_summary(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void materialize_counts(uint3 tid : SV_DispatchThreadID)
+void finish_sap_ranks(uint3 tid : SV_DispatchThreadID)
 {
     uint rank;
     if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
     uint4 row = bp_load(broadphase.rankRows.x + rank);
-    uint status = bp_load(broadphase.rankRows.y + rank).z;
+    uint status = row.z;
     if (row.y != row.x) status |= BP_BAD_CURSOR;
-    bp_store(broadphase.scan.x + rank, uint4(row.z, 0u, status, 0u));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void store_rank_offsets(uint3 tid : SV_DispatchThreadID)
-{
-    uint rank;
-    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
-    uint4 prefix = bp_load(broadphase.scan.y + rank);
-    uint4 row = bp_load(broadphase.rankRows.y + rank);
-    bp_store(broadphase.rankRows.y + rank, uint4(prefix.x, prefix.y, row.z | prefix.z, 0u));
+    bp_store(broadphase.scan.x + rank, uint4(0u, 0u, status, 0u));
 }
 
 [shader("compute")]
@@ -753,53 +727,9 @@ void store_rank_offsets(uint3 tid : SV_DispatchThreadID)
 void publish_count_summary(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0u) return;
-    uint4 total = bp_load(broadphase.summary.x);
-    uint4 header = bp_load(bp_header());
-    // Keep the exact required C even when it cannot fit downstream indices.
-    uint status = header.z | total.z;
-    if (total.y != 0u || total.x > 0xffffffffu / MaxContactPointsPerPair) status |= BP_INDEX_OVERFLOW;
-    bp_store(bp_header(), uint4(total.x, total.y, status, total.x));
-}
-
-// Preserve the count and offset for each rank and reset its cursor for fill.
-// Both sweeps start from the same selected-world rank prefix.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void reset_fill_ranks(uint3 tid : SV_DispatchThreadID)
-{
-    uint rank;
-    if (!bp_suffix_valid() || !bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
-    uint4 row = bp_load(broadphase.rankRows.x + rank);
-    row.y = rank + 1u;
-    row.w = 0u;
-    bp_store(broadphase.rankRows.x + rank, row);
-    bp_store(broadphase.activeQueues.x + rank, uint4(rank, 0u, 0u, 0u));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void check_fill(uint3 tid : SV_DispatchThreadID)
-{
-    uint rank;
-    if (!bp_item(tid.x, broadphase.selectedCounts.y, rank)) return;
-    uint4 row = bp_load(broadphase.rankRows.x + rank);
-    uint status = bp_load(broadphase.rankRows.y + rank).z;
-    if (!bp_suffix_valid()) { bp_store(broadphase.scan.x + rank, uint4(0u)); return; }
-    if (row.y != row.x || row.w != row.z) status |= BP_FILL_MISMATCH;
-    bp_store(broadphase.scan.x + rank, uint4(row.w, 0u, status, 0u));
-}
-
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void publish_fill_summary(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x != 0u) return;
-    if (!bp_suffix_valid()) return;
-    uint4 emitted = bp_load(broadphase.summary.x);
-    uint4 header = bp_load(bp_header());
-    header.z |= emitted.z;
-    if (emitted.x != header.x || emitted.y != header.y) header.z |= BP_FILL_MISMATCH;
-    bp_store(bp_header(), header);
+    uint count = pair_count[0].load();
+    uint status = bp_load(bp_header()).z | bp_load(broadphase.summary.x).z;
+    bp_store(bp_header(), uint4(count, 0u, status, count));
 }
 
 [shader("compute")]
@@ -809,7 +739,7 @@ void set_candidate_bank(uint3 tid : SV_DispatchThreadID)
     if (tid.x != 0u) return;
     uint4 header = bp_load(bp_header());
     uint status = header.z;
-    if ((status & BP_CAPACITY_NEEDED) == 0u && (header.y != 0u || header.x > broadphase.candidates.z)) status |= BP_FILL_MISMATCH;
+    if ((status & BP_CAPACITY_NEEDED) == 0u && (header.y != 0u || header.x > broadphase.candidates.z)) status |= BP_BAD_BANK;
     header.z = status;
     bp_store(bp_header(), header);
     // Host calls only after every canonical-sort chunk has completed.

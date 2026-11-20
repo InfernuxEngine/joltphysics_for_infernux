@@ -37,9 +37,9 @@ struct BP_ALIGN BroadphaseParams
 {
     BP_U4 counts;       // accepted leaf N, joint J, world W, body B.
     BP_U4 workspace;    // arena word capacity, header address, final SAP bank, final suppression bank.
-    BP_U4 rankRows;     // selected-world row0 and row1 bases, zw zero.
+    BP_U4 rankRows;     // selected-world sweep cursor base, yzw zero.
     BP_U4 activeQueues; // selected-world source and target queue bases, zw zero.
-    BP_U4 round;        // Neighbor quantum, swept pair collection, count/fill mode, single-group pairs.
+    BP_U4 round;        // Neighbor quantum, swept pair collection, zero, single-group pairs.
     // candidates.xy address the separate resident_patches allocation;
     // all other arena addresses refer to the scratch contact_patches port.
     BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header.x.
@@ -68,8 +68,7 @@ struct BP_ALIGN BroadphaseParams
 // The host checks every generated consumerFirst in uint64 before admission.
 // Indirect records live in a separate allocation: (groupsX, 1, 1, 0), with
 // exactly the first 12 bytes consumed as indirect arguments.
-// Selected-world row0 = (exclusiveSapEnd, cursor, expectedCount, emittedCount).
-// Selected-world row1 = (exclusiveCandidateOffsetLo, exclusiveCandidateOffsetHi, status, 0).
+// Selected-world sweep cursor = (exclusiveSapEnd, cursor, status, 0).
 // All scan/reduce records = (sumLo,sumHi,statusBits,maxValue). The associative
 // operator performs checked uint2 sum, bitwise OR, max. Sum overflow sets bit 1.
 // Queue words = (rank,0,0,0); only accepted active prefix may be read.
