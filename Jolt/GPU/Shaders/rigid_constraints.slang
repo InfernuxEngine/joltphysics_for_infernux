@@ -391,33 +391,35 @@ void constraint_validate_labels(uint3 tid : SV_DispatchThreadID)
     else if (l != ConstraintInvalid) status |= ConstraintBadLabel;
     cs_store(constraint_params.layout.z + v, uint4(0u, 0u, 0u, status));
 }
+uint cs_validated_ref_root(uint4 e, inout uint status)
+{
+    uint root = ConstraintInvalid;
+    if (e.y != ConstraintInvalid)
+    {
+        uint a = cs_local_body(e.y);
+        root = component_parents[a].load();
+        if (!cs_label(a, root)) status |= ConstraintBadLabel;
+    }
+    if (e.z != ConstraintInvalid)
+    {
+        uint b = cs_local_body(e.z);
+        uint other = component_parents[b].load();
+        if (!cs_label(b, other) || (root != ConstraintInvalid && root != other)) status |= ConstraintBadLabel;
+        root = other;
+    }
+    if (root >= constraint_params.counts.x || e.x != constraint_params.selection.x) status |= ConstraintBadLabel;
+    else if (component_parents[root].load() != root) status |= ConstraintBadLabel;
+    return root;
+}
 [shader("compute")][numthreads(64, 1, 1)]
 void constraint_validate_edges(uint3 tid : SV_DispatchThreadID)
 {
     uint r, kind = constraint_params.select.x;
     if (!cs_item(tid.x, cs_ref_count(kind), r)) return;
     uint p = cs_ref_base(kind) + 2u * r;
-    uint4 e = cs_load(p), flags = cs_load(p + 1u);
+    uint4 flags = cs_load(p + 1u);
     uint status = flags.z;
-    if (flags.y != 0u)
-    {
-        uint root = ConstraintInvalid;
-        if (e.y != ConstraintInvalid)
-        {
-            uint a = cs_local_body(e.y);
-            root = component_parents[a].load();
-            if (!cs_label(a, root)) status |= ConstraintBadLabel;
-        }
-        if (e.z != ConstraintInvalid)
-        {
-            uint b = cs_local_body(e.z);
-            uint other = component_parents[b].load();
-            if (!cs_label(b, other) || (root != ConstraintInvalid && root != other)) status |= ConstraintBadLabel;
-            root = other;
-        }
-        if (root >= constraint_params.counts.x || e.x != constraint_params.selection.x) status |= ConstraintBadLabel;
-        else if (component_parents[root].load() != root) status |= ConstraintBadLabel;
-    }
+    if (flags.y != 0u) cs_validated_ref_root(cs_load(p), status);
     cs_store(cs_ref_scratch(kind, r), uint4(
         kind == ConstraintJoint ? flags.y : 0u, kind == ConstraintPatch ? flags.y : 0u, 0u, status));
 }
@@ -445,6 +447,181 @@ uint4 cs_combine(uint4 a, uint4 b)
     return uint4(sum, status);
 }
 groupshared uint4 cs_shared[64];
+
+groupshared uint cs_local_keys[ConstraintLocalRefs];
+groupshared uint2 cs_local_joint_ranges[ConstraintLocalBodies];
+groupshared uint2 cs_local_patch_ranges[ConstraintLocalBodies];
+groupshared uint2 cs_local_maxima[ConstraintBlockSize];
+
+uint cs_local_key(uint kind, uint root, uint ordinal)
+{
+    return (kind * ConstraintLocalBodies + root) * ConstraintLocalRefs + ordinal;
+}
+void cs_sort_local_refs(uint lane, uint extent)
+{
+    for (uint size = 2u; size <= extent; size *= 2u)
+    {
+        for (uint stride = size / 2u; stride != 0u; stride /= 2u)
+        {
+            for (uint pair = lane; pair < extent / 2u; pair += ConstraintBlockSize)
+            {
+                uint low = (pair / stride) * (2u * stride) + pair % stride;
+                uint high = low + stride;
+                uint a = cs_local_keys[low], b = cs_local_keys[high];
+                bool ascending = (low & size) == 0u;
+                cs_local_keys[low] = ascending ? min(a, b) : max(a, b);
+                cs_local_keys[high] = ascending ? max(a, b) : min(a, b);
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+}
+uint cs_find_local_key(uint key, uint first, uint end)
+{
+    while (first < end)
+    {
+        uint mid = first + (end - first) / 2u;
+        if (cs_local_keys[mid] < key) first = mid + 1u;
+        else end = mid;
+    }
+    return first;
+}
+void cs_prefix_local_roots(uint lane, uint4 counts, uint2 maxima)
+{
+    cs_shared[lane] = counts;
+    cs_local_maxima[lane] = maxima;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint offset = 1u; offset < ConstraintBlockSize; offset *= 2u)
+    {
+        uint4 left = uint4(0u);
+        uint2 left_max = uint2(0u);
+        if (lane >= offset)
+        {
+            left = cs_shared[lane - offset];
+            left_max = cs_local_maxima[lane - offset];
+        }
+        GroupMemoryBarrierWithGroupSync();
+        counts = uint4(counts.xyz + left.xyz, counts.w | left.w);
+        maxima = max(maxima, left_max);
+        cs_shared[lane] = counts;
+        cs_local_maxima[lane] = maxima;
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+// Build the same source-ordered rows as the wide assembly. The accepted
+// local topology bounds all references and roots to one workgroup.
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_build_local_schedule(uint lane : SV_GroupIndex)
+{
+    const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
+    const uint patches = constraint_params.counts.z, refs = joints + patches;
+    const uint4 control = cs_load(constraint_params.layout.y);
+    uint status = control.z | (control.w != 1u ? ConstraintNotConverged : 0u);
+    uint extent = 1u;
+    while (extent < refs) extent *= 2u;
+    for (uint i = lane; i < extent; i += ConstraintBlockSize)
+    {
+        uint key = ConstraintInvalid;
+        if (i < refs)
+        {
+            uint kind = i < joints ? ConstraintJoint : ConstraintPatch;
+            uint ordinal = kind == ConstraintJoint ? i : i - joints;
+            uint p = cs_ref_base(kind) + 2u * ordinal;
+            uint4 flags = cs_load(p + 1u);
+            uint errors = flags.z;
+            if (flags.y != 0u)
+            {
+                uint root = cs_validated_ref_root(cs_load(p), errors);
+                if (control.w == 1u && errors == 0u) key = cs_local_key(kind, root, ordinal);
+            }
+            status |= errors;
+        }
+        cs_local_keys[i] = key;
+    }
+    uint roots_per_lane = cs_blocks(bodies);
+    uint root_first = lane * roots_per_lane, root_end = min(root_first + roots_per_lane, bodies);
+    for (uint root = root_first; root < root_end; ++root)
+    {
+        cs_local_joint_ranges[root] = uint2(0u);
+        cs_local_patch_ranges[root] = uint2(0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    cs_sort_local_refs(lane, extent);
+    uint joint_count = cs_find_local_key(cs_local_key(ConstraintPatch, 0u, 0u), 0u, extent);
+    uint active = cs_find_local_key(ConstraintInvalid, joint_count, extent);
+
+    for (uint i = lane; i < active; i += ConstraintBlockSize)
+    {
+        uint key = cs_local_keys[i];
+        uint bucket = key / ConstraintLocalRefs;
+        uint kind = bucket / ConstraintLocalBodies, root = bucket % ConstraintLocalBodies;
+        uint ordinal = key % ConstraintLocalRefs;
+        uint4 edge = cs_load(cs_ref_base(kind) + 2u * ordinal);
+        uint source_index = kind == ConstraintJoint ? i : i - joint_count;
+        uint source_first = kind == ConstraintJoint ? constraint_params.sources.x : constraint_params.sources.y;
+        uint2 writers = kind == ConstraintPatch ? edge.yz : uint2(0u);
+        cs_store(source_first + source_index, uint4(edge.w, writers, 0u));
+        bool first = i == 0u;
+        if (!first) first = cs_local_keys[i - 1u] / ConstraintLocalRefs != bucket;
+        if (first)
+        {
+            uint end = cs_find_local_key((bucket + 1u) * ConstraintLocalRefs, i + 1u, active);
+            uint2 range = uint2(source_index, end - i);
+            if (kind == ConstraintJoint) cs_local_joint_ranges[root] = range;
+            else cs_local_patch_ranges[root] = range;
+        }
+    }
+    uint patch_count = active - joint_count;
+    for (uint j = joint_count + lane; j < joints; j += ConstraintBlockSize)
+        cs_store(constraint_params.sources.x + j, uint4(ConstraintInvalid, 0u, 0u, 0u));
+    for (uint p = patch_count + lane; p < patches; p += ConstraintBlockSize)
+        cs_store(constraint_params.sources.y + p, uint4(ConstraintInvalid, 0u, 0u, 0u));
+    GroupMemoryBarrierWithGroupSync();
+
+    uint3 counts = uint3(0u);
+    uint2 maxima = uint2(0u);
+    for (uint root = root_first; root < root_end; ++root)
+    {
+        uint2 lengths = uint2(cs_local_joint_ranges[root].y, cs_local_patch_ranges[root].y);
+        bool has_joints = lengths.x != 0u, has_patches = lengths.y != 0u;
+        counts += uint3(uint(has_joints || has_patches), uint(has_joints), uint(has_patches));
+        maxima = max(maxima, lengths);
+    }
+    cs_prefix_local_roots(lane, uint4(counts, status), maxima);
+    uint3 output = lane == 0u ? uint3(0u) : cs_shared[lane - 1u].xyz;
+    for (uint root = root_first; root < root_end; ++root)
+    {
+        uint2 j = cs_local_joint_ranges[root], p = cs_local_patch_ranges[root];
+        if (j.y == 0u && p.y == 0u) continue;
+        // Empty kinds retain their insertion position in the sorted stream.
+        if (j.y == 0u)
+            j.x = cs_find_local_key(cs_local_key(ConstraintJoint, root, 0u), 0u, joint_count);
+        if (p.y == 0u)
+            p.x = cs_find_local_key(cs_local_key(ConstraintPatch, root, 0u), joint_count, active) - joint_count;
+        uint address = constraint_params.islands.x + 2u * output.x;
+        cs_store(address, uint4(constraint_params.selection.x, cs_packed_body(root), j));
+        cs_store(address + 1u, uint4(p, 0u, 0u));
+        if (j.y != 0u)
+        {
+            cs_store(constraint_params.sources.z + output.y, uint4(output.x, 0u, 0u, 0u));
+            ++output.y;
+        }
+        if (p.y != 0u)
+        {
+            cs_store(constraint_params.sources.w + output.z, uint4(output.x, 0u, 0u, 0u));
+            ++output.z;
+        }
+        ++output.x;
+    }
+    if (lane == ConstraintBlockSize - 1u)
+    {
+        uint header = constraint_params.layout.x;
+        cs_store(header, cs_shared[lane]);
+        cs_store(header + 1u, uint4(joint_count, patch_count, cs_local_maxima[lane]));
+    }
+}
+
 // StageWork first/count means BLOCKS for these two collective entries only.
 // Every lane in a dispatched group participates in every group barrier.
 [shader("compute")][numthreads(64, 1, 1)]
