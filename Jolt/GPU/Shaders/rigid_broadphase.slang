@@ -4,6 +4,7 @@
 
 // Host validates all word ranges, nonoverlap, domains and frozen bindings.
 #include "../BroadphaseTypes.h"
+#include "../SleepTypes.h"
 #include "key_sort.slang"
 
 ConstantBuffer<BroadphaseParams> broadphase;
@@ -22,6 +23,7 @@ RWStructuredBuffer<QueryRecordWord> resident_step;
 RWStructuredBuffer<Contact> resident_contacts;
 RWStructuredBuffer<ContactPatch> resident_patches;
 RWStructuredBuffer<Atomic<uint>> pair_count;
+RWStructuredBuffer<Atomic<uint>> step_status;
 
 static const uint BP_BAD_BOUNDS = 1u;
 static const uint BP_SUM_OVERFLOW = 2u;
@@ -729,6 +731,8 @@ void publish_candidates(uint lane : SV_GroupIndex)
         if (header.y != 0u) header.z |= BP_BAD_BANK;
         if (header.x > broadphase.candidates.z) header.z |= BP_CAPACITY_NEEDED;
         bp_store(bp_header(), header);
+        if (broadphase.round.z != 0u && header.z != 0u)
+            step_status[StepBroadphaseStatus].or(header.z);
         bp_published_count = header.z == 0u ? header.x : 0u;
         resident_patches[0u].leaves = uint4(broadphase.merge.x, bp_published_count, 0u, 0u);
         uint4 solve = resident_step[1u].value;

@@ -176,7 +176,9 @@ void constraint_build_patch_refs(uint3 tid : SV_DispatchThreadID)
 {
     uint p;
     if (!cs_item(tid.x, constraint_params.counts.z, p)) return;
-    uint4 patch = contact_patches[contact_patches[0].leaves.x + p].leaves;
+    uint4 header = contact_patches[0].leaves;
+    if (p >= header.y) return;
+    uint4 patch = contact_patches[header.x + p].leaves;
     uint status = 0u, world = ConstraintInvalid;
     uint a = ConstraintInvalid, b = ConstraintInvalid;
     bool responds = (patch.z & PatchActive) != 0u;
@@ -239,7 +241,7 @@ groupshared Atomic<uint> cs_local_status;
 void constraint_build_local_topology(uint lane : SV_GroupIndex)
 {
     const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
-    const uint refs = joints + constraint_params.counts.z;
+    const uint refs = joints + contact_patches[0].leaves.y;
     for (uint body = lane; body < bodies; body += ConstraintBlockSize)
         cs_local_parents[body].store(cs_initial_root(body));
     if (lane == 0u) cs_local_status.store(0u);
@@ -515,7 +517,7 @@ void cs_prefix_local_roots(uint lane, uint4 counts, uint2 maxima)
 void constraint_build_local_schedule(uint lane : SV_GroupIndex)
 {
     const uint bodies = constraint_params.counts.x, joints = constraint_params.counts.y;
-    const uint patches = constraint_params.counts.z, refs = joints + patches;
+    const uint patches = contact_patches[0].leaves.y, refs = joints + patches;
     const uint4 control = cs_load(constraint_params.layout.y);
     uint status = control.z | (control.w != 1u ? ConstraintNotConverged : 0u);
     uint extent = 1u;

@@ -43,11 +43,13 @@ struct S_ALIGN BodySleepParameters {
 struct PhysicsStepStatus {
     std::uint32_t sleep;
     std::uint32_t topology;
+    std::uint32_t broadphase;
 };
-static_assert(sizeof(PhysicsStepStatus)==8);
+static_assert(sizeof(PhysicsStepStatus)==12);
 #else
 static const uint StepSleepStatus = 0u;
 static const uint StepTopologyStatus = 1u;
+static const uint StepBroadphaseStatus = 2u;
 #endif
 
 // Metadata for the existing source's bounded sleep control dispatches. All

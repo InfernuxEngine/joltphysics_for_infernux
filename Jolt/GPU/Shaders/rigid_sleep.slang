@@ -94,7 +94,9 @@ void sleep_seed_joint_endpoints(uint3 tid:SV_DispatchThreadID)
 void sleep_seed_patch_endpoints(uint3 tid:SV_DispatchThreadID)
 {
     uint index;if(!sleep_work_item(tid.x,index) || index>=sleep_params.layout.w) return;
-    uint4 patch=contact_patches[contact_patches[0].leaves.x+index].leaves;
+    uint4 header = contact_patches[0].leaves;
+    if (index >= header.y) return;
+    uint4 patch=contact_patches[header.x+index].leaves;
     if((patch.z&PatchActive)==0u || (patch.z&PatchSensor)!=0u) return;
     sleep_seed_pair(shape_models[patch.x].meta.y,shape_models[patch.y].meta.y);
 }

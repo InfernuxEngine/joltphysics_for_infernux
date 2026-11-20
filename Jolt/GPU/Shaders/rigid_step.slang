@@ -1069,6 +1069,13 @@ void store_contact_history(uint3 tid : SV_DispatchThreadID)
         uint count = constraint_schedule[1].value.y != 0u ? step_params.solve.w : 0u;
         contact_history[0].value = uint4(count, asuint(step_params.gravityDt.w), 0u, 0u);
     }
+    if (ordinal >= step_params.solve.w)
+    {
+        uint base = jph_history_word(ordinal);
+        for (uint word = 0u; word < ContactHistoryWords; ++word)
+            contact_history[base + word].value = uint4(0u);
+        return;
+    }
     uint4 patch = contact_patches[contact_patches[0].leaves.x + ordinal].leaves;
     uint slot = ordinal * MaxContactPointsPerPair;
     Contact contact = contacts[slot];

@@ -41,7 +41,9 @@ void contact_report_seed(uint3 id : SV_DispatchThreadID)
     uint ordinal = p.range.x + id.x;
     if (ordinal >= p.range.z) { cr_bad(); return; }
     // Broadphase keeps its candidate bank offset in the immutable header.
-    ContactPatch patch = contact_patches[contact_patches[0].leaves.x + ordinal];
+    uint4 header = contact_patches[0].leaves;
+    if (ordinal >= header.y) return;
+    ContactPatch patch = contact_patches[header.x + ordinal];
     if (patch.leaves.w == 0u) return;
     if (patch.leaves.w > 4u || !cr_range(patch.leaves.x, p.selection.w, p.requests.x)
         || !cr_range(patch.leaves.y, p.selection.w, p.requests.x)) { cr_bad(); return; }

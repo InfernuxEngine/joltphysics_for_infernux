@@ -67,11 +67,12 @@ struct CS_ALIGN ConstraintScheduleWord { CS_U4 value; };
 // All ranges / products / dispatch dimensions must be checked in host uint64.
 // Checked constraints: 2*(J+P), 4*P, 12*J, B*2, totalWords all fit uint32;
 // every nonempty read/write range fits storage/device limits and is disjoint
-// from concurrent writers. Counts describe this accepted source, not capacity
-// tails. B and J span the selected world. Tombstones are nonresident models.
+// from concurrent writers. B and J span the selected world. P bounds the
+// candidate prefix, whose logical count comes from the collision header.
+// Tombstones are nonresident models.
 struct CS_ALIGN ConstraintParams
 {
-    CS_U4 counts;       // B local slots, J local joints, actual P candidates, packed JointStream directory size.
+    CS_U4 counts;       // B local slots, J local joints, P candidate slots, packed JointStream directory size.
     CS_U4 limits;       // total schedule words, local shape count, contact rows=4P, body-root word base.
     CS_U4 layout;       // header base=0, connectivity control, body-check base, edge cursors/ref-check base.
     CS_U4 references;   // joint ref base, patch ref base (each 2 words/item), final joint sort bank, final patch sort bank.

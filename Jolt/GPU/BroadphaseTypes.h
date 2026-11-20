@@ -39,7 +39,7 @@ struct BP_ALIGN BroadphaseParams
     BP_U4 workspace;    // arena word capacity, header address, final SAP bank, final suppression bank.
     BP_U4 rankRows;     // selected-world sweep cursor base, yzw zero.
     BP_U4 activeQueues; // selected-world source and target queue bases, zw zero.
-    BP_U4 round;        // Neighbor quantum, swept pair collection, zero, single-group pairs.
+    BP_U4 round;        // Neighbor quantum, swept pairs, device-owned count, single-group pairs.
     // candidates.xy address the separate resident_patches allocation;
     // all other arena addresses refer to the scratch contact_patches port.
     BP_U4 candidates;   // candidate bank0 base, bank1 base, capacity K, zero; actual C is scratch header.x.
