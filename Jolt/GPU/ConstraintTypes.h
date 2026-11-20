@@ -37,6 +37,8 @@ CS_CONST(ConstraintLocalArgumentWords, ConstraintLocalWakePatchDispatch + 1u);
 CS_CONST(ConstraintScheduleHeaderWords, 4u);
 CS_CONST(IslandJointQuantum, 64u);
 CS_CONST(IslandPatchQuantum, 256u);
+CS_CONST(IslandPatchRangeRows, 4u * IslandPatchQuantum);
+CS_CONST(IslandRangeGroups, 64u);
 // Count visits across rounds separately from the shared tile size. A counted
 // dispatch processes independent islands with at most this many visits per group.
 CS_CONST(IslandPatchRoundVisits, 32u * IslandPatchQuantum);
@@ -55,11 +57,13 @@ CS_CONST(ConstraintOverflow, 32u);
 CS_CONST(ConstraintBadSchedule, 64u);
 CS_CONST(ConstraintNotReady, 0x80000000u);
 
-CS_INLINE CS_UINT ConstraintIslandBatchWidth(CS_UINT remaining, CS_UINT maximum, CS_UINT quantum)
+// An island in the tail keeps the numerical tile size used by its canonical
+// group, even when the execution directory groups islands by their row counts.
+// Only cooperative contact solves use this width (max rows >= 32).
+CS_INLINE CS_UINT ConstraintContactTileWidth(CS_UINT island, CS_UINT islandCount)
 {
-    const CS_UINT lanes = CS_MIN(CS_MIN(ConstraintBlockSize, quantum), remaining);
-    const CS_UINT slice = CS_MIN(quantum / lanes, maximum);
-    return CS_MIN(remaining, quantum / slice);
+    const CS_UINT groupFirst = (island / ConstraintBlockSize) * ConstraintBlockSize;
+    return IslandPatchQuantum / CS_MIN(ConstraintBlockSize, islandCount - groupFirst);
 }
 
 struct CS_ALIGN ConstraintScheduleWord { CS_U4 value; };
@@ -97,7 +101,8 @@ struct CS_ALIGN ConstraintParams
 // range[i].word0=(world,root,jointBegin,jointCount)
 // range[i].word1=(patchBegin,patchCount,0,0)
 // begin/count index the respective source-word stream (not absolute words).
-// Tables contain (islandID,0,0,0). Joint sources contain (sourceOrdinal,0,0,0).
+// Tables contain (islandID,canonicalTableIndex,0,0). Joint sources contain
+// (sourceOrdinal,0,0,0). The solver may order disjoint islands by row count.
 // Patch sources contain (sourceOrdinal,writerA,writerB,0). Readonly endpoints
 // use ConstraintInvalid so static and kinematic state can be read in parallel.
 // Joint ordinals address the unchanged accepted JointStream. Patch ordinals

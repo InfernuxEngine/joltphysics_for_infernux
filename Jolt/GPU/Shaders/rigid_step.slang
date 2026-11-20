@@ -1523,17 +1523,9 @@ void jph_solve_contact_tile<Solver : ContactSolver>(Solver solver, uint2 tile, u
     jph_solve_planned_contact_tile(solver, tile, lane, jph_prepare_contact_tile(tile, lane));
 }
 
-// Reproduce the rectangular planner's contact tile boundaries inside a
-// counted island. The same contiguous rows reach the same cooperative solver.
-uint jph_contact_slice_width(uint island, uint remaining, uint maximum)
+uint jph_contact_tile_boundary(uint row, uint width)
 {
-    for (;;)
-    {
-        uint lanes = ConstraintIslandBatchWidth(remaining, maximum, IslandPatchQuantum);
-        if (island < lanes) return IslandPatchQuantum / lanes;
-        island -= lanes;
-        remaining -= lanes;
-    }
+    return row + (width - row % width) % width;
 }
 
 // (first source, row count, slice width, one island per invocation).
@@ -1542,18 +1534,23 @@ uint4 jph_contact_group_tile(uint group, uint lane)
     if (lane == 0u)
     {
         bool whole_table = stage_work.range.z == ConstraintWholeIslandTable;
-        uint maximum = whole_table ? constraint_schedule[1].value.w : 0u;
-        if (whole_table && maximum < ContactParallelMinimum)
+        if (constraint_schedule[1].value.w < ContactParallelMinimum)
             contact_tile = uint4(0u, 0u, 0u, 1u);
         else
         {
-            uint begin, first, end;
-            const bool valid = jph_island_patch_range(group, begin, first, end);
-            uint count = valid ? end - first : 0u;
-            uint width = whole_table && valid
-                ? jph_contact_slice_width(group, constraint_schedule[0].value.z, maximum)
-                : count;
-            contact_tile = uint4(begin + first, count, width, 0u);
+            uint4 jr, pr;
+            uint canonical;
+            contact_tile = uint4(0u);
+            if (jph_island_unit(group, false, jr, pr, canonical))
+            {
+                const uint width = ConstraintContactTileWidth(canonical, constraint_schedule[0].value.z);
+                // The two consecutive windows use the same tile boundary.
+                // Packing changes dispatches, keeping the writer order within each tile.
+                const uint first = whole_table ? 0u : jph_contact_tile_boundary(stage_work.range.x, width);
+                const uint end = whole_table ? pr.y : min(pr.y,
+                    jph_contact_tile_boundary(stage_work.range.x + stage_work.range.y, width));
+                if (first < end) contact_tile = uint4(pr.x + first, end - first, width, 0u);
+            }
         }
     }
     GroupMemoryBarrierWithGroupSync();

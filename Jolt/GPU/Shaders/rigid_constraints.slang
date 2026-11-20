@@ -76,6 +76,19 @@ void cs_ref(uint kind, uint ordinal, uint world, uint a, uint b, bool active, ui
 }
 uint cs_blocks(uint n) { return n / ConstraintBlockSize + (n % ConstraintBlockSize != 0u ? 1u : 0u); }
 
+void cs_publish_solver_summary(uint4 totals, uint4 rows)
+{
+    const uint header = constraint_params.layout.x;
+    cs_store(header, totals);
+    cs_store(header + 1u, rows);
+    const bool accepted = totals.w == 0u;
+    if (!accepted) step_status[StepTopologyStatus].or(totals.w);
+    const uint joint_groups = accepted ? cs_blocks(totals.y) : 0u;
+    const uint contact_groups = !accepted ? 0u : rows.w < ContactParallelMinimum ? cs_blocks(totals.z) : totals.z;
+    topology_arguments[ConstraintLocalJointDispatch].value = uint4(joint_groups, 1u, 1u, 0u);
+    topology_arguments[ConstraintLocalPatchDispatch].value = uint4(contact_groups, 1u, 1u, 0u);
+}
+
 // Initialize the allocation before its first use. Reusable storage resets
 // control and reduction totals in constraint_seed and rewrites live ranges.
 [shader("compute")][numthreads(64, 1, 1)]
@@ -601,32 +614,19 @@ void constraint_build_local_schedule(uint lane : SV_GroupIndex)
         cs_store(address + 1u, uint4(p, 0u, 0u));
         if (j.y != 0u)
         {
-            cs_store(constraint_params.sources.z + output.y, uint4(output.x, 0u, 0u, 0u));
+            cs_store(constraint_params.sources.z + output.y, uint4(output.x, output.y, 0u, 0u));
             ++output.y;
         }
         if (p.y != 0u)
         {
-            cs_store(constraint_params.sources.w + output.z, uint4(output.x, 0u, 0u, 0u));
+            cs_store(constraint_params.sources.w + output.z, uint4(output.x, output.z, 0u, 0u));
             ++output.z;
         }
         ++output.x;
     }
     if (lane == ConstraintBlockSize - 1u)
     {
-        uint header = constraint_params.layout.x;
-        uint4 totals = cs_shared[lane];
-        uint2 maxima = cs_local_maxima[lane];
-        cs_store(header, totals);
-        cs_store(header + 1u, uint4(joint_count, patch_count, maxima));
-        uint joint_groups = cs_blocks(totals.y);
-        uint patch_groups = maxima.y < ContactParallelMinimum ? cs_blocks(totals.z) : totals.z;
-        if (totals.w != 0u)
-        {
-            step_status[StepTopologyStatus].or(totals.w);
-            joint_groups = patch_groups = 0u;
-        }
-        topology_arguments[ConstraintLocalJointDispatch].value = uint4(joint_groups, 1u, 1u, 0u);
-        topology_arguments[ConstraintLocalPatchDispatch].value = uint4(patch_groups, 1u, 1u, 0u);
+        cs_publish_solver_summary(cs_shared[lane], uint4(joint_count, patch_count, cs_local_maxima[lane]));
     }
 }
 
@@ -819,8 +819,8 @@ void constraint_write_islands(uint3 tid : SV_DispatchThreadID)
         uint jc = je - jb, pc = pe - pb;
         cs_store(constraint_params.islands.x + 2u * id, uint4(world, cs_packed_body(root), jb, jc));
         cs_store(constraint_params.islands.x + 2u * id + 1u, uint4(pb, pc, 0u, 0u));
-        if (row.y != 0u) cs_store(constraint_params.sources.z + prefix.y, uint4(id, 0u, 0u, 0u));
-        if (row.z != 0u) cs_store(constraint_params.sources.w + prefix.z, uint4(id, 0u, 0u, 0u));
+        if (row.y != 0u) cs_store(constraint_params.sources.z + prefix.y, uint4(id, prefix.y, 0u, 0u));
+        if (row.z != 0u) cs_store(constraint_params.sources.w + prefix.z, uint4(id, prefix.z, 0u, 0u));
         range_summary = uint4(jc, pc, jc, pc);
     }
     cs_store(constraint_params.islands.w + root, range_summary);
@@ -842,7 +842,75 @@ void constraint_finalize(uint3 tid : SV_DispatchThreadID)
     if (roots.x > constraint_params.counts.x || roots.y > roots.x || roots.z > roots.x
         || ranges.x > constraint_params.counts.y || ranges.y > constraint_params.counts.z
         || ranges.z > ranges.x || ranges.w > ranges.y
+        || roots.y > ranges.x || roots.z > ranges.y
+        || (roots.y == 0u) != (ranges.x == 0u) || (roots.z == 0u) != (ranges.y == 0u)
+        || (ranges.z == 0u) != (ranges.x == 0u) || (ranges.w == 0u) != (ranges.y == 0u)
         || ranges.x != refs.x || ranges.y != refs.y) status |= ConstraintBadSchedule;
-    cs_store(constraint_params.layout.x + 1u, ranges);
-    cs_store(constraint_params.layout.x, uint4(roots.xyz, status));
+    cs_publish_solver_summary(uint4(roots.xyz, status), ranges);
+}
+
+uint cs_island_table(bool joint)
+{
+    return joint ? constraint_params.sources.z : constraint_params.sources.w;
+}
+
+uint cs_valid_islands(bool joint)
+{
+    const uint4 header = cs_load(constraint_params.layout.x);
+    return header.w == 0u ? (joint ? header.y : header.z) : 0u;
+}
+
+// Keep each island's source range intact. Sorting schedules independent
+// islands with the same amount of remaining work next to one another.
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_seed_island_sort(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
+{
+    const bool joint = constraint_params.select.x == ConstraintJoint;
+    uint ordinal;
+    const bool in_bounds = cs_item(tid.x, constraint_params.merge.z, ordinal);
+    uint4 key = uint4(ConstraintInvalid);
+    if (in_bounds && ordinal < cs_valid_islands(joint))
+    {
+        const uint id = cs_load(cs_island_table(joint) + ordinal).x;
+        const uint range = constraint_params.islands.x + 2u * id;
+        const uint count = joint ? cs_load(range).w : cs_load(range + 1u).y;
+        key = uint4(ConstraintInvalid - count, id, ordinal, 0u);
+    }
+    key = jph_sort_tile(lane, key);
+    if (in_bounds) cs_store(constraint_params.select.y + ordinal, key);
+}
+
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_publish_island_order(uint3 tid : SV_DispatchThreadID)
+{
+    const bool joint = constraint_params.select.x == ConstraintJoint;
+    uint ordinal;
+    if (!cs_item(tid.x, cs_valid_islands(joint), ordinal)) return;
+    const uint4 key = cs_load(constraint_params.merge.x + ordinal);
+    cs_store(cs_island_table(joint) + ordinal, uint4(key.yz, 0u, 0u));
+}
+
+// merge=(sorted bank, first row, first command, maximum islands per command).
+// Count only islands with rows in this window. Empty commands are written
+// explicitly so replaying a smaller step cannot reuse a stale dispatch count.
+[shader("compute")][numthreads(64, 1, 1)]
+void constraint_write_solver_args(uint3 tid : SV_DispatchThreadID)
+{
+    uint command;
+    if (!cs_item(tid.x, ConstraintInvalid, command)) return;
+    const bool joint = constraint_params.select.x == ConstraintJoint;
+    const uint4 span = constraint_params.merge;
+    uint lo = 0u, hi = cs_valid_islands(joint);
+    if (span.y == 0u) lo = hi;
+    while (lo < hi)
+    {
+        const uint mid = lo + (hi - lo) / 2u;
+        const uint rows = ConstraintInvalid - cs_load(span.x + mid).x;
+        if (rows > span.y) lo = mid + 1u;
+        else hi = mid;
+    }
+    const uint first = command * span.w;
+    const uint count = first < lo ? min(span.w, lo - first) : 0u;
+    const bool lanes = joint || cs_load(constraint_params.layout.x + 1u).w < ContactParallelMinimum;
+    topology_arguments[span.z + command].value = uint4(lanes ? cs_blocks(count) : count, 1u, 1u, 0u);
 }
