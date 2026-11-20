@@ -116,10 +116,9 @@ void sleep_wake_force_input(uint3 tid:SV_DispatchThreadID)
     BodyForces force=body_forces[body];
     if(any(force.force.xyz!=float3(0)) || any(force.torque.xyz!=float3(0))) sleep_activate(body,true);
 }
-[shader("compute")][numthreads(64,1,1)]
-void sleep_update_history(uint3 tid:SV_DispatchThreadID)
+void sleep_update_body(uint body)
 {
-    uint body;if(!sleep_work_item(tid.x,body) || !sleep_body(body)) return;
+    if(!sleep_body(body)) return;
     BodyModel model=body_models[body];
     if(!jph_resident(model) || !jph_nonstatic(model)) return;
     BodySleepRecord record=body_sleep[body];BodyState pose=body_states[body];
@@ -145,10 +144,9 @@ void sleep_update_history(uint3 tid:SV_DispatchThreadID)
         uint root=sleep_root(body);if(root!=SleepInvalid) body_sleep_roots[root].or(2u);
     }
 }
-[shader("compute")][numthreads(64,1,1)]
-void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
+void sleep_commit_body(uint body)
 {
-    uint body;if(!sleep_work_item(tid.x,body) || !sleep_body(body) || sleep_params.operation.z==0u) return;
+    if(!sleep_body(body) || sleep_params.operation.z==0u) return;
     if(body_sleep_roots[sleep_params.layout.y].load()!=0u) return;
     BodyModel model=body_models[body];BodySleepRuntime state=body_sleep[body].runtime;
     if(!jph_resident(model) || !jph_nonstatic(model) || state.state.x==0u) return;
@@ -158,6 +156,27 @@ void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
         BodyState pose=body_states[body];pose.linearVelocity=pose.angularVelocity=float4(0);
         body_states[body]=pose;state.state.x=0u;body_sleep[body].runtime=state;
     }
+}
+[shader("compute")][numthreads(64,1,1)]
+void sleep_update_history(uint3 tid:SV_DispatchThreadID)
+{
+    uint body;if(!sleep_work_item(tid.x,body)) return;
+    sleep_update_body(body);
+}
+[shader("compute")][numthreads(64,1,1)]
+void sleep_commit_components(uint3 tid:SV_DispatchThreadID)
+{
+    uint body;if(!sleep_work_item(tid.x,body)) return;
+    sleep_commit_body(body);
+}
+// Admitted only for an accepted graph with no joints and no actual patches.
+// A Dynamic body owns its root/vote, so no peer or workgroup barrier is needed.
+[shader("compute")][numthreads(64,1,1)]
+void sleep_update_commit_isolated(uint3 tid:SV_DispatchThreadID)
+{
+    uint body;if(!sleep_work_item(tid.x,body)) return;
+    sleep_update_body(body);
+    sleep_commit_body(body);
 }
 [shader("compute")][numthreads(64,1,1)]
 void sleep_retire_hinge_momentum(uint3 tid:SV_DispatchThreadID)
