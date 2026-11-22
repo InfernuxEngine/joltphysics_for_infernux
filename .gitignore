@@ -10,7 +10,3 @@
 /snapshot.bin
 /*.jor
 /detlog.txt
-*.spv
-*.dxil
-*.metallib
-/Assets/*.hair

@@ -359,14 +359,7 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 			set_source_files_properties(${JPH_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 
 			# macOS configuration
-			add_executable(UnitTests MACOSX_BUNDLE ${UNIT_TESTS_SRC_FILES} ${UNIT_TESTS_ASSETS} ${JPH_ICON})
-
-			# Make sure that all unit test assets move to the Resources folder in the package
-			foreach(ASSET_FILE ${UNIT_TESTS_ASSETS})
-				string(REPLACE ${PHYSICS_REPO_ROOT} "Resources" ASSET_DST ${ASSET_FILE})
-				get_filename_component(ASSET_DST ${ASSET_DST} DIRECTORY)
-				set_source_files_properties(${ASSET_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION ${ASSET_DST})
-			endforeach()
+			add_executable(UnitTests MACOSX_BUNDLE ${UNIT_TESTS_SRC_FILES} ${JPH_ICON})
 
 			set_property(TARGET UnitTests PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/iOS/UnitTestsInfo.plist")
 			set_property(TARGET UnitTests PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.joltphysics.unittests")
