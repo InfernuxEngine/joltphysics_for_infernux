@@ -204,7 +204,7 @@ int main(int argc, char** argv)
 				  "-t=<num threads>: Test only with N threads (default is to iterate over 1 .. num hardware threads)\n"
 				  "-t=max: Test with the number of threads available on the system\n"
 				  "-p: Write out profiles\n"
-				  "-r: Record debug renderer output for JoltViewer\n"
+				  "-r: Record debug renderer output for the upstream JoltViewer\n"
 				  "-f: Record per frame timings\n"
 				  "-no_sleep: Disable sleeping\n"
 				  "-rs: Record state\n"

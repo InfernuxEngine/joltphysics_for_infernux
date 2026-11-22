@@ -219,22 +219,6 @@ public:
 
 	Steps					mSteps;
 
-	Array<BodyID>			mCoupledBodies;
-	struct CoupledFreeVelocity { Vec3 mLinear, mAngular; };
-	Array<CoupledFreeVelocity> mCoupledFreeVelocities;
-	Array<uint8>			mCoupledIslandMask;
-	Array<uint32>			mCoupledIslandOrder;
-	Array<uint>				mCoupledSweeps;
-	enum class ECoupledSleepVote : uint8 { Local, Awake, Ready };
-	Array<ECoupledSleepVote>	mCoupledSleepVotes;
-	enum class ECoupledStage : uint8 { Inactive, Velocity, Integration, Continuous, Position, NextSubstep, Sleep };
-	ECoupledStage			mCoupledStage = ECoupledStage::Inactive;
-	uint32					mCoupledSubstep = 0;
-	uint					mCoupledPositionRound = 0;
-	bool					mCoupledHasLocalVelocityRows = false;
-	bool					mCoupledRetainMotion = false;
-	bool					IsCoupledUpdate() const { return mCoupledStage != ECoupledStage::Inactive; }
-	bool					IsCoupledIsland(uint32 inIsland) const { return !mCoupledIslandMask.empty() && mCoupledIslandMask[inIsland] != 0; }
 	ContactListener *		mContactReportListener = nullptr;					///< Opt-in read-only reports for this Update
 	bool						mReportContactImpulses = false;
 

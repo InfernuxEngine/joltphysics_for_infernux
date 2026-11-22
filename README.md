@@ -16,7 +16,7 @@ A multi core friendly rigid body physics and collision detection library. Suitab
 |:-|
 |*A YouTube video showing a ragdoll pile simulated with Jolt Physics.*|
 
-For more demos and [videos](https://www.youtube.com/watch?v=pwyCW0yNKMA&list=PLYXVwtOr1CBxbA50jVg2dKUQvHW_5OOom) go to the [Samples](Docs/Samples.md) section.
+See the [upstream Jolt samples](https://github.com/jrouwe/JoltPhysics/blob/master/Docs/Samples.md) for demos and videos.
 
 ## Design considerations
 
@@ -86,13 +86,6 @@ Why create yet another physics engine? Firstly, it has been a personal learning 
 	* Internal pressure.
 	* Collision with simulated rigid bodies.
 	* Collision tests against soft bodies.
-* A strand based hair simulation running on GPU
-	* System is based on Cosserad rods.
-	* Can use long range attachment constraints to limit the stretch of hairs.
-	* Supports simulation (guide) and render (follow) hairs.
-	* Hair vs hair collision is handled by accumulating the average velocity in a grid and using those velocities to drive hairs.
-	* Supports collision with the environment, although it only supports ConvexHull and CompoundShapes at the moment.
-	* The roots of the hairs can be skinned to the scalp mesh.
 * Water buoyancy calculations.
 * An optional double precision mode that allows large worlds.
 
@@ -117,7 +110,7 @@ Why create yet another physics engine? Firstly, it has been a personal learning 
 
 To get started, look at the [HelloWorld](HelloWorld/HelloWorld.cpp) example. A [HelloWorld example using CMake FetchContent](https://github.com/jrouwe/JoltPhysicsHelloWorld) is also available to show how you can integrate Jolt Physics in a CMake project.
 
-Every feature in Jolt has its own sample. [Running the Samples application](Docs/Samples.md) and browsing through the [code](https://github.com/jrouwe/JoltPhysics/tree/master/Samples/Tests) is a great way to learn about the library!
+Every feature in Jolt has its own sample. [Running the upstream Samples application](https://github.com/jrouwe/JoltPhysics/blob/master/Docs/Samples.md) and browsing through the [code](https://github.com/jrouwe/JoltPhysics/tree/master/Samples/Tests) is a great way to learn about the library!
 
 To learn more about Jolt go to the latest [Architecture and API documentation](https://jrouwe.github.io/JoltPhysics/). Documentation for [a specific release is also available](https://jrouwe.github.io/JoltPhysicsDocs/).
 
@@ -141,15 +134,12 @@ If you're interested in how Jolt scales with multiple CPUs and compares to other
 
 ## Folder structure
 
-* Assets - This folder contains assets used by the TestFramework, Samples and JoltViewer.
+* Assets - This folder contains assets used by the CPU performance tests.
 * Build - Contains everything needed to build the library, see the [Build](Build/README.md) section.
 * Docs - Contains documentation for the library.
 * HelloWorld - A simple application demonstrating how to use the Jolt Physics library.
 * Jolt - All source code for the library is in this folder.
-* JoltViewer - It is possible to record the output of the physics engine using the DebugRendererRecorder class (a .jor file), this folder contains the source code to an application that can visualize a recording. This is useful for e.g. visualizing the output of the PerformanceTest from different platforms. Currently available on Windows, macOS and Linux.
 * PerformanceTest - Contains a simple application that runs a [performance test](Docs/PerformanceTest.md) and collects timing information.
-* Samples - This contains the sample application, see the [Samples](Docs/Samples.md) section. Currently available on Windows, macOS and Linux.
-* TestFramework - A rendering framework to visualize the results of the physics engine. Used by Samples and JoltViewer. Currently available on Windows, macOS and Linux.
 * UnitTests - A set of unit tests to validate the behavior of the physics engine.
 
 ## Bindings for other languages

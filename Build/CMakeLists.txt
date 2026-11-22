@@ -121,24 +121,6 @@ include(CMakeDependentOption)
 # Windows Store only supports the DLL version
 cmake_dependent_option(USE_STATIC_MSVC_RUNTIME_LIBRARY "Use the static MSVC runtime library" ON "MSVC;NOT WINDOWS_STORE" OFF)
 
-# Option to compile with DirectX 12 compute
-option(JPH_USE_DX12 "Use DirectX" ON)
-
-# Option to compile with Vulkan compute
-option(JPH_USE_VK "Use Vulkan" ON)
-
-# Option to compile with Metal compute
-option(JPH_USE_MTL "Use Metal" ON)
-
-# Option to compile with CPU fallback compute
-option(JPH_USE_CPU_COMPUTE "Use CPU Compute" ON)
-
-# Option to enable shader debug symbols
-option(JPH_SHADER_DEBUG_SYMBOLS "Shader Debug Symbols" OFF)
-
-# Option to enable shader optimizations. When this is on, the shaders will be optimized for performance, otherwise they're suitable for debugging.
-option(JPH_SHADER_OPTIMIZATION "Shader Optimization" ON)
-
 # Determine which configurations exist
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR) # Only do this when we're at the top level, see: https://gitlab.kitware.com/cmake/cmake/-/issues/24181
 	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC" OR "${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
@@ -349,12 +331,6 @@ if (ENABLE_INSTALL)
 			install(FILES ${SRC_FILE} DESTINATION ${DST_FILE})
 		endif()
 	endforeach()
-	foreach(SRC_FILE ${JOLT_PHYSICS_DXIL_SHADERS} ${JOLT_PHYSICS_METAL_LIB} ${JOLT_PHYSICS_SPV_SHADERS})
-		string(REPLACE ${PHYSICS_REPO_ROOT} "" RELATIVE_SRC_FILE ${SRC_FILE})
-		get_filename_component(DESTINATION_PATH ${RELATIVE_SRC_FILE} DIRECTORY)
-		cmake_path(SET DST_FILE NORMALIZE "${CMAKE_INSTALL_DATADIR}/${DESTINATION_PATH}")
-		install(FILES ${SRC_FILE} DESTINATION ${DST_FILE})
-	endforeach()
 
 	# Export Jolt library
 	export(TARGETS Jolt
@@ -372,8 +348,6 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 	option(TARGET_UNIT_TESTS "Build Unit Tests" ON)
 	option(TARGET_HELLO_WORLD "Build Hello World" ON)
 	option(TARGET_PERFORMANCE_TEST "Build Performance Test" ON)
-	option(TARGET_SAMPLES "Build Samples" ON)
-	option(TARGET_VIEWER "Build JoltViewer" ON)
 
 	if (TARGET_UNIT_TESTS)
 		# Create UnitTests executable
@@ -396,7 +370,6 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 
 			set_property(TARGET UnitTests PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/iOS/UnitTestsInfo.plist")
 			set_property(TARGET UnitTests PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.joltphysics.unittests")
-			set_property(TARGET UnitTests PROPERTY BUILD_RPATH "/usr/local/lib" INSTALL_RPATH "/usr/local/lib") # to find the Vulkan shared lib
 
 			# Ensure that we enable SSE4.2 for the x86_64 build, XCode builds multiple architectures
 			set_property(TARGET UnitTests PROPERTY XCODE_ATTRIBUTE_OTHER_CPLUSPLUSFLAGS[arch=x86_64] "$(inherited) -msse4.2 -mpopcnt")
@@ -467,38 +440,5 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 			endif()
 			set_property(TARGET PerformanceTest PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${PHYSICS_REPO_ROOT}")
 		endif()
-	endif()
-
-	if ((WIN32 OR LINUX OR ("${CMAKE_SYSTEM_NAME}" MATCHES "Darwin")) AND NOT ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM")) # ARM 32-bit is missing dinput8.lib
-		if (TARGET_SAMPLES OR TARGET_VIEWER)
-			include(${PHYSICS_REPO_ROOT}/TestFramework/TestFramework.cmake)
-		endif()
-		if (TARGET_SAMPLES)
-			if (TEST_FRAMEWORK_AVAILABLE)
-				include(${PHYSICS_REPO_ROOT}/Samples/Samples.cmake)
-			else()
-				message("Cannot build Samples because Vulkan/DirectX/Metal SDK is not available!")
-			endif()
-		endif()
-		if (TARGET_VIEWER)
-			if (TEST_FRAMEWORK_AVAILABLE)
-				include(${PHYSICS_REPO_ROOT}/JoltViewer/JoltViewer.cmake)
-			else()
-				message("Cannot build JoltViewer because Vulkan/DirectX/Metal SDK is not available!")
-			endif()
-		endif()
-	endif()
-
-	# Copy DX12 runtime DLLs (dxcompiler.dll, dxil.dll) to the output directory of each application
-	if (JPH_DX12_RUNTIME_DLLS)
-		foreach(TARGET_NAME Samples JoltViewer UnitTests)
-			if (TARGET ${TARGET_NAME})
-				add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-					COMMAND ${CMAKE_COMMAND} -E copy_if_different
-						${JPH_DX12_RUNTIME_DLLS}
-						$<TARGET_FILE_DIR:${TARGET_NAME}>
-					COMMENT "Copying DX12 runtime DLLs to ${TARGET_NAME} output directory")
-			endif()
-		endforeach()
 	endif()
 endif()

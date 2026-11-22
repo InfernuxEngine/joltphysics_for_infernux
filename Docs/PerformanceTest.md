@@ -17,7 +17,7 @@ The performance test application contains a couple of simple scenes to test perf
 - -t=[num]: This sets the amount of threads the test will run on. By default it will test 1 .. number of virtual processors. Can be 'max' to run on as many thread as the CPU has.
 - -no_sleep: Disable sleeping.
 - -p: Outputs a profile snapshot every 100 iterations
-- -r: Outputs a performance_test_[tag].jor file that contains a recording to be played back with JoltViewer
+- -r: Outputs a performance_test_[tag].jor file that contains a recording to be played back with the upstream JoltViewer
 - -f: Outputs the time taken per frame to per_frame_[tag].csv
 - -h: Displays a help text
 - -rs: Record the simulation state in state_[tag].bin.

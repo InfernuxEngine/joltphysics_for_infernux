@@ -1,20 +1,13 @@
 # Release Notes
 
+These notes describe upstream Jolt releases. The Infernux fork builds the CPU physics library and its command-line tools.
+
 For breaking API changes see [this document](https://github.com/jrouwe/JoltPhysics/blob/master/Docs/APIChanges.md).
 
 ## v5.6.0
 
 ### New functionality
 
-* Added interface to run compute shaders on the GPU with implementations for DX12, Vulkan and Metal. These interfaces can be disabled by setting `JPH_USE_DX12`, `JPH_USE_VK`, `JPH_USE_MTL` and `JPH_USE_CPU_COMPUTE` to `OFF`. To build on macOS, you'll need to have dxc and spirv-cross installed. The easiest way to install them is by installing the Vulkan SDK.
-* Added a strand based hair simulation running on GPU
-	* System is based on Cosserad rods.
-	* Can use long range attachment constraints to limit the stretch of hairs.
-	* Supports simulation (guide) and render (follow) hairs.
-	* Hair vs hair collision is handled by accumulating the average velocity in a grid and using those velocities to drive hairs.
-	* Supports collision with the environment, although it only supports ConvexHull and CompoundShapes at the moment.
-	* The roots of the hairs can be skinned to the scalp mesh.
-	* Note that this is still work in progress, some things that still need to be done are listed in Hair.h.
 * Implemented a new friction model. This friction model is cheaper to execute (15 % faster, 40% less memory for Pyramid test) and doesn't favor the first contact manifold point. Instead of applying friction at every contact point, we now calculate the average contact point and apply friction there. Friction consists of 2 linear constraints and 1 angular constraint. The linear constraints use the `friction_coefficient * sum(contact_impulse)` to determine the max linear friction impulse, the angular constraint uses `friction_coefficient * sum(distance_friction_point_to_contact_point * contact_impulse)` to determine the max angular friction impulse.
 * Increased maximum value of `HeightFieldShape::mBitsPerSample` to 16 to be able to create height fields that more closely match the uncompressed height values.
 * Made tolerance that's used in the internal edge removal algorithm configurable in `CollideShapeSettings::mInternalEdgeRemovalVertexToleranceSq` and `PhysicsSettings::mInternalEdgeRemovalVertexToleranceSq`.
@@ -112,8 +105,6 @@ For breaking API changes see [this document](https://github.com/jrouwe/JoltPhysi
 
 #### Samples
 
-* The Samples and JoltViewer can run on Linux using Vulkan. Make sure to install the Vulkan SDK before compiling (see: `Build/ubuntu24_install_vulkan_sdk.sh`).
-* The Samples and JoltViewer can run on macOS using Metal.
 
 #### MeshShape
 

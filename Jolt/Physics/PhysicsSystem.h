@@ -18,7 +18,6 @@
 JPH_NAMESPACE_BEGIN
 
 class JobSystem;
-class JobSystemSingleThreaded;
 class StateRecorder;
 class TempAllocator;
 class PhysicsStepListener;
@@ -168,59 +167,6 @@ public:
 	/// and data to solve the contacts between bodies. At the end of the Update call, all allocated memory will have been freed.
 	EPhysicsUpdateError			Update(float inDeltaTime, int inCollisionSteps, TempAllocator *inTempAllocator, JobSystem *inJobSystem);
 
-	struct CoupledBodyImpulse
-	{
-		BodyID					mBody;
-		Vec3					mLinear;
-		Vec3					mAngular;					///< Impulse about this body's current center of mass.
-	};
-
-	/// Prepare a fixed update through the first substep's native warm start. Only islands reached by admitted Dynamic endpoints
-	/// leave their velocity sweeps to the caller. A fresh context, its allocator and the inline job system
-	/// must stay on the calling owner thread until completion. Between calls use no-lock reads only.
-	bool						BeginCoupledUpdate(float inDeltaTime, int inCollisionSteps, const BodyID *inBodies, uint32 inBodyCount, PhysicsUpdateContext &ioContext, JobSystemSingleThreaded &inJobSystem);
-
-	/// Apply completed world-space impulse deltas to the current candidates. Other producers may
-	/// read the updated velocities or contribute to the same round before its owner advances it.
-	void						ApplyCoupledVelocityImpulses(PhysicsUpdateContext &ioContext, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
-
-	/// Run another native sweep in the touched islands.
-	/// After the last sweep, retain the current poses at the Integration boundary.
-	/// An admitted update must be advanced to completion.
-	/// Keep an exhausted velocity stage open when another project impulse is expected.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledVelocityUpdate(PhysicsUpdateContext &ioContext, bool inFinishWhenIdle = true);
-
-	/// Prepare clamped/rotated motion and local continuous candidates, retaining their unresolved response.
-	/// Retain all translations when a peer solver needs a shared-time continuous boundary.
-	void						PrepareCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext, bool inRetainMotion = false);
-	Vec3						GetCoupledDisplacement(const PhysicsUpdateContext &inContext, BodyID inBody) const;
-	std::optional<float>		GetCoupledImpactTime(const PhysicsUpdateContext &inContext) const;
-	bool						HasCoupledImpact(const PhysicsUpdateContext &inContext, BodyID inBody) const;
-	std::optional<uint32>		GetSweepVelocityIsland(PhysicsUpdateContext &ioContext, BodyID inBody) const;
-	/// Advance to the chosen event and prepare motion for the remaining interval.
-	void						AdvanceCoupledSweep(PhysicsUpdateContext &ioContext, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
-	/// Consume the shared continuous decision once, then yield at position projection or the next substep.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledIntegrationUpdate(PhysicsUpdateContext &ioContext);
-
-	struct CoupledBodyCorrection
-	{
-		BodyID					mBody;
-		Vec3					mTranslation;	///< Displacement relative to the current center of mass.
-		Quat					mRotation;		///< Corrected body orientation.
-	};
-
-	/// Apply position corrections between native position rounds, before updating bounds and sleeping.
-	std::optional<EPhysicsUpdateError> AdvanceCoupledPositionUpdate(PhysicsUpdateContext &ioContext, const CoupledBodyCorrection *inCorrections = nullptr, uint32 inCorrectionCount = 0, uint inRounds = 1);
-
-	/// Accept the new endpoints after completing the previous substep.
-	bool						BeginNextCoupledSubstep(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount);
-
-	/// On the final substep, retain the sleep votes of native islands linked to another solver.
-	void						DeferCoupledSleep(PhysicsUpdateContext &ioContext, const BodyID *inEndpoints, uint32 inEndpointCount);
-	struct CoupledSleepIsland { uint32 mIndex; bool mReady; };
-	CoupledSleepIsland		GetCoupledSleepIsland(const PhysicsUpdateContext &inContext, BodyID inEndpoint) const;
-	EPhysicsUpdateError		FinishCoupledSleep(PhysicsUpdateContext &ioContext, const uint32 *inIslands = nullptr, uint32 inIslandCount = 0);
-
 	/// Saving state for replay
 	void						SaveState(StateRecorder &inStream, EStateRecorderState inState = EStateRecorderState::All, const StateRecorderFilter *inFilter = nullptr) const;
 
@@ -330,10 +276,6 @@ private:
 
 	bool						PrepareUpdate(float inDeltaTime, int inCollisionSteps, PhysicsUpdateContext &ioContext, JobSystem *inJobSystem);
 	EPhysicsUpdateError			FinishUpdate(PhysicsUpdateContext &ioContext);
-	bool						SetCoupledEndpoints(PhysicsUpdateContext &ioContext, const BodyID *inBodies, uint32 inBodyCount, bool inBodyLocksHeld);
-	void						SolveCoupledPositionRound(PhysicsUpdateContext &ioContext);
-	std::optional<EPhysicsUpdateError> FinishCoupledSubstep(PhysicsUpdateContext &ioContext);
-
 	// Various job entry points
 	void						JobStepListeners(PhysicsUpdateContext::Step *ioStep);
 	void						JobDetermineActiveConstraints(PhysicsUpdateContext::Step *ioStep) const;
@@ -348,7 +290,7 @@ private:
 	void						AllocateCCDWorkspace(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, uint32 inAdditionalSources = 0);
 	void						CaptureCCDSource(PhysicsUpdateContext::Step *ioStep, const Body &inBody, uint32 inActiveIndex, Vec3Arg inDisplacement, float inMinTravel);
 	void						BuildCCDMotionBounds(PhysicsUpdateContext::Step *ioStep) const;
-	void						AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, float inFraction, float inRemainingTime, const CoupledBodyImpulse *inImpulses, uint32 inImpulseCount);
+	void						AdvanceSweep(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep, float inFraction, float inRemainingTime);
 	std::optional<uint32>		GetSweepVelocityIsland(PhysicsUpdateContext::Step &ioStep, const Body &inBody) const;
 	std::optional<uint32>		GetResidentSweepIsland(const PhysicsUpdateContext::Step &inStep, const Body &inBody) const;
 	void						PublishSweepContacts(PhysicsUpdateContext &ioContext, PhysicsUpdateContext::Step &ioStep);

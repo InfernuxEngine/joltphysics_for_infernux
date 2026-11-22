@@ -107,7 +107,7 @@ public:
 	}
 
 #ifdef JPH_DEBUG_RENDERER
-	// Write the debug output to a file to be able to replay it with JoltViewer
+	// Write the debug output to a file to be able to replay it with the upstream JoltViewer
 	void				RecordDebugOutput(const char *inFileName);
 #endif // JPH_DEBUG_RENDERER
 

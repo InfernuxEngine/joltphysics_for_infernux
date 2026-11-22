@@ -1007,7 +1007,6 @@ WARN_LOGFILE           =
 
 INPUT                  = ./Jolt \
                          ./Docs/Architecture.md \
-                         ./Docs/Samples.md \
                          ./Docs/PerformanceTest.md \
                          ./Docs/ReleaseNotes.md \
                          ./Docs/APIChanges.md \

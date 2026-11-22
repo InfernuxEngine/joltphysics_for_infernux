@@ -31,8 +31,6 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
       run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_CLANG_VERSION}} -DDOUBLE_PRECISION=${{matrix.double_precision}}
@@ -53,11 +51,9 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
-      run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_CLANG_VERSION}} -DTARGET_VIEWER=OFF -DTARGET_SAMPLES=OFF -DTARGET_HELLO_WORLD=OFF -DTARGET_UNIT_TESTS=ON -DTARGET_PERFORMANCE_TEST=ON
+      run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_CLANG_VERSION}} -DTARGET_HELLO_WORLD=OFF -DTARGET_UNIT_TESTS=ON -DTARGET_PERFORMANCE_TEST=ON
     - name: Build
       run: cmake --build ${{github.workspace}}/Build/Linux_${{matrix.build_type}} -j $(nproc)
     - name: Unit Tests
@@ -81,8 +77,6 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
       run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_CLANG_VERSION}} -DBUILD_SHARED_LIBS=YES
@@ -128,8 +122,6 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
       run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_CLANG_VERSION}} -DDOUBLE_PRECISION=${{matrix.double_precision}} -DUSE_STD_VECTOR=ON
@@ -150,8 +142,6 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
       run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_GCC_VERSION}}
@@ -172,8 +162,6 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/ubuntu24_install_vulkan_sdk.sh
     - name: Configure CMake
       working-directory: ${{github.workspace}}/Build
       run: ./cmake_linux_clang_gcc.sh ${{matrix.build_type}} ${{env.UBUNTU_GCC_VERSION}} -DBUILD_SHARED_LIBS=Yes
@@ -347,8 +335,6 @@ jobs:
   macos:
     runs-on: macos-latest
     name: macOS
-    env:
-        VULKAN_SDK_INSTALL: ${{github.workspace}}/vulkan_sdk
     strategy:
         fail-fast: false
         matrix:
@@ -357,18 +343,14 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v7
-    - name: Install Vulkan
-      run: ${{github.workspace}}/Build/macos_install_vulkan_sdk.sh ${VULKAN_SDK_INSTALL}
     - name: Configure CMake
       run: |
-        source ${VULKAN_SDK_INSTALL}/setup-env.sh
         cmake -B ${{github.workspace}}/Build/MacOS_${{matrix.build_type}} -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DCMAKE_CXX_COMPILER=clang++ Build
     - name: Build
       run: cmake --build ${{github.workspace}}/Build/MacOS_${{matrix.build_type}} -j $(sysctl -n hw.ncpu)
     - name: Test
       working-directory: ${{github.workspace}}/Build/MacOS_${{matrix.build_type}}
       run: |
-        source ${VULKAN_SDK_INSTALL}/setup-env.sh
         ctest --output-on-failure --verbose
 
   android:

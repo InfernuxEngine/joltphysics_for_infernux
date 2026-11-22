@@ -183,7 +183,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
 	JPH_ASSERT(mSplitIslands == nullptr);
 }
 
-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const uint8 *inUnsplitIslands)
+void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -192,9 +192,6 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 i
 	JPH_ASSERT(mContactAndConstraintsSize == 0);
 	for (uint32 island = 0; island < inIslandBuilder.GetNumIslands(); ++island)
 	{
-		if (inUnsplitIslands != nullptr && inUnsplitIslands[island])
-			continue;
-
 		// Get the contacts in this island
 		uint32 *contacts_start, *contacts_end;
 		inIslandBuilder.GetContactsInIsland(island, contacts_start, contacts_end);

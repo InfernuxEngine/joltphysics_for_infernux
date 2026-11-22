@@ -64,16 +64,6 @@ There are a number of user configurable C++ defines that turn on/off certain fea
 	</ul>
 </details>
 
-<details>
-	<summary>Compute backends. Used to perform computations on the GPU.</summary>
-	<ul>
-		<li>JPH_USE_CPU_COMPUTE - Implement the CPU fallback version of ComputeSystem (mainly for debugging purposes).</li>
-		<li>JPH_USE_DX12 - Implement the DX12 version of ComputeSystem.</li>
-		<li>JPH_USE_MTL - Implement the Metal version of ComputeSystem.</li>
-		<li>JPH_USE_VK - Implement the Vulkan version of ComputeSystem.</li>
-	</ul>
-</details>
-
 ## Logging & Asserting
 
 To override the default trace and assert mechanism install your own custom handlers in Trace and AssertFailed (see IssueReporting.h).
@@ -94,7 +84,7 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 				<li>Download CMake 3.20+ (https://cmake.org/download/)</li>
 				<li>Run cmake_vs2026_cl.bat</li>
 				<li>Open the resulting project file VS2026_CL\JoltPhysics.sln</li>
-				<li>Compile and run either 'Samples' or 'UnitTests'</li>
+				<li>Compile and run 'UnitTests'</li>
 			</ul>
 		</details>
 		<details>
@@ -104,7 +94,7 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 				<li>Download CMake 3.20+ (https://cmake.org/download/)</li>
 				<li>Run cmake_vs2026_cl_32bit.bat</li>
 				<li>Open the resulting project file VS2026_CL_32BIT\JoltPhysics.sln</li>
-				<li>Compile and run either 'Samples' or 'UnitTests'</li>
+				<li>Compile and run 'UnitTests'</li>
 			</ul>
 		</details>
 		<details>
@@ -115,7 +105,7 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 				<li>Download CMake 3.20+ (https://cmake.org/download/)</li>
 				<li>Run cmake_vs2026_clang.bat</li>
 				<li>Open the resulting project file VS2026_Clang\JoltPhysics.sln</li>
-				<li>Compile and run either 'Samples' or 'UnitTests'</li>
+				<li>Compile and run 'UnitTests'</li>
 			</ul>
 		</details>
 		<details>
@@ -139,11 +129,9 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 			<ul>
 				<li>Install clang (apt-get install clang)</li>
 				<li>Install cmake (apt-get install cmake)</li>
-				<li>If you want to build the Samples, JoltViewer or use the ComputeSystem, install the <a href="https://vulkan.lunarg.com/doc/view/latest/linux/getting_started_ubuntu.html">Vulkan SDK</a></li>
 				<li>Run: ./cmake_linux_clang_gcc.sh</li>
 				<li>Go to the Linux_Debug folder</li>
 				<li>Run: make -j$(nproc) && ./UnitTests</li>
-				<li>If you built the samples you can run: ./Samples</li>
 			</ul>
 		</details>
 		<details>
@@ -152,11 +140,9 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 				<li>Install clang (apt-get install clang)</li>
 				<li>Install cmake (apt-get install cmake)</li>
 				<li>Install ninja (apt-get install ninja-build)</li>
-				<li>If you want to build the Samples, JoltViewer or use the ComputeSystem, install the <a href="https://vulkan.lunarg.com/doc/view/latest/linux/getting_started_ubuntu.html">Vulkan SDK</a></li>
 				<li>Run: ./cmake_ninja.sh</li>
 				<li>Go to the Ninja_MultiConfig folder</li>
 				<li>Run: cmake --build . --config Debug && ./UnitTests</li>
-				<li>If you built the samples you can run: ./Debug/Samples</li>
 			</ul>
 		</details>
 	</li></ul>
@@ -176,7 +162,6 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 	<summary>macOS</summary>
 	<ul>
 		<li>Install XCode</li>
-		<li>Install the Vulkan SDK or the dxc and spirv-cross tools (required to cross compile hlsl shaders to Metal)</li>
 		<li>Download CMake 3.23+ (https://cmake.org/download/)</li>
 		<li>Run: ./cmake_xcode_macos.sh</li>
 		<li>This will open XCode with a newly generated project</li>
@@ -189,7 +174,6 @@ To implement your custom memory allocator override Allocate, Free, Reallocate, A
 	<summary>iOS</summary>
 	<ul>
 		<li>Install XCode</li>
-		<li>Install the Vulkan SDK or the dxc and spirv-cross tools (required to cross compile hlsl shaders to Metal)</li>
 		<li>Download CMake 3.23+ (https://cmake.org/download/)</li>
 		<li>Run: ./cmake_xcode.ios.sh</li>
 		<li>This will open XCode with a newly generated project</li>
@@ -248,12 +232,6 @@ error: undefined symbol: typeinfo for JPH::DebugRenderer
 ```
 
 you have a mismatch between RTTI settings (MSVC: `/GR`/`/GR-`, clang: `-frtti`/`-fno-rtti`). Jolt by default compiles without RTTI and if your project compiles with RTTI you can get this error. Either turn RTTI off for your project or turn it on for Jolt using the CPP_RTTI_ENABLED cmake option.
-
-### DirectX Error
-
-The samples use DirectX for the graphics implementation, when attempting to run the samples you may get a DirectX error pop-up which may say "The GPU device instance has been suspended", in your debugger you may see the message "Using the Redistributable D3D12 SDKLayers dll also requires that the latest SDKLayers for Windows 10 is installed.".
-
-Fix this by enabling "Graphics Tools" which is an optional Windows settings. To enable it you have to press the windows key, search for "Manage Optional Features", and then click "Add a Feature", and install "Graphics Tools".
 
 ### Illegal Instruction Error
 
